@@ -42,6 +42,8 @@ static NSString *Trim(NSString *value) {
     return [value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
 }
 
+static NSString *StringOrFallback(NSString *value, NSString *fallback) { return value != nil ? value : fallback; }
+
 static BOOL ParseUnsignedInteger(NSString *text, NSUInteger minimum, NSUInteger maximum, NSUInteger *result) {
     if (text.length == 0) {
         return NO;
@@ -114,7 +116,7 @@ static NSData *ReadPrivateFile(NSString *path, NSString *label, NSUInteger maxim
 
 static BOOL LoadConfiguration(NSError **error) {
     NSDictionary<NSString *, NSString *> *environment = NSProcessInfo.processInfo.environment;
-    NSString *portText = environment[@"IMESSAGE_BRIDGE_PORT"] ?: @"8765";
+    NSString *portText = StringOrFallback(environment[@"IMESSAGE_BRIDGE_PORT"], @"8765");
     NSUInteger portValue = 0;
     if (!ParseUnsignedInteger(portText, 1, 65535, &portValue)) {
         *error = BridgeError(500, @"IMESSAGE_BRIDGE_PORT must be 1-65535");
@@ -131,7 +133,8 @@ static BOOL LoadConfiguration(NSError **error) {
     if (tokenData == nil) {
         return NO;
     }
-    NSString *tokenText = [[NSString alloc] initWithData:tokenData encoding:NSUTF8StringEncoding] ?: @"";
+    NSString *tokenText =
+        StringOrFallback([[NSString alloc] initWithData:tokenData encoding:NSUTF8StringEncoding], @"");
     bridgeToken = tokenText.length == 65 && [tokenText hasSuffix:@"\n"] ? [tokenText substringToIndex:64] : tokenText;
     NSCharacterSet *nonHex = [[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet];
     if (bridgeToken.length != 64 || [bridgeToken rangeOfCharacterFromSet:nonHex].location != NSNotFound) {
@@ -178,13 +181,13 @@ static BOOL LoadConfiguration(NSError **error) {
     }
     allowedTargets = [targets copy];
 
-    imsgPath = environment[@"IMSG_BIN"] ?: @"/opt/homebrew/bin/imsg";
+    imsgPath = StringOrFallback(environment[@"IMSG_BIN"], @"/opt/homebrew/bin/imsg");
     if (![NSFileManager.defaultManager isExecutableFileAtPath:imsgPath]) {
         *error = BridgeError(500, @"imsg is not executable at configured path");
         return NO;
     }
 
-    NSString *timeoutText = environment[@"IMESSAGE_RPC_TIMEOUT_SECONDS"] ?: @"30";
+    NSString *timeoutText = StringOrFallback(environment[@"IMESSAGE_RPC_TIMEOUT_SECONDS"], @"30");
     NSUInteger timeoutValue = 0;
     if (!ParseUnsignedInteger(timeoutText, 1, 120, &timeoutValue)) {
         *error = BridgeError(500, @"IMESSAGE_RPC_TIMEOUT_SECONDS must be 1-120");
@@ -192,7 +195,7 @@ static BOOL LoadConfiguration(NSError **error) {
     }
     rpcTimeout = (NSTimeInterval)timeoutValue;
 
-    NSString *socketTimeoutText = environment[@"STELLA_BRIDGE_SOCKET_TIMEOUT_SECONDS"] ?: @"10";
+    NSString *socketTimeoutText = StringOrFallback(environment[@"STELLA_BRIDGE_SOCKET_TIMEOUT_SECONDS"], @"10");
     NSUInteger socketTimeoutValue = 0;
     if (!ParseUnsignedInteger(socketTimeoutText, 1, 60, &socketTimeoutValue)) {
         *error = BridgeError(500, @"STELLA_BRIDGE_SOCKET_TIMEOUT_SECONDS must be 1-60");
@@ -200,7 +203,7 @@ static BOOL LoadConfiguration(NSError **error) {
     }
     socketTimeout = (NSTimeInterval)socketTimeoutValue;
 
-    NSString *concurrencyText = environment[@"STELLA_BRIDGE_MAX_CONCURRENCY"] ?: @"8";
+    NSString *concurrencyText = StringOrFallback(environment[@"STELLA_BRIDGE_MAX_CONCURRENCY"], @"8");
     if (!ParseUnsignedInteger(concurrencyText, 1, 64, &maxConcurrentRequests)) {
         *error = BridgeError(500, @"STELLA_BRIDGE_MAX_CONCURRENCY must be 1-64");
         return NO;
@@ -213,7 +216,7 @@ static BOOL ConstantTimeEqual(NSString *left, NSString *right) {
     NSData *b = [right dataUsingEncoding:NSUTF8StringEncoding];
     const uint8_t *aBytes = a.bytes;
     const uint8_t *bBytes = b.bytes;
-    NSUInteger count = MAX(a.length, b.length);
+    NSUInteger count = a.length > b.length ? a.length : b.length;
     NSUInteger difference = a.length ^ b.length;
     for (NSUInteger index = 0; index < count; index++) {
         uint8_t x = index < a.length ? aBytes[index] : 0;
@@ -559,7 +562,7 @@ static NSData *ReadPipeLimited(NSFileHandle *handle, NSUInteger limit, BOOL *exc
                 NSUInteger capacity = limit + 1;
                 if (collected.length < capacity) {
                     NSUInteger remaining = capacity - collected.length;
-                    NSUInteger accepted = MIN(remaining, chunk.length);
+                    NSUInteger accepted = remaining < chunk.length ? remaining : chunk.length;
                     [collected appendBytes:chunk.bytes length:accepted];
                 }
                 if (collected.length > limit || chunk.length > limit) {
@@ -696,7 +699,8 @@ static NSData *RunRPC(NSData *request, NSError **error) {
         return nil;
     }
 
-    NSString *outputText = [[NSString alloc] initWithData:stdoutData encoding:NSUTF8StringEncoding] ?: @"";
+    NSString *outputText =
+        StringOrFallback([[NSString alloc] initWithData:stdoutData encoding:NSUTF8StringEncoding], @"");
     for (NSString *line in [outputText componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
         NSData *candidate = [line dataUsingEncoding:NSUTF8StringEncoding];
         if (candidate.length > 0 && ValidRPCResponse(candidate, expectedID)) {
@@ -812,7 +816,7 @@ static NSDictionary *ReadRequest(int clientFD, NSError **error) {
         *error = BridgeError(401, @"unauthorized");
         return nil;
     }
-    NSString *lengthText = headers[@"content-length"] ?: @"0";
+    NSString *lengthText = StringOrFallback(headers[@"content-length"], @"0");
     NSCharacterSet *nonDigits = [[NSCharacterSet characterSetWithCharactersInString:@"0123456789"] invertedSet];
     if (lengthText.length == 0 || [lengthText rangeOfCharacterFromSet:nonDigits].location != NSNotFound) {
         *error = BridgeError(400, @"invalid Content-Length");
@@ -829,7 +833,9 @@ static NSDictionary *ReadRequest(int clientFD, NSError **error) {
     NSUInteger required = bodyStart + contentLength;
     while (received.length < required) {
         uint8_t buffer[4096];
-        ssize_t count = recv(clientFD, buffer, MIN(sizeof(buffer), required - received.length), 0);
+        NSUInteger remaining = required - received.length;
+        size_t readLength = sizeof(buffer) < remaining ? sizeof(buffer) : (size_t)remaining;
+        ssize_t count = recv(clientFD, buffer, readLength, 0);
         if (count <= 0) {
             *error = BridgeError(errno == EAGAIN || errno == EWOULDBLOCK ? 408 : 400,
                                  errno == EAGAIN || errno == EWOULDBLOCK ? @"request timed out"
@@ -853,7 +859,8 @@ static NSDictionary *ReadRequest(int clientFD, NSError **error) {
 }
 
 static NSData *JSONData(NSDictionary *object) {
-    return [NSJSONSerialization dataWithJSONObject:object options:NSJSONWritingSortedKeys error:nil] ?: [NSData data];
+    NSData *encoded = [NSJSONSerialization dataWithJSONObject:object options:NSJSONWritingSortedKeys error:nil];
+    return encoded != nil ? encoded : [NSData data];
 }
 
 static NSDictionary *RouteRequest(NSDictionary *request, NSError **error) {
@@ -900,7 +907,7 @@ static NSDictionary *RouteRequest(NSDictionary *request, NSError **error) {
         NSString *rpcMethod = nil;
         NSData *sanitized = ValidateAndSanitizeRPC(request[@"body"], &rpcMethod, error);
         if (sanitized == nil) {
-            Audit(caller, rpcMethod ?: @"rejected", (*error).code, started);
+            Audit(caller, StringOrFallback(rpcMethod, @"rejected"), (*error).code, started);
             return nil;
         }
         NSData *response = RunRPC(sanitized, error);
@@ -921,7 +928,7 @@ static NSDictionary *RouteRequest(NSDictionary *request, NSError **error) {
         NSString *auditMethod = nil;
         NSData *sanitized = BuildSipgateSendRPC(request[@"body"], &auditMethod, error);
         if (sanitized == nil) {
-            Audit(caller, auditMethod ?: @"sipgate.sms.rejected", (*error).code, started);
+            Audit(caller, StringOrFallback(auditMethod, @"sipgate.sms.rejected"), (*error).code, started);
             return nil;
         }
         NSData *response = RunRPC(sanitized, error);
@@ -1010,8 +1017,9 @@ static void HandleClient(int clientFD) {
         NSDictionary *response = request == nil ? nil : RouteRequest(request, &error);
         if (response == nil) {
             NSInteger status = error.code >= 400 && error.code <= 599 ? error.code : 500;
-            WriteResponse(clientFD, status,
-                          JSONData(@{@"error": error.localizedDescription ?: @"internal bridge error"}));
+            WriteResponse(
+                clientFD, status,
+                JSONData(@{@"error": StringOrFallback(error.localizedDescription, @"internal bridge error")}));
         } else {
             WriteResponse(clientFD, [response[@"status"] integerValue], response[@"body"]);
         }
