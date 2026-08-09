@@ -1,10 +1,10 @@
 # Architecture
 
-This document explains Stella's components, trust boundaries, and design invariants. It describes version 0.1.1; Alpha interfaces may change.
+This document explains iMessage Proxy's components, trust boundaries, and design invariants. It describes version 0.2.0; Alpha interfaces may change.
 
 ## Design goals
 
-Stella exists to make a small subset of Messages functionality available to explicit automation clients without turning a Mac into a general-purpose remote-control server.
+iMessage Proxy exists to make a small subset of Messages functionality available to explicit automation clients without turning a Mac into a general-purpose remote-control server.
 
 The design optimizes for:
 
@@ -31,7 +31,7 @@ flowchart LR
     end
 
     subgraph mac["macOS user session"]
-        bridge["Stella native bridge"]
+        bridge["iMessage Proxy native bridge"]
         imsg["imsg rpc"]
         db[("Messages chat database")]
         app["Messages.app"]
@@ -50,16 +50,16 @@ The native bridge listens only on `127.0.0.1`. Apple Container's explicit host r
 
 | Component | Responsibility | Deliberate limitation |
 | --- | --- | --- |
-| `src/stella-bridge.m` | Parse HTTP, authenticate the facade, validate/sanitize JSON, enforce API and target policy, invoke `imsg rpc`, and emit minimal audit events | Loopback-only; no TLS, client credential store, or general RPC passthrough |
+| `src/imessage-proxy-bridge.m` | Parse HTTP, authenticate the facade, validate/sanitize JSON, enforce API and target policy, invoke `imsg rpc`, and emit minimal audit events | Loopback-only; no TLS, client credential store, or general RPC passthrough |
 | `imsg` | Use supported macOS capabilities to read Messages data and send through Messages.app | Executed as a child process for one sanitized request at a time |
 | LaunchAgent | Run the bridge in the signed-in Messages user's GUI session | Never installed as root or as a system daemon |
 | `config/Caddyfile` | Terminate TLS, authenticate individual clients, reject non-private sources, cap bodies, and proxy three routes | No anonymous route, broad reverse proxy, or public certificate automation |
 | Apple Container | Isolate and resource-bound the Caddy facade | Cannot replace the macOS-side bridge or access TCC-protected host data directly |
-| `bin/stella` | Build, prepare, inspect, and operate the host and facade | No delete, reset, prune, or silent security-control bypass |
+| `bin/imessage-proxy` | Build, prepare, inspect, and operate the host and facade | No delete, reset, prune, or silent security-control bypass |
 
 ## Request lifecycle
 
-1. A client establishes TLS using Stella's private Caddy CA and sends its own Basic Auth credential.
+1. A client establishes TLS using iMessage Proxy's private Caddy CA and sends its own Basic Auth credential.
 2. Caddy checks that the source is in a private address range, authenticates the client, limits the body, and matches an exact route and method.
 3. Caddy removes the client's Authorization header. It adds the bridge bearer token and a sanitized caller identity derived from the authenticated username.
 4. The bridge accepts the request only on loopback, performs a constant-time token comparison, and applies strict HTTP and JSON limits.
@@ -85,7 +85,7 @@ The bridge and `imsg` run with the permissions of the signed-in macOS user. This
 
 ### Repository to runtime state
 
-The checkout contains source and public templates only. Runtime credentials, caller hashes, generated environment, Caddy CA material, binaries, logs, and generated LaunchAgent files live below the configured Stella home (by default `~/Library/Application Support/Stella`) with restrictive permissions.
+The checkout contains source and public templates only. Runtime credentials, caller hashes, generated environment, Caddy CA material, binaries, logs, and generated LaunchAgent files live below the configured runtime home. Version 0.2.0 retains the existing default `~/Library/Application Support/Stella` with restrictive permissions.
 
 ## State model
 
@@ -108,7 +108,13 @@ The default runtime layout is:
     └── logs/
 ```
 
-`STELLA_HOME` can relocate the root. It must point to a user-owned private directory; it should not be a shared checkout, synchronized folder, or world-readable backup target. `prepare` creates private directories and mode-0600 secret files. The active LaunchAgent plist is installed separately under `~/Library/LaunchAgents/`.
+`IMESSAGE_PROXY_HOME` can relocate the root. It must point to a user-owned private directory; it should not be a shared checkout, synchronized folder, or world-readable backup target. `prepare` creates private directories and mode-0600 secret files. The active LaunchAgent plist is installed separately under `~/Library/LaunchAgents/`.
+
+### Rename transition
+
+The repository source and public build artifact use `imessage-proxy-bridge`, but `build-host` installs `stella-bridge` below the runtime home. Version 0.2.0 also retains the LaunchAgent label `io.github.mglaeser.stella.bridge`, container `stella`, host route `stella-host.container.internal`, and legacy signing/runtime identities. This is intentional: changing those identities could invalidate TCC approval, rotate Caddy trust state, or orphan a running deployment.
+
+The canonical operator interface is `bin/imessage-proxy` with `IMESSAGE_PROXY_*` variables. The deprecated `bin/stella` shim and `STELLA_*` aliases remain for this transition release. Canonical and legacy values may be used separately, but conflicting definitions fail closed. No state, LaunchAgent, container, route, certificate, or TCC identity is migrated automatically.
 
 ## Security invariants
 
@@ -119,7 +125,7 @@ A change is architecture-compatible only if it preserves all of these properties
 3. Sending is denied unless exactly one target is selected and that target is allowed.
 4. Unsupported RPC methods and parameters are rejected before `imsg` starts.
 5. Attachment reads, reactions, and conversion remain disabled.
-6. Sends use the ordinary AppleScript transport; Stella never asks operators to disable SIP or TCC.
+6. Sends use the ordinary AppleScript transport; iMessage Proxy never asks operators to disable SIP or TCC.
 7. Request, response, execution-time, socket-time, and concurrency limits remain bounded.
 8. Logs omit message content, recipient, raw token, and client password.
 9. Runtime secrets never enter the repository.
@@ -129,7 +135,7 @@ Changes to an invariant require an explicit security proposal, threat-model upda
 
 ## Dependency boundaries
 
-Stella intentionally delegates TLS and client password verification to Caddy, and Messages integration to `imsg`. Caddy must come from the official image and be pinned to a reviewed immutable digest. `imsg` must be installed through a trusted channel and its API compatibility revalidated on updates.
+iMessage Proxy intentionally delegates TLS and client password verification to Caddy, and Messages integration to `imsg`. Caddy must come from the official image and be pinned to a reviewed immutable digest. `imsg` must be installed through a trusted channel and its API compatibility revalidated on updates.
 
 Apple Container is an isolation and delivery boundary, not a substitute for authorization. Messages.app, TCC, the local account, private DNS, VPN/LAN policy, host firewall, and physical host security remain part of the deployment's trusted computing base.
 

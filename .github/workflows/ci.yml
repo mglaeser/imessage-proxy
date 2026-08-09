@@ -80,13 +80,14 @@ jobs:
       - name: Verify version consistency
         run: |
           expected="$(< VERSION)"
-          test "$(build/stella-bridge version)" = "$expected"
+          test "$(build/imessage-proxy-bridge version)" = "$expected"
+          test "$(bin/imessage-proxy version)" = "$expected"
           test "$(bin/stella version)" = "$expected"
       - name: Upload unsigned CI bridge
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: unsigned-stella-bridge-${{ runner.arch }}
-          path: build/stella-bridge
+          name: unsigned-imessage-proxy-bridge-${{ runner.arch }}
+          path: build/imessage-proxy-bridge
           if-no-files-found: error
           retention-days: 7
 
@@ -105,17 +106,22 @@ jobs:
           persist-credentials: false
       - name: Check executable modes
         run: |
+          test -x bin/imessage-proxy
           test -x bin/stella
-          test -x tests/test-stella-bridge.sh
-          test -x tests/test-stella-cli.sh
+          test -x tests/test-imessage-proxy-bridge.sh
+          test -x tests/test-imessage-proxy-cli.sh
       - name: Stage install and uninstall
         run: |
           stage="$(mktemp -d)"
           make install STRICT=1 DESTDIR="$stage" PREFIX=/usr/local
+          test "$("$stage/usr/local/bin/imessage-proxy" version)" = "$(< VERSION)"
           test "$("$stage/usr/local/bin/stella" version)" = "$(< VERSION)"
-          test -f "$stage/usr/local/share/stella/VERSION"
-          test -f "$stage/usr/local/share/stella/src/stella-bridge.m"
-          test -f "$stage/usr/local/share/stella/config/Caddyfile"
+          test -f "$stage/usr/local/share/imessage-proxy/VERSION"
+          test -f "$stage/usr/local/share/imessage-proxy/src/imessage-proxy-bridge.m"
+          test -f "$stage/usr/local/share/imessage-proxy/config/Caddyfile"
+          test -f "$stage/usr/local/share/imessage-proxy/config/io.github.mglaeser.stella.plist.in"
+          test -f "$stage/usr/local/share/imessage-proxy/config/imessage-proxy.env.example"
           make uninstall DESTDIR="$stage" PREFIX=/usr/local
+          test ! -e "$stage/usr/local/bin/imessage-proxy"
           test ! -e "$stage/usr/local/bin/stella"
-          test ! -e "$stage/usr/local/share/stella"
+          test ! -e "$stage/usr/local/share/imessage-proxy"

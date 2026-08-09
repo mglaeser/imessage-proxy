@@ -1,27 +1,29 @@
 # Troubleshooting
 
-Diagnose Stella from the outside in: client TLS/authentication, Caddy facade, Apple Container host route, loopback bridge, `imsg`, then macOS privacy permissions. Changing several layers at once makes security failures harder to understand.
+Diagnose iMessage Proxy from the outside in: client TLS/authentication, Caddy facade, Apple Container host route, loopback bridge, `imsg`, then macOS privacy permissions. Changing several layers at once makes security failures harder to understand.
 
 ## First response
 
 If a failure could send unintended messages, expose data, or indicate compromised credentials, stop the facade first:
 
 ```bash
-bin/stella stop
+bin/imessage-proxy stop
 ```
 
 For ordinary failures, source the same private operator configuration used during installation and run:
 
 ```bash
 set -a
-. "$HOME/.config/stella/stella.env"
+. "$HOME/.config/imessage-proxy/imessage-proxy.env"
 set +a
-bin/stella doctor
-bin/stella status
-bin/stella agent-status
+bin/imessage-proxy doctor
+bin/imessage-proxy status
+bin/imessage-proxy agent-status
 ```
 
-Record Stella, macOS, Apple Container, Caddy, and `imsg` versions. Sanitize all output before sharing it.
+Record iMessage Proxy, macOS, Apple Container, Caddy, and `imsg` versions. Sanitize all output before sharing it.
+
+Version 0.2.0 intentionally retains the runtime home `~/Library/Application Support/Stella`, runtime binary and LaunchAgent identity `stella-bridge` / `io.github.mglaeser.stella.bridge`, container `stella`, and route `stella-host.container.internal`. Seeing those names is not by itself stale state. The deprecated `bin/stella` and `STELLA_*` forms are compatibility interfaces; use `bin/imessage-proxy` and `IMESSAGE_PROXY_*` for new diagnostics. See the [operations transition note](operations.md#rename-transition-in-020) before changing any runtime identity.
 
 ## Symptom map
 
@@ -45,7 +47,7 @@ Record Stella, macOS, Apple Container, Caddy, and `imsg` versions. Sanitize all 
 
 ### Xcode toolchain not found
 
-`make build` and `bin/stella build-host` require macOS and Xcode Command Line Tools.
+`make build` and `bin/imessage-proxy build-host` require macOS and Xcode Command Line Tools.
 
 ```bash
 xcode-select -p
@@ -70,13 +72,13 @@ The complete check requires `clang-format`, `shellcheck`, and `markdownlint-cli2
 
 ## Preparation and configuration
 
-### `STELLA_API_HOST must be a private DNS name`
+### `IMESSAGE_PROXY_API_HOST must be a private DNS name`
 
 Source the operator environment in the current shell and replace example placeholders. Use a hostname made of letters, numbers, dots, and hyphens; do not include a URL scheme, port, path, shell expression, or whitespace.
 
 ### Bind IP is not assigned
 
-`STELLA_BIND_IP` must match an address currently assigned to the intended private interface. Re-check after DHCP, Wi-Fi/Ethernet, or VPN changes. Do not switch to `0.0.0.0`.
+`IMESSAGE_PROXY_BIND_IP` must match an address currently assigned to the intended private interface. Re-check after DHCP, Wi-Fi/Ethernet, or VPN changes. Do not switch to `0.0.0.0`.
 
 ### Caddy image rejected
 
@@ -84,16 +86,16 @@ Use the official Caddy image with an immutable reviewed `sha256:` digest. Floati
 
 ### Private file mode rejected
 
-Stella refuses group/world-readable secrets. Inspect without printing contents:
+iMessage Proxy refuses group/world-readable secrets. Inspect without printing contents:
 
 ```bash
-runtime_root="${STELLA_HOME:-$HOME/Library/Application Support/Stella}"
+runtime_root="${IMESSAGE_PROXY_HOME:-$HOME/Library/Application Support/Stella}"
 stat -f '%Sp %N' "$runtime_root/secrets/bridge.token" \
   "$runtime_root/secrets/allowed-targets.txt" \
   "$runtime_root/secrets/users.caddy"
 ```
 
-Fix ownership first if the files do not belong to the Messages user, then set mode `0600`. Never solve the error by running Stella as root.
+Fix ownership first if the files do not belong to the Messages user, then set mode `0600`. Never solve the error by running iMessage Proxy as root.
 
 ## LaunchAgent and bridge
 
@@ -102,7 +104,7 @@ Fix ownership first if the files do not belong to the Messages user, then set mo
 Use the confirmed reload action after a build or configuration change:
 
 ```bash
-bin/stella agent-reload \
+bin/imessage-proxy agent-reload \
   --confirm 'RELOAD IMESSAGE HOST BRIDGE'
 ```
 
@@ -113,8 +115,8 @@ The confirmation guards a process restart. Do not run a second bridge manually o
 Inspect the LaunchAgent state and a bounded tail of the bridge diagnostic log:
 
 ```bash
-bin/stella agent-status
-runtime_root="${STELLA_HOME:-$HOME/Library/Application Support/Stella}"
+bin/imessage-proxy agent-status
+runtime_root="${IMESSAGE_PROXY_HOME:-$HOME/Library/Application Support/Stella}"
 tail -n 100 "$runtime_root/state/logs/bridge.err.log"
 ```
 
@@ -125,10 +127,10 @@ Common causes are an absent runtime binary, invalid secret path or mode, missing
 The expected listener is `127.0.0.1` on the configured bridge port:
 
 ```bash
-lsof -nP -iTCP:"${STELLA_BRIDGE_PORT:-8765}" -sTCP:LISTEN
+lsof -nP -iTCP:"${IMESSAGE_PROXY_BRIDGE_PORT:-8765}" -sTCP:LISTEN
 ```
 
-If any Stella bridge listener is bound to a non-loopback address, stop it and investigate the binary/source/configuration. Do not operate the facade until the invariant is restored.
+If any iMessage Proxy bridge listener is bound to a non-loopback address, stop it and investigate the binary/source/configuration. Do not operate the facade until the invariant is restored.
 
 ## macOS privacy controls
 
@@ -140,7 +142,7 @@ Health exercises a minimal chat read. Verify:
 2. `imsg` is installed and its version is the reviewed one.
 3. The exact built `stella-bridge` binary has Full Disk Access.
 4. The Messages database is present and readable through normal TCC controls.
-5. `bin/stella check-host` succeeds.
+5. `bin/imessage-proxy check-host` succeeds.
 
 Do not copy the Messages database, run the service as root, disable SIP, or grant broad permissions to unrelated applications.
 
@@ -154,36 +156,36 @@ Rebuilding or moving `stella-bridge` may change how macOS associates TCC permiss
 
 ### Container is missing
 
-`start`, `stop`, and `logs` require a previously created exact container. Run `doctor`, verify the environment and callers, then use `bin/stella create`. Do not create an ad-hoc container with broader mounts or publishes.
+`start`, `stop`, and `logs` require a previously created exact container. Run `doctor`, verify the environment and callers, then use `bin/imessage-proxy create`. Do not create an ad-hoc container with broader mounts or publishes.
 
 ### Container already exists
 
-Use `bin/stella status` to inspect it. Use `start` for a stopped, compatible container. Alpha releases do not automatically reconcile a changed image, environment, publish address, or container definition; see the recreation limitation in [Operations](operations.md).
+Use `bin/imessage-proxy status` to inspect it. Use `start` for a stopped, compatible container. Alpha releases do not automatically reconcile a changed image, environment, publish address, or container definition; see the recreation limitation in [Operations](operations.md).
 
 ### Host route fails after restart
 
 Apple Container host routing may need an explicit refresh after a Mac restart:
 
 ```bash
-bin/stella host-route-refresh \
+bin/imessage-proxy host-route-refresh \
   --confirm 'REFRESH IMESSAGE HOST ROUTE'
-bin/stella start
+bin/imessage-proxy start
 ```
 
 Retest health afterward. Do not expose the native bridge on the LAN as a shortcut.
 
-If Stella reports that the route name resolves to the wrong alias, do not
-continue with `create` or `start`. Inspect `STELLA_BRIDGE_HOST_IP`, then use the
-confirmed refresh action; Stella requires exactly one resolved IPv4 address
+If iMessage Proxy reports that the route name resolves to the wrong alias, do not
+continue with `create` or `start`. Inspect `IMESSAGE_PROXY_BRIDGE_HOST_IP`, then use the
+confirmed refresh action; iMessage Proxy requires exactly one resolved IPv4 address
 matching that configured alias.
 
 ### TLS trust failure
 
 Check that:
 
-- the URL hostname exactly matches `STELLA_API_HOST`;
-- private DNS resolves that name to `STELLA_BIND_IP` from the client;
-- the client uses the root certificate reported by `bin/stella ca-path`;
+- the URL hostname exactly matches `IMESSAGE_PROXY_API_HOST`;
+- private DNS resolves that name to `IMESSAGE_PROXY_BIND_IP` from the client;
+- the client uses the root certificate reported by `bin/imessage-proxy ca-path`;
 - the certificate came from this deployment and its fingerprint was verified;
 - the client's clock is correct.
 
@@ -220,7 +222,7 @@ After editing the list, perform the confirmed LaunchAgent reload. Avoid `*`; it 
 There is no automatic support-bundle command because indiscriminate collection can leak conversations and secrets. Provide only:
 
 - versions and architecture;
-- exact failing Stella command;
+- exact failing iMessage Proxy command;
 - HTTP status and a synthetic request shape;
 - a short, manually reviewed diagnostic excerpt;
 - whether each boundary in the symptom map succeeded.

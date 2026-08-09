@@ -1,4 +1,4 @@
-name-template: "Stella v$RESOLVED_VERSION"
+name-template: "iMessage Proxy v$RESOLVED_VERSION"
 tag-template: "v$RESOLVED_VERSION"
 change-template: "- $TITLE by @$AUTHOR in #$NUMBER"
 no-changes-template: "- No user-facing changes"

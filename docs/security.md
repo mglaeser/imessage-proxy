@@ -1,10 +1,10 @@
 # Security model
 
-Stella provides remote access to highly sensitive data and the ability to send as a signed-in Messages user. Its security model assumes a well-administered Mac and a trusted private network, while still treating each API client as separately revocable.
+iMessage Proxy provides remote access to highly sensitive data and the ability to send as a signed-in Messages user. Its security model assumes a well-administered Mac and a trusted private network, while still treating each API client as separately revocable.
 
 ## Assets
 
-Stella protects:
+iMessage Proxy protects:
 
 - message text, metadata, participants, and chat history;
 - the ability to send through the user's Messages identity;
@@ -26,7 +26,7 @@ The design considers:
 - accidental exposure through configuration, logs, permissive file modes, or an all-interface bind;
 - compromise of the Caddy facade with no direct macOS account access.
 
-Stella does not claim to defend against a fully compromised macOS account, an attacker with root or physical host control, a malicious dependency running as the Messages user, or mutually hostile users sharing the same Mac.
+iMessage Proxy does not claim to defend against a fully compromised macOS account, an attacker with root or physical host control, a malicious dependency running as the Messages user, or mutually hostile users sharing the same Mac.
 
 ## Controls by boundary
 
@@ -46,15 +46,15 @@ No single row is sufficient alone. In particular, private IP filtering is defens
 
 Sending is disabled until an operator adds an exact target to `allowed-targets.txt`. Supported forms are a direct phone/email-style address, `chat_id:NUMBER`, `chat_identifier:VALUE`, or `chat_guid:VALUE`.
 
-The literal `*` permits every target and materially changes the threat model. Avoid it. If a broad automation use case appears to require `*`, reconsider whether Stella is the right boundary and document the exception outside the repository.
+The literal `*` permits every target and materially changes the threat model. Avoid it. If a broad automation use case appears to require `*`, reconsider whether iMessage Proxy is the right boundary and document the exception outside the repository.
 
 Read methods are not restricted by the send-target list. Any authorized API client can potentially read private conversations exposed by the allowlisted read methods. Grant credentials only to clients that may read that data.
 
 ## macOS permissions
 
-Run Stella as the non-root GUI user signed in to Messages. Grant Full Disk Access only to the built `stella-bridge` binary after inspecting its path and signature. Approve Messages Automation only when performing an intentional send test.
+Run iMessage Proxy as the non-root GUI user signed in to Messages. Grant Full Disk Access only to the built `stella-bridge` binary after inspecting its path and signature. Approve Messages Automation only when performing an intentional send test.
 
-Keep System Integrity Protection and TCC enabled. Stella does not require private-framework injection, SIP changes, a root daemon, or broad filesystem permissions for the Caddy container. A request to weaken these protections is a stop condition.
+Keep System Integrity Protection and TCC enabled. iMessage Proxy does not require private-framework injection, SIP changes, a root daemon, or broad filesystem permissions for the Caddy container. A request to weaken these protections is a stop condition.
 
 Rebuilding or relocating the bridge can affect TCC identity. Re-check permissions after an upgrade rather than copying a database or broadly granting terminal applications permanent access.
 
@@ -76,11 +76,11 @@ Publish the facade only on a stable private interface and private DNS name. Do n
 
 VPN access is acceptable only when the VPN authenticates devices/users, preserves an intended private source address, and restricts routing to authorized clients. Host firewall and network segmentation remain recommended even though Caddy authenticates every request.
 
-Apple Container's host-route mechanism is part of the trusted path and can change across host upgrades or restarts. Refresh and retest the exact route using Stella's confirmed operation. Do not replace loopback binding with `0.0.0.0` to work around routing trouble.
+Apple Container's host-route mechanism is part of the trusted path and can change across host upgrades or restarts. Refresh and retest the exact route using iMessage Proxy's confirmed operation. Do not replace loopback binding with `0.0.0.0` to work around routing trouble.
 
 ## Dependencies and supply chain
 
-- Obtain Stella from `https://github.com/mglaeser/stella` and pin deployments to a reviewed tag or full commit.
+- Obtain iMessage Proxy from `https://github.com/mglaeser/imessage-proxy` and pin deployments to a reviewed tag or full commit.
 - Review release notes and diffs before upgrading Alpha software.
 - Build the native bridge from the checked-out source with the local Apple toolchain.
 - Use the official Caddy image pinned to an immutable SHA-256 digest, not a floating tag.
@@ -90,7 +90,7 @@ Apple Container's host-route mechanism is part of the trusted path and can chang
 
 ## Data retention and logging
 
-Stella does not maintain a second message database. Reads come from the existing Messages database through `imsg`, and API responses are not cached by the bridge. Caddy and client software may have their own logging or buffering; configure them not to record Authorization headers or bodies.
+iMessage Proxy does not maintain a second message database. Reads come from the existing Messages database through `imsg`, and API responses are not cached by the bridge. Caddy and client software may have their own logging or buffering; configure them not to record Authorization headers or bodies.
 
 Native audit lines intentionally contain only a sanitized client ID, allowed/rejected method, HTTP status, and duration. Before sharing logs, still review them for usernames, paths, hostnames, and timestamps that may be sensitive.
 
@@ -100,9 +100,9 @@ Native audit lines intentionally contain only a sanitized client ID, allowed/rej
 - Client authorization is coarse: a valid facade client can use every read method and every target allowed globally. There are currently no per-client scopes.
 - The native HTTP implementation is intentionally small and supports a limited subset of HTTP/1.1.
 - Caddy's internal CA requires manual, secure trust distribution and lifecycle planning.
-- The availability and semantics of `imsg` and macOS Messages can change outside Stella's release cycle.
+- The availability and semantics of `imsg` and macOS Messages can change outside iMessage Proxy's release cycle.
 - Private-network filtering relies on the source address seen by Caddy and must be retested when proxies or VPN topology change.
-- Stella does not provide delivery exactly-once semantics. Clients must reconcile ambiguous sends.
+- iMessage Proxy does not provide delivery exactly-once semantics. Clients must reconcile ambiguous sends.
 
 ## Deployment acceptance checklist
 

@@ -4,6 +4,7 @@
 *.h text diff=cpp
 *.plist.in text diff=xml
 *.sh text eol=lf
+bin/imessage-proxy text eol=lf
 bin/stella text eol=lf
 Makefile text eol=lf
 

@@ -1,6 +1,6 @@
 # API reference
 
-Stella 0.1.1 exposes three HTTPS routes through its Caddy facade. The API is Alpha and may change before 1.0.
+iMessage Proxy 0.2.0 exposes three HTTPS routes through its Caddy facade. The API is Alpha and may change before 1.0.
 
 The repository also ships an [OpenAPI 3.1 description](../openapi.yaml) for tooling and client generation. This document defines the method-specific policy details that the compact OpenAPI schema references; changes to either must update both.
 
@@ -35,7 +35,7 @@ Other route/method combinations return `404`.
 ```json
 {
   "status": "ok",
-  "version": "0.1.1"
+  "version": "0.2.0"
 }
 ```
 
@@ -43,7 +43,7 @@ This is a functional readiness check, not merely a process liveness check. It ca
 
 ```bash
 curl \
-  --cacert /secure/path/stella-root.crt \
+  --cacert /secure/path/imessage-proxy-root.crt \
   --user automation-a \
   https://messages.example.internal:9443/healthz
 ```
@@ -90,7 +90,7 @@ Reads a bounded history page for one chat.
 | `participants` | No | Array of at most `32` non-empty strings, each at most `256` characters |
 | `start` | No | Non-empty string, maximum `64` characters |
 | `end` | No | Non-empty string, maximum `64` characters |
-| `attachments` | No | Must be absent or `false`; Stella forces `false` |
+| `attachments` | No | Must be absent or `false`; iMessage Proxy forces `false` |
 
 ```json
 {"jsonrpc":"2.0","id":"history-1","method":"messages.history","params":{"chat_id":42,"limit":50}}
@@ -111,7 +111,7 @@ Reads messages after a Messages database row cursor. This is the recommended pol
 
 ```bash
 curl \
-  --cacert /secure/path/stella-root.crt \
+  --cacert /secure/path/imessage-proxy-root.crt \
   --user automation-a \
   --header 'Content-Type: application/json' \
   --data '{"jsonrpc":"2.0","id":"poll-1","method":"messages.after","params":{"since_rowid":0,"limit":20}}' \
@@ -122,7 +122,7 @@ Persist the returned next cursor after every successful page. A cursor belongs t
 
 ### `send`
 
-Sends text through Messages.app. Stella requires exactly one target selector.
+Sends text through Messages.app. iMessage Proxy requires exactly one target selector.
 
 | Parameter | Required | Constraint |
 | --- | --- | --- |
@@ -147,10 +147,10 @@ A line containing only `*` deliberately disables target restriction. It is not r
 
 ```bash
 curl \
-  --cacert /secure/path/stella-root.crt \
+  --cacert /secure/path/imessage-proxy-root.crt \
   --user automation-a \
   --header 'Content-Type: application/json' \
-  --data '{"jsonrpc":"2.0","id":"send-1","method":"send","params":{"to":"person@example.net","text":"Stella test","service":"imessage"}}' \
+  --data '{"jsonrpc":"2.0","id":"send-1","method":"send","params":{"to":"person@example.net","text":"iMessage Proxy test","service":"imessage"}}' \
   https://messages.example.internal:9443/v1/rpc
 ```
 
@@ -185,14 +185,14 @@ The adapter forces `service: imessage` and the AppleScript transport. Success re
 
 ```bash
 curl \
-  --cacert /secure/path/stella-root.crt \
+  --cacert /secure/path/imessage-proxy-root.crt \
   --user compatibility-a \
   --header 'Content-Type: application/json' \
-  --data '{"smsId":"request-1","recipient":"person@example.net","message":"Stella compatibility test","sendAt":-1}' \
+  --data '{"smsId":"request-1","recipient":"person@example.net","message":"iMessage Proxy compatibility test","sendAt":-1}' \
   https://messages.example.internal:9443/v2/sessions/sms
 ```
 
-Use a new Stella credential even when a client's username resembles an existing token ID. Never reuse a third-party provider password or token.
+Use a new iMessage Proxy credential even when a client's username resembles an existing token ID. Never reuse a third-party provider password or token.
 
 ## Errors
 
@@ -215,7 +215,7 @@ Bridge-generated errors use a small JSON object:
 | `503` | Functional health could not read through `imsg`, or the bridge concurrency limit is full |
 | `504` | `imsg` exceeded the configured RPC timeout |
 
-Caddy can reject a request before it reaches the bridge; its error body is not part of Stella's JSON error contract. Clients should primarily branch on HTTP status and treat bodies as diagnostic text.
+Caddy can reject a request before it reaches the bridge; its error body is not part of iMessage Proxy's JSON error contract. Clients should primarily branch on HTTP status and treat bodies as diagnostic text.
 
 ## Stability
 

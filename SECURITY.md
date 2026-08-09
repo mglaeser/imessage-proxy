@@ -1,10 +1,10 @@
 # Security policy
 
-Stella bridges private Messages data to authenticated network clients. Security reports are treated as a priority.
+iMessage Proxy bridges private Messages data to authenticated network clients. Security reports are treated as a priority.
 
 ## Supported versions
 
-Stella is currently Alpha. Only the latest release on the default branch receives security updates.
+iMessage Proxy is currently Alpha. Only the latest release on the default branch receives security updates.
 
 | Version | Supported |
 | --- | --- |
@@ -16,7 +16,7 @@ Stella is currently Alpha. Only the latest release on the default branch receive
 
 **Do not open a public issue, discussion, or pull request for a suspected vulnerability.**
 
-Use [GitHub's private vulnerability reporting](https://github.com/mglaeser/stella/security/advisories/new). Include, where possible:
+Use [GitHub's private vulnerability reporting](https://github.com/mglaeser/imessage-proxy/security/advisories/new). Include, where possible:
 
 - the affected version or commit;
 - the macOS, Apple Container, Caddy, and `imsg` versions;
@@ -53,9 +53,9 @@ Examples of in-scope issues include:
 - request smuggling, parsing confusion, or size-limit bypasses;
 - command, path, configuration, or LaunchAgent injection;
 - unsafe file permissions or secret persistence;
-- unintended public-network exposure caused by Stella defaults.
+- unintended public-network exposure caused by iMessage Proxy defaults.
 
-Social engineering, denial of service requiring physical host access, vulnerabilities exclusively in unsupported dependencies, and findings that require disabling documented macOS security controls are generally out of scope. Dependency vulnerabilities that change Stella's exposure are still valuable reports.
+Social engineering, denial of service requiring physical host access, vulnerabilities exclusively in unsupported dependencies, and findings that require disabling documented macOS security controls are generally out of scope. Dependency vulnerabilities that change iMessage Proxy's exposure are still valuable reports.
 
 ## Safe-harbor intent
 
@@ -65,7 +65,7 @@ Good-faith research that respects privacy, uses accounts and devices you own or 
 
 If compromise is suspected:
 
-1. Stop the facade with `bin/stella stop`.
+1. Stop the facade with `bin/imessage-proxy stop`.
 2. Preserve sanitized logs and version information.
 3. Rotate every client password and the bridge token.
 4. Review the send-target allowlist and private-network exposure.

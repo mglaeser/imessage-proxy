@@ -1,6 +1,6 @@
 ## Summary
 
-<!-- What problem does this solve, and why does it belong in Stella? -->
+<!-- What problem does this solve, and why does it belong in iMessage Proxy? -->
 
 ## Changes
 
