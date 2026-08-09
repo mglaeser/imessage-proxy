@@ -5,10 +5,12 @@
 #import <errno.h>
 #import <fcntl.h>
 #import <netinet/in.h>
+#import <poll.h>
 #import <signal.h>
 #import <stdlib.h>
 #import <sys/socket.h>
 #import <sys/stat.h>
+#import <time.h>
 #import <unistd.h>
 
 #ifndef STELLA_VERSION
@@ -1010,6 +1012,72 @@ static void WriteResponse(int clientFD, NSInteger status, NSData *body) {
     WriteAll(clientFD, body);
 }
 
+static int64_t MonotonicMilliseconds(void) {
+    struct timespec now = {0};
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return -1;
+    }
+    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+static void RejectOverloadedClient(int clientFD) {
+    WriteResponse(clientFD, 503, JSONData(@{@"error": @"too many concurrent requests"}));
+    (void)shutdown(clientFD, SHUT_WR);
+
+    int flags = fcntl(clientFD, F_GETFL);
+    if (flags < 0 || fcntl(clientFD, F_SETFL, flags | O_NONBLOCK) != 0) {
+        close(clientFD);
+        return;
+    }
+    int64_t started = MonotonicMilliseconds();
+    if (started < 0) {
+        close(clientFD);
+        return;
+    }
+    int64_t deadline = started + 250;
+    NSUInteger drained = 0;
+    uint8_t discarded[4096];
+    while (drained < MaxHeaderBytes + MaxRequestBytes) {
+        NSUInteger remaining = MaxHeaderBytes + MaxRequestBytes - drained;
+        size_t readLength = sizeof(discarded) < remaining ? sizeof(discarded) : (size_t)remaining;
+        ssize_t count = recv(clientFD, discarded, readLength, 0);
+        if (count > 0) {
+            drained += (NSUInteger)count;
+            continue;
+        }
+        if (count == 0) {
+            break;
+        }
+        int receiveError = errno;
+        if (receiveError == EINTR) {
+            continue;
+        }
+        if (receiveError != EAGAIN && receiveError != EWOULDBLOCK) {
+            break;
+        }
+        struct pollfd readable = {
+            .fd = clientFD,
+            .events = POLLIN,
+            .revents = 0,
+        };
+        int ready = -1;
+        while (ready < 0) {
+            int64_t now = MonotonicMilliseconds();
+            if (now < 0 || now >= deadline) {
+                break;
+            }
+            ready = poll(&readable, 1, (int)(deadline - now));
+            if (ready < 0 && errno != EINTR) {
+                break;
+            }
+        }
+        if (ready <= 0) {
+            break;
+        }
+    }
+    close(clientFD);
+}
+
 static void HandleClient(int clientFD) {
     @autoreleasepool {
         NSError *error = nil;
@@ -1075,7 +1143,10 @@ static BOOL RunServer(NSError **error) {
     fprintf(stderr, "stella-bridge %s listening on 127.0.0.1:%u\n", BridgeVersion.UTF8String, bridgePort);
     dispatch_queue_t clients =
         dispatch_queue_create("io.github.mglaeser.stella.bridge.clients", DISPATCH_QUEUE_CONCURRENT);
+    dispatch_queue_t rejections =
+        dispatch_queue_create("io.github.mglaeser.stella.bridge.rejections", DISPATCH_QUEUE_CONCURRENT);
     dispatch_semaphore_t clientSlots = dispatch_semaphore_create((long)maxConcurrentRequests);
+    dispatch_semaphore_t rejectionSlots = dispatch_semaphore_create(1);
     while (YES) {
         int clientFD = accept(serverFD, NULL, NULL);
         if (clientFD < 0) {
@@ -1091,9 +1162,19 @@ static BOOL RunServer(NSError **error) {
             continue;
         }
         if (dispatch_semaphore_wait(clientSlots, DISPATCH_TIME_NOW) != 0) {
-            NSData *body = JSONData(@{@"error": @"too many concurrent requests"});
-            WriteResponse(clientFD, 503, body);
-            close(clientFD);
+            if (dispatch_semaphore_wait(rejectionSlots, DISPATCH_TIME_NOW) != 0) {
+                close(clientFD);
+                continue;
+            }
+            dispatch_async(rejections, ^{
+                @autoreleasepool {
+                    @try {
+                        RejectOverloadedClient(clientFD);
+                    } @finally {
+                        dispatch_semaphore_signal(rejectionSlots);
+                    }
+                }
+            });
             continue;
         }
         dispatch_async(clients, ^{
