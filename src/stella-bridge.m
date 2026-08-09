@@ -66,7 +66,8 @@ static BOOL ParseUnsignedInteger(NSString *text, NSUInteger minimum, NSUInteger 
     return YES;
 }
 
-static NSData *ReadPrivateFile(NSString *path, NSString *label, NSUInteger maximumSize, NSError **error) {
+static NSData *ReadPrivateFile(NSString *path, NSString *label, NSUInteger maximumSize,
+                               NSError *_Nullable *_Nonnull error) {
     int descriptor = open(path.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (descriptor < 0) {
         *error = BridgeError(500, [NSString stringWithFormat:@"cannot open %@ securely", label]);
@@ -116,7 +117,7 @@ static NSData *ReadPrivateFile(NSString *path, NSString *label, NSUInteger maxim
     return data;
 }
 
-static BOOL LoadConfiguration(NSError **error) {
+static BOOL LoadConfiguration(NSError *_Nullable *_Nonnull error) {
     NSDictionary<NSString *, NSString *> *environment = NSProcessInfo.processInfo.environment;
     NSString *portText = StringOrFallback(environment[@"IMESSAGE_BRIDGE_PORT"], @"8765");
     NSUInteger portValue = 0;
@@ -244,7 +245,7 @@ static BOOL IsInteger(id value, BOOL positive, NSInteger *result) {
     return YES;
 }
 
-static BOOL RequireOnly(NSDictionary *params, NSArray<NSString *> *keys, NSError **error) {
+static BOOL RequireOnly(NSDictionary *params, NSArray<NSString *> *keys, NSError *_Nullable *_Nonnull error) {
     NSSet *permitted = [NSSet setWithArray:keys];
     for (NSString *key in params) {
         if (![permitted containsObject:key]) {
@@ -255,7 +256,7 @@ static BOOL RequireOnly(NSDictionary *params, NSArray<NSString *> *keys, NSError
     return YES;
 }
 
-static BOOL ValidateLimit(id value, NSInteger maximum, NSError **error) {
+static BOOL ValidateLimit(id value, NSInteger maximum, NSError *_Nullable *_Nonnull error) {
     if (value == nil) {
         return YES;
     }
@@ -267,7 +268,7 @@ static BOOL ValidateLimit(id value, NSInteger maximum, NSError **error) {
     return YES;
 }
 
-static BOOL RejectTrue(id value, NSString *name, NSError **error) {
+static BOOL RejectTrue(id value, NSString *name, NSError *_Nullable *_Nonnull error) {
     if (value == nil) {
         return YES;
     }
@@ -282,7 +283,7 @@ static BOOL RejectTrue(id value, NSString *name, NSError **error) {
     return YES;
 }
 
-static BOOL ValidateOptionalBoolean(id value, NSString *name, NSError **error) {
+static BOOL ValidateOptionalBoolean(id value, NSString *name, NSError *_Nullable *_Nonnull error) {
     if (value == nil) {
         return YES;
     }
@@ -293,7 +294,7 @@ static BOOL ValidateOptionalBoolean(id value, NSString *name, NSError **error) {
     return YES;
 }
 
-static BOOL ValidateOptionalString(id value, NSString *name, NSUInteger maximum, NSError **error) {
+static BOOL ValidateOptionalString(id value, NSString *name, NSUInteger maximum, NSError *_Nullable *_Nonnull error) {
     if (value == nil) {
         return YES;
     }
@@ -315,7 +316,7 @@ static BOOL ValidJSONRPCID(id value) {
     return NO;
 }
 
-static NSString *SendTarget(NSDictionary *params, NSError **error) {
+static NSString *SendTarget(NSDictionary *params, NSError *_Nullable *_Nonnull error) {
     NSMutableArray<NSString *> *targets = [NSMutableArray array];
     id directValue = params[@"to"];
     if (!ValidateOptionalString(directValue, @"to", 256, error)) {
@@ -357,7 +358,7 @@ static NSString *SendTarget(NSDictionary *params, NSError **error) {
     return targets.firstObject;
 }
 
-static NSData *ValidateAndSanitizeRPC(NSData *data, NSString **methodOut, NSError **error) {
+static NSData *ValidateAndSanitizeRPC(NSData *data, NSString **methodOut, NSError *_Nullable *_Nonnull error) {
     if (data.length == 0 || data.length > MaxRequestBytes) {
         *error = BridgeError(400, @"invalid JSON-RPC request");
         return nil;
@@ -495,7 +496,7 @@ static NSData *ValidateAndSanitizeRPC(NSData *data, NSString **methodOut, NSErro
     return [NSJSONSerialization dataWithJSONObject:object options:NSJSONWritingSortedKeys error:error];
 }
 
-static NSData *BuildSipgateSendRPC(NSData *data, NSString **methodOut, NSError **error) {
+static NSData *BuildSipgateSendRPC(NSData *data, NSString **methodOut, NSError *_Nullable *_Nonnull error) {
     if (data.length == 0 || data.length > MaxRequestBytes) {
         *error = BridgeError(400, @"invalid Sipgate SMS request");
         return nil;
@@ -598,7 +599,7 @@ static void CloseFileHandle(NSFileHandle *handle) {
     }
 }
 
-static NSData *RunRPC(NSData *request, NSError **error) {
+static NSData *RunRPC(NSData *request, NSError *_Nullable *_Nonnull error) {
     NSDictionary *requestObject = [NSJSONSerialization JSONObjectWithData:request options:0 error:nil];
     id expectedID = [requestObject isKindOfClass:NSDictionary.class] ? requestObject[@"id"] : nil;
     if (!ValidJSONRPCID(expectedID)) {
@@ -743,7 +744,7 @@ static void Audit(NSString *caller, NSString *method, NSInteger status, NSDate *
             method.UTF8String, (long)status, (long)milliseconds);
 }
 
-static NSDictionary *ReadRequest(int clientFD, NSError **error) {
+static NSDictionary *ReadRequest(int clientFD, NSError *_Nullable *_Nonnull error) {
     NSMutableData *received = [NSMutableData data];
     NSData *marker = [@"\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding];
     NSRange headerEnd = NSMakeRange(NSNotFound, 0);
@@ -754,10 +755,17 @@ static NSDictionary *ReadRequest(int clientFD, NSError **error) {
         }
         uint8_t buffer[4096];
         ssize_t count = recv(clientFD, buffer, sizeof(buffer), 0);
-        if (count <= 0) {
-            *error =
-                BridgeError(errno == EAGAIN || errno == EWOULDBLOCK ? 408 : 400,
-                            errno == EAGAIN || errno == EWOULDBLOCK ? @"request timed out" : @"incomplete request");
+        if (count < 0) {
+            int receiveError = errno;
+            if (receiveError == EINTR) {
+                continue;
+            }
+            BOOL timedOut = receiveError == EAGAIN || receiveError == EWOULDBLOCK;
+            *error = BridgeError(timedOut ? 408 : 400, timedOut ? @"request timed out" : @"incomplete request");
+            return nil;
+        }
+        if (count == 0) {
+            *error = BridgeError(400, @"incomplete request");
             return nil;
         }
         [received appendBytes:buffer length:(NSUInteger)count];
@@ -838,10 +846,17 @@ static NSDictionary *ReadRequest(int clientFD, NSError **error) {
         NSUInteger remaining = required - received.length;
         size_t readLength = sizeof(buffer) < remaining ? sizeof(buffer) : (size_t)remaining;
         ssize_t count = recv(clientFD, buffer, readLength, 0);
-        if (count <= 0) {
-            *error = BridgeError(errno == EAGAIN || errno == EWOULDBLOCK ? 408 : 400,
-                                 errno == EAGAIN || errno == EWOULDBLOCK ? @"request timed out"
-                                                                         : @"incomplete request body");
+        if (count < 0) {
+            int receiveError = errno;
+            if (receiveError == EINTR) {
+                continue;
+            }
+            BOOL timedOut = receiveError == EAGAIN || receiveError == EWOULDBLOCK;
+            *error = BridgeError(timedOut ? 408 : 400, timedOut ? @"request timed out" : @"incomplete request body");
+            return nil;
+        }
+        if (count == 0) {
+            *error = BridgeError(400, @"incomplete request body");
             return nil;
         }
         [received appendBytes:buffer length:(NSUInteger)count];
@@ -865,7 +880,7 @@ static NSData *JSONData(NSDictionary *object) {
     return encoded != nil ? encoded : [NSData data];
 }
 
-static NSDictionary *RouteRequest(NSDictionary *request, NSError **error) {
+static NSDictionary *RouteRequest(NSDictionary *request, NSError *_Nullable *_Nonnull error) {
     NSDictionary *headers = request[@"headers"];
     NSString *authorization = headers[@"authorization"];
     if (![authorization hasPrefix:@"Bearer "] ||
@@ -1108,7 +1123,7 @@ static BOOL ConfigureClientSocket(int clientFD) {
     return flags >= 0 && fcntl(clientFD, F_SETFD, flags | FD_CLOEXEC) == 0;
 }
 
-static BOOL RunServer(NSError **error) {
+static BOOL RunServer(NSError *_Nullable *_Nonnull error) {
     signal(SIGPIPE, SIG_IGN);
     int serverFD = socket(AF_INET, SOCK_STREAM, 0);
     if (serverFD < 0) {
