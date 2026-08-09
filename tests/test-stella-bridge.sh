@@ -27,6 +27,16 @@ readonly TOKEN
 temporary="$(mktemp -d /tmp/stella-bridge-test.XXXXXX)"
 server_pid=""
 
+report_failure() {
+  local exit_code="$1" line="$2"
+  printf 'ERROR: integration test failed with exit %s at line %s\n' "$exit_code" "$line" >&2
+  if [[ -s "$temporary/server.log" ]]; then
+    printf '%s\n' 'Bridge log:' >&2
+    sed -n '1,200p' "$temporary/server.log" >&2
+  fi
+  return "$exit_code"
+}
+
 cleanup() {
   if [[ -n "$server_pid" ]] && kill -0 "$server_pid" 2>/dev/null; then
     kill "$server_pid"
@@ -42,6 +52,7 @@ cleanup() {
     "$temporary/timeout-b.json"
   rmdir "$temporary"
 }
+trap 'report_failure "$?" "$LINENO"' ERR
 trap cleanup EXIT
 
 xcrun clang \
