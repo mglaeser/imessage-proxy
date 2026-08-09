@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Stella API
-  version: 0.1.0
+  version: 0.1.1
   summary: A narrow, authenticated iMessage proxy for trusted private networks.
   description: >-
     Stella exposes allowlisted read and text-send operations through a private

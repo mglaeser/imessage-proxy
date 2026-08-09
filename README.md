@@ -153,7 +153,7 @@ For production-like automation, store the returned cursor durably and use a dist
 
 ## Project status
 
-The current version is **0.1.0** and the maturity level is **Alpha**. Interfaces, state layout, and operator commands may change before 1.0. Changes are recorded in the [changelog](CHANGELOG.md), and intended milestones live in the [roadmap](ROADMAP.md).
+The current version is **0.1.1** and the maturity level is **Alpha**. Interfaces, state layout, and operator commands may change before 1.0. Changes are recorded in the [changelog](CHANGELOG.md), and intended milestones live in the [roadmap](ROADMAP.md).
 
 ## Community and security
 

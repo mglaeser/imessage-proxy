@@ -107,6 +107,7 @@ jobs:
         run: |
           test -x bin/stella
           test -x tests/test-stella-bridge.sh
+          test -x tests/test-stella-cli.sh
       - name: Stage install and uninstall
         run: |
           stage="$(mktemp -d)"

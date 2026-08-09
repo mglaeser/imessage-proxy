@@ -1,6 +1,6 @@
 # Architecture
 
-This document explains Stella's components, trust boundaries, and design invariants. It describes version 0.1.0; Alpha interfaces may change.
+This document explains Stella's components, trust boundaries, and design invariants. It describes version 0.1.1; Alpha interfaces may change.
 
 ## Design goals
 

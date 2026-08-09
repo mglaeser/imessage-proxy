@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-09
+
+### Fixed
+
+- Reject API facade ports that collide with the native bridge listener.
+- Preserve an existing LaunchAgent plist and refuse unsafe or drifted content instead of overwriting it.
+- Verify that the Apple Container host route resolves only to the configured loopback alias before facade creation or restart.
+
 ## [0.1.0] - 2026-08-09
 
 ### Added
@@ -21,5 +29,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - LaunchAgent and Apple Container lifecycle management.
 - Integration tests using a fake `imsg` RPC backend.
 
-[Unreleased]: https://github.com/mglaeser/stella/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/mglaeser/stella/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/mglaeser/stella/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/mglaeser/stella/releases/tag/v0.1.0

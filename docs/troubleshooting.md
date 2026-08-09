@@ -172,6 +172,11 @@ bin/stella start
 
 Retest health afterward. Do not expose the native bridge on the LAN as a shortcut.
 
+If Stella reports that the route name resolves to the wrong alias, do not
+continue with `create` or `start`. Inspect `STELLA_BRIDGE_HOST_IP`, then use the
+confirmed refresh action; Stella requires exactly one resolved IPv4 address
+matching that configured alias.
+
 ### TLS trust failure
 
 Check that:

@@ -1,6 +1,6 @@
 # Operations
 
-This guide covers a review-first Stella 0.1.0 deployment. Stella is Alpha software: use a harmless test recipient, schedule a maintenance window, and keep a working non-Stella path to the Mac.
+This guide covers a review-first Stella 0.1.1 deployment. Stella is Alpha software: use a harmless test recipient, schedule a maintenance window, and keep a working non-Stella path to the Mac.
 
 ## Operating principles
 
@@ -161,6 +161,11 @@ bin/stella agent-status
 
 The LaunchAgent must run in the Messages user's GUI domain, never as root. On the first intentional send, approve the macOS Automation prompt for Messages.app. If the prompt or read access fails, troubleshoot TCC rather than broadening filesystem permissions.
 
+`agent-install` never overwrites an unexpected plist. It reuses an existing
+target only when it is a private, regular file whose bytes exactly match the
+generated Stella plist; inspect any refusal before using the separately
+confirmed reload workflow.
+
 ## 6. Create the private facade
 
 Create the Apple Container host route:
@@ -170,6 +175,10 @@ bin/stella host-route-create
 ```
 
 This operation may request `sudo` for Apple Container's host-routing change. Review the exact command. Never work around a route failure by changing the bridge listener to a non-loopback address.
+
+Stella verifies that the route's DNS name resolves only to
+`STELLA_BRIDGE_HOST_IP`. An existing name with a different mapping is refused;
+repair it only through the explicit `host-route-refresh` confirmation.
 
 > [!CAUTION]
 > Apple Container's localhost host-routing feature can disable iCloud Private Relay, and its route may need to be recreated after a Mac restart. Confirm the behavior for the installed Apple Container release before enabling it.
@@ -183,7 +192,10 @@ bin/stella create
 bin/stella status
 ```
 
-`create` verifies the configured private address is assigned to the host, checks the caller file, requires the LaunchAgent and host route, and refuses an occupied port or existing Stella container.
+`create` verifies the configured private address is assigned to the host,
+checks the caller file, requires the LaunchAgent and exact route DNS mapping,
+and refuses colliding API/bridge ports, an occupied API port, or an existing
+Stella container.
 
 ## 7. Enroll a client
 
@@ -273,7 +285,7 @@ Test the changed credential and confirm revoked credentials fail. Removing a cal
 
 ### Bridge token rotation
 
-Stella 0.1.0 cannot hot-rotate the bridge token. The token is loaded independently by the LaunchAgent and into immutable container environment at `create` time.
+Stella currently cannot hot-rotate the bridge token. The token is loaded independently by the LaunchAgent and into immutable container environment at `create` time.
 
 For suspected disclosure, keep the facade stopped. Generate a new token into a private temporary file, atomically replace `secrets/bridge.token`, run `prepare`, and perform the confirmed bridge reload. The existing container must then be removed and recreated so it receives the new environment. The manager deliberately has no destructive container-removal action: verify the exact configured container with `bin/stella status` and follow the installed Apple Container version's documentation to remove **only that container**. Never prune all containers or delete Stella's bind-mounted state. Finish with `bin/stella create` and the full acceptance test.
 
@@ -299,7 +311,7 @@ bin/stella stop
 bin/stella start
 ```
 
-In 0.1.0, `prepare` updates bind-mounted configuration but cannot reconcile environment variables or the definition of an already-created container. If the release changes those values, use a planned, exact-container recreation as described for token rotation. This is a current Alpha limitation, not an invitation to use broad cleanup commands.
+During Alpha, `prepare` updates bind-mounted configuration but cannot reconcile environment variables or the definition of an already-created container. If the release changes those values, use a planned, exact-container recreation as described for token rotation. This is a current limitation, not an invitation to use broad cleanup commands.
 
 ## Backup and recovery
 
@@ -324,4 +336,4 @@ Recovery should be reproducible from:
 make PREFIX="$HOME/.local" uninstall
 ```
 
-Removing a running deployment is a separate, destructive operator decision. Inventory the exact LaunchAgent, container, host route, client trust, and runtime directory before acting; Stella 0.1.0 intentionally provides no one-command teardown.
+Removing a running deployment is a separate, destructive operator decision. Inventory the exact LaunchAgent, container, host route, client trust, and runtime directory before acting; Stella intentionally provides no one-command teardown during Alpha.

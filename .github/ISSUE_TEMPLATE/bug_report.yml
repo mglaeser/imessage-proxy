@@ -25,7 +25,7 @@ body:
     attributes:
       label: Stella version
       description: Release tag or commit SHA; run `bin/stella version` when available.
-      placeholder: v0.1.0
+      placeholder: v0.1.1
     validations:
       required: true
   - type: input

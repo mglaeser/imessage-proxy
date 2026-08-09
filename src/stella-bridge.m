@@ -14,7 +14,7 @@
 #import <unistd.h>
 
 #ifndef STELLA_VERSION
-#define STELLA_VERSION "0.1.0"
+#define STELLA_VERSION "0.1.1"
 #endif
 #define STELLA_NSSTRING_IMPL(value) @value
 #define STELLA_NSSTRING(value) STELLA_NSSTRING_IMPL(value)
