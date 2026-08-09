@@ -6,6 +6,9 @@ readonly TEST_DIR
 REPO_DIR="$(cd "$TEST_DIR/.." && pwd -P)"
 readonly REPO_DIR
 readonly FIXTURES="$TEST_DIR/fixtures"
+MACOS_SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
+readonly MACOS_SDK_PATH
+[[ -d "$MACOS_SDK_PATH" ]]
 choose_test_port() {
   local candidate
   for _ in {1..40}; do
@@ -42,6 +45,7 @@ cleanup() {
 trap cleanup EXIT
 
 xcrun clang \
+  -isysroot "$MACOS_SDK_PATH" \
   -fobjc-arc \
   -O2 \
   -Wall \

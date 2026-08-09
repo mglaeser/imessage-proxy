@@ -238,14 +238,17 @@ prepare() {
 }
 
 build_host() {
-  local compiler temporary
+  local compiler macos_sdk_path temporary
   require_macos
   require_sources
   compiler="$(xcrun --find clang 2>/dev/null)" || die "matching macOS Command Line Tools are required"
+  macos_sdk_path="$(xcrun --sdk macosx --show-sdk-path 2>/dev/null)" || die "the macOS SDK is required"
+  [[ -d "$macos_sdk_path" ]] || die "the macOS SDK path is invalid"
   mkdir -p "$BIN_DIR"
   temporary="$(mktemp "$BIN_DIR/stella-bridge.XXXXXX")"
   trap 'rm -f "${temporary:-}"' EXIT
   "$compiler" \
+    -isysroot "$macos_sdk_path" \
     -fobjc-arc \
     -O2 \
     -Wall \

@@ -25,6 +25,7 @@ CONFIG_FILES := \
 	config/stella.env.example
 
 CLANG ?= $(shell xcrun --find clang 2>/dev/null)
+MACOS_SDK_PATH ?= $(shell xcrun --sdk macosx --show-sdk-path 2>/dev/null)
 CPPFLAGS ?=
 CFLAGS ?=
 LDFLAGS ?=
@@ -32,6 +33,7 @@ STRICT ?= $(if $(CI),1,0)
 WARNINGS := -Wall -Wextra -Wpedantic
 WERROR := $(if $(filter 1 true yes,$(STRICT)),-Werror,)
 OBJCFLAGS := -fobjc-arc -fblocks $(WARNINGS) $(WERROR) -DSTELLA_VERSION=\"$(VERSION)\"
+SDKFLAGS := $(if $(MACOS_SDK_PATH),-isysroot "$(MACOS_SDK_PATH)",)
 FRAMEWORKS := -framework Foundation
 
 .PHONY: all analyze build check clean debug help install lint test uninstall version
@@ -43,18 +45,18 @@ build: $(RELEASE_BINARY) ## Build an optimized Stella bridge.
 $(RELEASE_BINARY): $(SOURCE) $(VERSION_FILE) Makefile
 	@$(MAKE) --no-print-directory _require-macos
 	@mkdir -p "$(BUILD_DIR)"
-	"$(CLANG)" $(CPPFLAGS) $(CFLAGS) $(OBJCFLAGS) -O2 $(LDFLAGS) $(FRAMEWORKS) -o "$@" "$<"
+	"$(CLANG)" $(SDKFLAGS) $(CPPFLAGS) $(CFLAGS) $(OBJCFLAGS) -O2 $(LDFLAGS) $(FRAMEWORKS) -o "$@" "$<"
 
 debug: $(DEBUG_BINARY) ## Build a bridge with debug symbols and assertions.
 
 $(DEBUG_BINARY): $(SOURCE) $(VERSION_FILE) Makefile
 	@$(MAKE) --no-print-directory _require-macos
 	@mkdir -p "$(BUILD_DIR)"
-	"$(CLANG)" $(CPPFLAGS) $(CFLAGS) $(OBJCFLAGS) -O0 -g3 -DDEBUG=1 $(LDFLAGS) $(FRAMEWORKS) -o "$@" "$<"
+	"$(CLANG)" $(SDKFLAGS) $(CPPFLAGS) $(CFLAGS) $(OBJCFLAGS) -O0 -g3 -DDEBUG=1 $(LDFLAGS) $(FRAMEWORKS) -o "$@" "$<"
 
 analyze: ## Run Clang's static analyzer.
 	@$(MAKE) --no-print-directory _require-macos
-	"$(CLANG)" --analyze $(CPPFLAGS) $(CFLAGS) $(OBJCFLAGS) -Xanalyzer -analyzer-output=text "$(SOURCE)"
+	"$(CLANG)" --analyze $(SDKFLAGS) $(CPPFLAGS) $(CFLAGS) $(OBJCFLAGS) -Xanalyzer -analyzer-output=text "$(SOURCE)"
 
 test: ## Run the bridge integration test suite (macOS only).
 	@$(MAKE) --no-print-directory _require-macos
@@ -127,3 +129,4 @@ help: ## Show available targets.
 _require-macos:
 	@[[ "$$(uname -s)" == Darwin ]] || { printf 'error: this target requires macOS\n' >&2; exit 1; }
 	@[[ -n "$(CLANG)" && -x "$(CLANG)" ]] || { printf 'error: install the Xcode Command Line Tools\n' >&2; exit 127; }
+	@[[ -n "$(MACOS_SDK_PATH)" && -d "$(MACOS_SDK_PATH)" ]] || { printf 'error: cannot find the macOS SDK\n' >&2; exit 127; }
