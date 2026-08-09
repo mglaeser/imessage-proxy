@@ -12,3 +12,4 @@ globs:
   - "**/*.md"
   - "!.git/**"
   - "!build/**"
+  - "!node_modules/**"

@@ -26,7 +26,7 @@
 
 - [ ] The change is focused and linked to an issue or explains why no issue is needed.
 - [ ] New behavior has positive and negative tests.
-- [ ] User-facing changes are documented and added to `CHANGELOG.md` under `Unreleased`.
+- [ ] User-facing changes are documented in `CHANGELOG.md`.
 - [ ] No real messages, recipients, credentials, private hosts, private IPs, or personal logs are included.
 - [ ] Security properties fail closed and no macOS protection is weakened.
 - [ ] I have the right to contribute this work under Apache-2.0.

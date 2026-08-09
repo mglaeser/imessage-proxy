@@ -1,6 +1,6 @@
 # Support
 
-iMessage Proxy is community-maintained Alpha software. Support is best-effort; there is no service-level agreement or guaranteed response time.
+iMessage Proxy is community-maintained security-sensitive software. Support is best-effort; there is no service-level agreement or guaranteed response time.
 
 ## Where to ask
 
@@ -17,16 +17,16 @@ Provide:
 
 - iMessage Proxy version or commit;
 - macOS architecture and version;
-- Apple Container, Caddy, and `imsg` versions;
+- Caddy and `imsg` versions;
 - the exact iMessage Proxy command and sanitized error;
 - expected and observed behavior;
-- whether the bridge, LaunchAgent, facade, or client boundary is failing;
+- whether the native server, Unix socket, LaunchAgent, Caddy edge, or client boundary is failing;
 - minimal reproduction steps.
 
-Redact tokens, password hashes, Messages content, recipients, user names, device names, private DNS names, IP addresses, and filesystem paths that reveal identity. Prefer a minimal synthetic reproduction.
+Redact API keys, hashes, Messages content, recipients, user names, device names, hostnames, IP addresses, request IDs tied to private logs, and filesystem paths that reveal identity. Prefer a minimal synthetic reproduction.
 
 ## Boundaries
 
-The project cannot provide personalized infrastructure administration, Apple account recovery, Messages or carrier support, incident-response retainers, or help bypassing TCC, SIP, authentication, allowlists, or private-network requirements.
+The project cannot provide personalized infrastructure administration, Apple account recovery, Messages or carrier support, incident-response retainers, or help bypassing TCC, SIP, authentication, allowlists, the public-exposure gate, or the native server's socket-only network boundary.
 
 iMessage Proxy is not affiliated with Apple Inc. For macOS, Messages, or Apple Account support, use [Apple Support](https://support.apple.com/).

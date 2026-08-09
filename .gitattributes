@@ -5,7 +5,6 @@
 *.plist.in text diff=xml
 *.sh text eol=lf
 bin/imessage-proxy text eol=lf
-bin/stella text eol=lf
 Makefile text eol=lf
 
 *.png binary
@@ -16,4 +15,5 @@ Makefile text eol=lf
 *.pdf binary
 
 CHANGELOG.md export-subst
+REVISION export-subst
 .github export-ignore

@@ -5,6 +5,7 @@
 /src/ @mglaeser
 /bin/ @mglaeser
 /config/ @mglaeser
+/web/ @mglaeser
 /tests/ @mglaeser
 /.github/workflows/ @mglaeser
 /SECURITY.md @mglaeser

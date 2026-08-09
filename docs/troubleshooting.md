@@ -1,242 +1,345 @@
 # Troubleshooting
 
-Diagnose iMessage Proxy from the outside in: client TLS/authentication, Caddy facade, Apple Container host route, loopback bridge, `imsg`, then macOS privacy permissions. Changing several layers at once makes security failures harder to understand.
-
-## First response
-
-If a failure could send unintended messages, expose data, or indicate compromised credentials, stop the facade first:
+Start with read-only, metadata-only checks. Do not paste API keys, message bodies,
+recipients, conversation output, private database files, or complete logs into an
+issue.
 
 ```bash
-bin/imessage-proxy stop
+imessage-proxy doctor
+imessage-proxy server-status
+imessage-proxy edge-status
 ```
 
-For ordinary failures, source the same private operator configuration used during installation and run:
+`edge-status` is expected to report that the LaunchAgent is not loaded before
+public installation. Keep the edge stopped while changing native state:
 
 ```bash
-set -a
-. "$HOME/.config/imessage-proxy/imessage-proxy.env"
-set +a
-bin/imessage-proxy doctor
-bin/imessage-proxy status
-bin/imessage-proxy agent-status
+imessage-proxy edge-stop
 ```
 
-Record iMessage Proxy, macOS, Apple Container, Caddy, and `imsg` versions. Sanitize all output before sharing it.
+The command disables the exact GUI launchd label before unloading it. The edge
+therefore remains stopped across logout/login and reboot while its plist,
+certificate data, and other state remain intact. `edge-start` explicitly
+re-enables the label.
 
-Version 0.3.0 retains the 0.2 transition identities: runtime home `~/Library/Application Support/Stella`, runtime binary and LaunchAgent identity `stella-bridge` / `io.github.mglaeser.stella.bridge`, container `stella`, and route `stella-host.container.internal`. Seeing those names is not by itself stale state. The deprecated `bin/stella` and `STELLA_*` forms are compatibility interfaces; use `bin/imessage-proxy` and `IMESSAGE_PROXY_*` for new diagnostics. See the [operations transition note](operations.md#rename-transition-in-020) before changing any runtime identity.
+## `doctor` rejects `imsg`
 
-## Symptom map
-
-| Symptom | Likely boundary | Start with |
-| --- | --- | --- |
-| Certificate unknown or hostname mismatch | Client ↔ Caddy TLS | CA file, URL hostname, private DNS |
-| Connection refused or timeout | Interface, container, route, firewall | `status`, private bind address, host-route refresh |
-| Empty/aborted response from a reachable facade | Caddy private-source filter | Source address as seen by Caddy and VPN topology |
-| `401` | Client credential or internal bridge token | Retype caller credential; inspect Caddy and bridge state |
-| `403` | RPC/parameter/target policy | Method, forbidden flags, exact allowlist form |
-| `404` | Wrong route or HTTP method | Compare with the API route table |
-| `408` | Bounded request timeout | Client upload, facade timing, bridge socket log |
-| `413` or `431` | Request-size policy | Reduce body or headers; do not raise limits casually |
-| `415` | SMS-style endpoint content type | Send `Content-Type: application/json` |
-| `500` | Internal bridge or facade error | Bridge and facade logs, exact version, recent changes |
-| `502` | `imsg` response or facade-to-bridge upstream | `check-host`, dependency version, bridge/facade logs |
-| `503` from health | Messages read path | Full Disk Access, database, `imsg` |
-| `504` | `imsg` or facade-to-bridge timeout | Host load, hung process, dependency/upstream health |
-| Read works but send fails | Target policy or Automation permission | Allowlist, Messages sign-in, TCC Automation |
-| Duplicate outbound message | Client retry logic | Stop retries; reconcile by GUID/history |
-
-## Build failures
-
-### Xcode toolchain not found
-
-`make build` and `bin/imessage-proxy build-host` require macOS and Xcode Command Line Tools.
+iMessage Proxy 1.0 supports exactly `imsg 0.13.4`. A newer or older command can
+change flags, JSON-line fields, error output, and send behavior.
 
 ```bash
-xcode-select -p
-xcrun --find clang
+"$IMESSAGE_PROXY_IMSG_BIN" --version
+shasum -a 256 "$IMESSAGE_PROXY_IMSG_BIN"
 ```
 
-Install or repair the matching Apple toolchain. Do not substitute an unreviewed compiler or remove warning flags to force a build.
+Install the exact supported release for the Messages GUI user, record its
+independently reviewed SHA-256, and run `doctor` again. The lifecycle CLI hashes
+the file before executing it and stages that exact binary. Do not replace it in
+place or point the LaunchAgent at an unreviewed binary.
 
-### Tests cannot select a port
+## `doctor` rejects Caddy
 
-The integration test chooses an unused loopback port. Inspect local listeners and retry after resolving the collision:
+The lifecycle CLI requires the exact host-native Caddy 2.11.4 executable and an
+independently reviewed SHA-256:
 
 ```bash
-lsof -nP -iTCP -sTCP:LISTEN
+"$IMESSAGE_PROXY_CADDY_BIN" version
+shasum -a 256 "$IMESSAGE_PROXY_CADDY_BIN"
 ```
 
-The test uses a fake `imsg` backend and synthetic fixtures. It should not require access to real Messages data.
+Confirm the environment points at an executable regular file rather than a
+symlink, the version begins with `v2.11.4`, and the lowercase digest matches
+`IMESSAGE_PROXY_CADDY_SHA256`. Do not update the configured digest merely to make
+an unexpected file pass. Re-obtain and review the executable.
 
-### `make check` reports missing lint tools
+## The native server does not start
 
-The complete check requires `clang-format`, `shellcheck`, and `markdownlint-cli2`. Install reviewed versions and rerun `make check`. `make build` and `make test` alone do not replace the static and formatting checks used by CI.
-
-## Preparation and configuration
-
-### `IMESSAGE_PROXY_API_HOST must be a private DNS name`
-
-Source the operator environment in the current shell and replace example placeholders. Use a hostname made of letters, numbers, dots, and hyphens; do not include a URL scheme, port, path, shell expression, or whitespace.
-
-### Bind IP is not assigned
-
-`IMESSAGE_PROXY_BIND_IP` must match an address currently assigned to the intended private interface. Re-check after DHCP, Wi-Fi/Ethernet, or VPN changes. Do not switch to `0.0.0.0`.
-
-### Caddy image rejected
-
-Use the official Caddy image with an immutable reviewed `sha256:` digest. Floating tags and non-official registries are intentionally rejected.
-
-### Private file mode rejected
-
-iMessage Proxy refuses group/world-readable secrets. Inspect without printing contents:
+Inspect a bounded window from the native server's macOS unified-log category:
 
 ```bash
-runtime_root="${IMESSAGE_PROXY_HOME:-$HOME/Library/Application Support/Stella}"
-stat -f '%Sp %N' "$runtime_root/secrets/bridge.token" \
-  "$runtime_root/secrets/allowed-targets.txt" \
-  "$runtime_root/secrets/users.caddy"
+/usr/bin/log show \
+  --info \
+  --last 10m \
+  --style compact \
+  --predicate 'subsystem == "io.github.mglaeser.imessage-proxy" AND category == "native-server"'
 ```
 
-Fix ownership first if the files do not belong to the Messages user, then set mode `0600`. Never solve the error by running iMessage Proxy as root.
+The category contains privacy-reviewed operational metadata, not request bodies
+or dependency output. Still redact request/key IDs, addresses, hostnames, and
+private paths before sharing excerpts.
 
-## LaunchAgent and bridge
+Common causes:
 
-### Agent is already loaded
+- the generated plist points at a missing or rebuilt binary;
+- the API-key database, target file, or parent directory is a symlink, has the
+  wrong owner, or permits group/world access;
+- the configured dependency path/version changed;
+- the Unix socket path exceeds the platform limit;
+- a live process already owns the socket; or
+- a stale socket is not safely attributable to the current user.
 
-Use the confirmed reload action after a build or configuration change:
+Run `imessage-proxy check-host` while the edge is stopped. Never delete an
+unknown socket until ownership and process state are proven. If the server was
+previously installed but is unloaded, use `server-start`; it explicitly
+re-enables the launchd label. If the staged plist or binary intentionally changed,
+reinstall or use the documented confirmed restart path while the edge remains
+stopped.
 
-```bash
-bin/imessage-proxy agent-reload \
-  --confirm 'RELOAD IMESSAGE HOST BRIDGE'
-```
+## Full Disk Access fails
 
-The confirmation guards a process restart. Do not run a second bridge manually on the same port.
+Symptoms include readiness failure, database-open errors, or empty reads despite
+visible Messages conversations.
 
-### Agent fails repeatedly
+1. Confirm the exact runtime binary path:
 
-Inspect the LaunchAgent state and a bounded tail of the bridge diagnostic log:
+   ```bash
+   ls -l "$HOME/Library/Application Support/iMessage Proxy/state/bin/imessage-proxy-server"
+   codesign --display --verbose=4 \
+     "$HOME/Library/Application Support/iMessage Proxy/state/bin/imessage-proxy-server"
+   ```
 
-```bash
-bin/imessage-proxy agent-status
-runtime_root="${IMESSAGE_PROXY_HOME:-$HOME/Library/Application Support/Stella}"
-tail -n 100 "$runtime_root/state/logs/bridge.err.log"
-```
+2. In System Settings → Privacy & Security → Full Disk Access, grant that exact
+   server binary access.
+3. Keep the edge stopped, restart the server with its exact confirmation, prove
+   the socket, and start the edge again.
 
-Common causes are an absent runtime binary, invalid secret path or mode, missing `imsg`, a port collision, or permission denial. Audit lines should not contain message content; still sanitize user IDs, host paths, and times before sharing.
+Do not grant a shell application or Caddy broad access as a substitute, reset the
+TCC database, or copy another machine's permission database.
 
-If `create` or `start` says the LaunchAgent is not ready, compare the prepared
-and installed plist, then inspect the loaded path, program, state, PID, and the
-listener shown by `lsof`. The facade deliberately refuses a same-label job that
-is stopped, crash-looping, points elsewhere, has no unique PID, or does not
-own exactly one IPv4 listener at `127.0.0.1:<bridge-port>`. It also refuses when
-the running bridge's authenticated configuration digest differs from fresh
-evaluations of the exact token/allowlist bytes or reviewed runtime
-settings. After intentional configuration changes, use the confirmed
-`agent-reload`; do not bypass the readiness gate.
+## Sends are not authorized by macOS
 
-### Bridge is not loopback-only
+The first intentional send may prompt for Automation access to Messages. Approve
+only when the prompt identifies the exact native server binary and expected GUI
+account.
 
-The expected listener is `127.0.0.1` on the configured bridge port:
+If the prompt is absent or stale, inspect System Settings → Privacy & Security →
+Automation. Re-check after rebuilding or relocating the server binary. Caddy
+does not send messages and must not have Automation permission. Keep System
+Integrity Protection enabled.
 
-```bash
-lsof -nP -iTCP:"${IMESSAGE_PROXY_BRIDGE_PORT:-8765}" -sTCP:LISTEN
-```
+## The API always returns `401`
 
-If any iMessage Proxy bridge listener is bound to a non-loopback address, stop it and investigate the binary/source/configuration. Do not operate the facade until the invariant is restored.
-
-## macOS privacy controls
-
-### Health returns `503`
-
-Health exercises a minimal chat read. Verify:
-
-1. Messages.app works interactively for the same GUI user.
-2. `imsg` is installed and its version is the reviewed one.
-3. The exact built `stella-bridge` binary has Full Disk Access.
-4. The Messages database is present and readable through normal TCC controls.
-5. `bin/imessage-proxy check-host` succeeds.
-
-Do not copy the Messages database, run the service as root, disable SIP, or grant broad permissions to unrelated applications.
-
-### Reads work but sends fail
-
-Confirm exactly one target is selected and its representation matches `allowed-targets.txt` byte-for-byte. Then perform one intentional GUI-observed test and approve the normal Messages Automation prompt.
-
-Rebuilding or moving `stella-bridge` may change how macOS associates TCC permission. Re-add only the exact current binary if System Settings shows a stale entry.
-
-## Container and network
-
-### Container is missing
-
-`start`, `stop`, and `logs` require a previously created exact container. Run `doctor`, verify the environment and callers, then use `bin/imessage-proxy create`. Do not create an ad-hoc container with broader mounts or publishes.
-
-### Container already exists
-
-Use `bin/imessage-proxy status` to inspect its sanitized state and publication. `start` accepts a stopped container only when its complete reviewed definition matches the current image, prepared environment, mounts, limits, and private publication. Alpha releases do not automatically reconcile a changed container definition; see the recreation limitation in [Operations](operations.md).
-
-### Host route fails after restart
-
-Apple Container host routing may need an explicit refresh after a Mac restart:
-
-```bash
-bin/imessage-proxy host-route-refresh \
-  --confirm 'REFRESH IMESSAGE HOST ROUTE'
-bin/imessage-proxy start
-```
-
-Retest health afterward. Do not expose the native bridge on the LAN as a shortcut.
-
-If iMessage Proxy reports that the route name resolves to the wrong alias, do not
-continue with `create` or `start`. Inspect `IMESSAGE_PROXY_BRIDGE_HOST_IP`, then use the
-confirmed refresh action; iMessage Proxy requires exactly one resolved IPv4 address
-matching that configured alias.
-
-### TLS trust failure
-
-Check that:
-
-- the URL hostname exactly matches `IMESSAGE_PROXY_API_HOST`;
-- private DNS resolves that name to `IMESSAGE_PROXY_BIND_IP` from the client;
-- the client uses the root certificate reported by `bin/imessage-proxy ca-path`;
-- the certificate came from this deployment and its fingerprint was verified;
-- the client's clock is correct.
-
-Do not use `curl -k`. If Caddy state was regenerated, clients must deliberately trust the new root certificate.
-
-### VPN client is rejected as outside
-
-Caddy evaluates the source address it sees. Confirm the VPN preserves or assigns an intended private address and that no proxy rewrites it unexpectedly. Do not remove the private-range filter; correct the network design and keep authentication enabled.
-
-## API policy failures
-
-### Method or parameter returns `403`
-
-Only `chats.list`, `messages.history`, `messages.after`, `send`, and `message.send_status` are accepted. Attachments, converted attachments, and reactions must be absent or `false`. Unknown fields within method parameters are rejected.
-
-### Send target is not allowed
-
-Direct addresses appear exactly as written. Chat selectors use a prefix:
+Verify the client sends one exact header:
 
 ```text
-chat_id:42
-chat_identifier:example-value
-chat_guid:example-guid
+Authorization: Bearer imp_…
 ```
 
-After editing the list, perform the confirmed LaunchAgent reload. Avoid `*`; it removes the target guard for every authenticated client.
+The key must not contain quotes, a trailing newline, or shell prompt text. It may
+also be expired or revoked; these conditions deliberately look identical. Use a
+different active administrator to inspect key metadata. If no active
+administrator remains, run the local bootstrap command on the Mac.
 
-### Cursor returns unexpected history
+The console clears its tab key after `401`. Sign in again with the correct key;
+do not move it to persistent browser storage.
 
-`since_rowid` belongs to the local Messages database, not a wall-clock timestamp. A restored or replaced database invalidates client assumptions. Pause processing, reset the cursor deliberately, fetch a bounded page, and deduplicate at the consumer before resuming.
+## The API returns `403`
 
-## Collecting a safe support bundle
+For reads, the key needs `messages:read`; sends need `messages:send`; key
+management needs `admin`. Administrator keys include all operations.
 
-There is no automatic support-bundle command because indiscriminate collection can leak conversations and secrets. Provide only:
+For sends, `403` can instead mean the exact target is missing from:
 
-- versions and architecture;
-- exact failing iMessage Proxy command;
-- HTTP status and a synthetic request shape;
-- a short, manually reviewed diagnostic excerpt;
-- whether each boundary in the symptom map succeeded.
+```text
+~/Library/Application Support/iMessage Proxy/private/allowed-targets.txt
+```
 
-Never attach `bridge.token`, `facade.env`, `users.caddy`, Caddy CA keys, the Messages database, full container inspect output, or unreviewed logs. Follow [SUPPORT.md](../SUPPORT.md), and report vulnerabilities privately under [SECURITY.md](../SECURITY.md).
+Use a canonical `+` phone handle, one no-whitespace `@` handle, or
+`chat_id:POSITIVE_INTEGER`, one per line. Contact names, leading-zero chat IDs,
+and wildcards are invalid. Apply an intentional policy change outside-in:
+
+```bash
+imessage-proxy edge-stop
+imessage-proxy check-host
+imessage-proxy server-restart \
+  --confirm 'RESTART IMESSAGE PROXY SERVER'
+imessage-proxy server-status
+imessage-proxy edge-start
+```
+
+Then test one harmless consented target.
+
+## A send returns `409`
+
+The idempotency value was reused with different content, or its prior attempt is
+pending/ambiguous. Never change the body while retaining the same value.
+
+For an ambiguous attempt, inspect the intended thread in Messages.app. If the
+message did not appear and a human chooses to try again, make a new logical send
+with a new idempotency value. The server will not decide that automatically.
+
+## A send returns `504`
+
+The bounded dependency command exceeded its deadline. The outcome may be
+ambiguous if Messages received the command before the deadline. Treat it exactly
+like an unresolved idempotency record: do not blindly retry.
+
+## Caddy cannot connect to the Unix socket
+
+Stop the edge and prove the host service directly:
+
+```bash
+imessage-proxy edge-stop
+imessage-proxy server-status
+stat -f '%HT %Su %Lp %N' \
+  "$HOME/Library/Application Support/iMessage Proxy/run/server.sock"
+
+curl --silent --output /dev/null --write-out '%{http_code}\n' \
+  --unix-socket "$HOME/Library/Application Support/iMessage Proxy/run/server.sock" \
+  http://localhost/api/status
+```
+
+The last command should return `401`. Caddy connects to that host path directly;
+there is no mount, relay, network route, or internal TCP bridge to repair. If the
+socket check succeeds, inspect the staged Caddy configuration and bounded logs:
+
+```bash
+imessage-proxy edge-logs
+```
+
+Confirm Caddy's LaunchAgent uses the same exact socket path. Run `prepare` again
+only from the reviewed source/environment after stopping both the edge and the
+native server; `prepare` refuses to replace staged state while either LaunchAgent
+is loaded. Never expose the native server on a TCP address or broaden filesystem
+permissions as a workaround.
+
+## Certificate issuance fails
+
+Confirm:
+
+- the configured hostname is exact and public;
+- its `A` record resolves to the intended IPv4 ingress and no `AAAA` record is
+  published;
+- external TCP 80 maps to the configured Mac IPv4 HTTP port;
+- external TCP 443 maps to the configured Mac IPv4 HTTPS port;
+- the router, host firewall, upstream ISP, and carrier-grade NAT posture permit
+  inbound traffic;
+- no unrelated host process owns either configured high port;
+- the system clock is correct;
+- Caddy's user-owned data directory is writable and persistent; and
+- bounded Caddy logs show the exact hostname, not an example value.
+
+Test from a genuinely external IPv4 client. Do not use an insecure client flag,
+a private-certificate fallback, a copied certificate from another hostname, or
+direct public port 8443. Leave the public gate off until normal ACME issuance
+works through external 80/443.
+
+An ordinary HTTP request to the configured hostname must return `308` with an
+exact `https://HOST/path` location, never `:8443`. A different Host value must
+return `421`, not a redirect. Both routed responses omit `Server`, `Alt-Svc`, and
+cross-origin headers and retain the reviewed no-store, noindex, and security
+headers. If they do not, stop the edge and compare the staged Caddyfile and
+LaunchAgent with the reviewed source; do not add a second redirecting proxy.
+
+## The console loads but status does not
+
+Static files are intentionally public, while every API request requires a key.
+Check the browser has the expected public origin and that the key remains in this
+tab's session. Cross-origin use is unsupported.
+
+Inspect browser network status without copying authorization headers. `401`
+means sign in again; `403` means scope; `502/503/504` means the native/Messages
+path needs operator attention.
+
+If the content-security policy blocks a new third-party dependency, remove the
+dependency. The console is designed to be entirely self-contained.
+
+## Rate limiting (`429`)
+
+Honor `Retry-After`. Repeated `401` attempts can trigger source-based limits;
+authenticated clients also have per-key limits, with lower budgets for sends and
+key changes.
+
+Do not retry in a tight loop or spread attempts across credentials. Investigate
+unexpected traffic, fix client polling, and remember in-memory counters reset on
+native restart. Confirm the router is performing ordinary port forwarding rather
+than proxying every connection from one address; a proxy would invalidate the
+documented source-address model.
+
+## A configured host port is already in use
+
+Inspect the exact configured ports, which default to 8080 and 8443:
+
+```bash
+lsof -nP -iTCP:"${IMESSAGE_PROXY_HTTP_PORT:-8080}" -sTCP:LISTEN
+lsof -nP -iTCP:"${IMESSAGE_PROXY_HTTPS_PORT:-8443}" -sTCP:LISTEN
+```
+
+Do not stop or reconfigure an unrelated service without its own change plan. Do
+not move Caddy to privileged host TCP 80/443; correct the reviewed high-port or
+router mapping plan and repeat external acceptance.
+
+## The edge does not install or start
+
+`edge-install` deliberately refuses to continue when:
+
+- the public-exposure gate is not exactly `yes`;
+- the hostname, ACME email, IPv4 bind, or high ports are invalid;
+- the staged Caddy version/digest or Caddyfile differs from reviewed state;
+- the UI or edge LaunchAgent is missing or stale;
+- the native socket is not ready;
+- a configured host port already has a listener; or
+- the edge LaunchAgent is already loaded.
+
+Run `doctor`, `server-status`, and `edge-logs`; compare the current environment
+with the maintenance record. If edge inputs intentionally changed, stop the edge,
+stop the native server with its exact confirmation, run `prepare` from reviewed
+source, and inspect the result. Then run `build-host`, `check-host`,
+`server-install`, and `edge-install` with its exact public-exposure confirmation.
+Do not edit a loaded LaunchAgent or weaken validation.
+
+If startup prints `URGENT: automatic public-edge rollback could not confirm
+containment`, do not assume the listener stopped. Remove or disable the external
+port mappings, disconnect the Mac from the untrusted network if necessary, and
+inspect both the launchd label and configured ports locally. Restore exposure
+only after `launchctl` reports the label absent and `lsof` reports neither port
+listening.
+
+## The public mapping is unreachable
+
+Verify each hop rather than opening more services:
+
+1. Caddy owns the configured host IPv4 high ports.
+2. The Mac firewall permits the reviewed inbound path to those ports.
+3. The router maps external 80→host HTTP and 443→host HTTPS exactly.
+4. The hostname's `A` record reaches that router and has no competing IPv6 path.
+5. The ISP permits inbound 80/443 and does not place the site behind unconfigured
+   carrier-grade NAT.
+6. An external IPv4 client reaches the hostname on ordinary HTTPS port 443.
+
+Do not publish the server socket, add a second Caddy instance, add a tunnel, or
+expose high ports directly to public clients as a diagnostic shortcut.
+
+## After logout, reboot, sleep, or upgrade
+
+Validate in this order:
+
+1. the Messages GUI account/session is active;
+2. the exact native server LaunchAgent and socket are ready;
+3. the native process has no TCP listener;
+4. the Caddy LaunchAgent owns only the configured IPv4 high ports;
+5. the router's exact external 80/443 mappings remain active;
+6. the public certificate and security headers are correct;
+7. authenticated status and a bounded read succeed; and
+8. one harmless send is tested only when the change warrants it.
+
+Re-run the real-Mac restart matrix after macOS, Caddy, `imsg`, router, firewall,
+or address changes. Stop the edge if any state is uncertain.
+
+## Safe support bundle
+
+Before opening an issue, produce a manually reviewed summary containing only:
+
+- iMessage Proxy, macOS, Caddy, and `imsg` versions;
+- CPU architecture;
+- whether both processes, the socket, and expected IPv4 listeners are present
+  (omit paths that reveal the username);
+- whether the exact external port mappings were validated, without disclosing
+  private or public addresses;
+- HTTP status and request ID for a synthetic failing request;
+- the exact documented action that failed; and
+- redacted diagnostics containing no keys, hashes, conversations, targets,
+  participants, contact names, host addresses, or certificate/account material.
+
+Prefer describing the error class to uploading raw logs. Follow
+[SECURITY.md](../SECURITY.md) for anything that might be a vulnerability.

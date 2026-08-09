@@ -1,69 +1,51 @@
 openapi: 3.1.0
 info:
   title: iMessage Proxy API
-  version: 0.3.0
-  summary: A narrow, authenticated iMessage proxy for trusted private networks.
+  version: 1.0.0
+  summary: A small, authenticated REST API for safe Messages.app automation.
   description: >-
-    iMessage Proxy exposes a fixed, tightly validated set of read and send operations
-    through a private Caddy facade; outbound targets are allowlisted. It is alpha
-    software and must not be exposed to the Internet.
+    iMessage Proxy exposes explicit read and send operations from a signed-in Mac.
+    Every API request uses exactly one scoped API key in the Authorization header
+    with the Bearer scheme. The browser console is a same-origin static client of
+    this contract. The unversioned routes listed here are the complete API.
   license:
     name: Apache-2.0
     identifier: Apache-2.0
-  contact:
-    url: https://github.com/mglaeser/imessage-proxy
 servers:
-  - url: https://messages.example.internal:9443
-    description: Replace with the operator's private iMessage Proxy endpoint.
+  - url: https://{host}
+    description: Replace with the deployment's public HTTPS origin.
+    variables:
+      host:
+        default: messages.your-domain.invalid
+        description: Dedicated public hostname configured for this deployment.
 security:
-  - basicAuth: []
+  - bearerAuth: []
+tags:
+  - name: System
+    description: Native service and Messages readiness.
+  - name: Chats
+    description: Conversation discovery and metadata.
+  - name: Messages
+    description: Bounded history, scheduled rows, and idempotent text sends.
+  - name: Insights
+    description: Read-only aggregate statistics.
+  - name: API keys
+    description: Scoped credential lifecycle management.
+  - name: Audit
+    description: Privacy-safe operational event metadata for administrators.
 paths:
-  /healthz:
+  /api/status:
     get:
-      operationId: getHealth
-      summary: Exercise the facade, bridge, and imsg read path.
+      operationId: getStatus
+      tags: [System]
+      summary: Check service and Messages readiness.
       responses:
         "200":
-          description: iMessage Proxy and the Messages read path are healthy.
+          description: The native service and its Messages read path are ready.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Health"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "408":
-          $ref: "#/components/responses/RequestTimeout"
-        "413":
-          $ref: "#/components/responses/TooLarge"
-        "431":
-          $ref: "#/components/responses/HeadersTooLarge"
-        "500":
-          $ref: "#/components/responses/InternalError"
-        "502":
-          $ref: "#/components/responses/BadGateway"
-        "503":
-          $ref: "#/components/responses/Unavailable"
-        "504":
-          $ref: "#/components/responses/Timeout"
-  /v1/rpc:
-    post:
-      operationId: callMessagesRpc
-      summary: Run one allowlisted imsg JSON-RPC method.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/RpcRequest"
-      responses:
-        "200":
-          description: A correlated JSON-RPC result or upstream JSON-RPC error.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/RpcResponse"
+                $ref: "#/components/schemas/Status"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -74,275 +56,1370 @@ paths:
           $ref: "#/components/responses/RequestTimeout"
         "413":
           $ref: "#/components/responses/TooLarge"
-        "415":
-          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "431":
           $ref: "#/components/responses/HeadersTooLarge"
-        "500":
-          $ref: "#/components/responses/InternalError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /api/chats:
+    get:
+      operationId: listChats
+      tags: [Chats]
+      summary: List recent chats.
+      x-required-scope: messages:read
+      parameters:
+        - $ref: "#/components/parameters/ChatLimit"
+        - name: unread_only
+          in: query
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: A bounded page of recent chats.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [chats]
+                properties:
+                  chats:
+                    type: array
+                    maxItems: 100
+                    items:
+                      $ref: "#/components/schemas/Chat"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "431":
+          $ref: "#/components/responses/HeadersTooLarge"
         "502":
           $ref: "#/components/responses/BadGateway"
         "503":
           $ref: "#/components/responses/Unavailable"
         "504":
           $ref: "#/components/responses/Timeout"
-  /v2/sessions/sms:
-    post:
-      operationId: sendSmsStyleMessage
-      summary: Send an immediate iMessage through a simple SMS-style request.
+  /api/chats/{chat_id}:
+    parameters:
+      - $ref: "#/components/parameters/ChatId"
+    get:
+      operationId: getChat
+      tags: [Chats]
+      summary: Get one chat and its participants.
+      x-required-scope: messages:read
+      responses:
+        "200":
+          description: Chat metadata with private account-routing fields removed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Chat"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "431":
+          $ref: "#/components/responses/HeadersTooLarge"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "504":
+          $ref: "#/components/responses/Timeout"
+  /api/chats/{chat_id}/messages:
+    parameters:
+      - $ref: "#/components/parameters/ChatId"
+    get:
+      operationId: listChatMessages
+      tags: [Messages]
+      summary: Read bounded message history for one chat.
+      x-required-scope: messages:read
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: participant
+          in: query
+          description: >-
+            Repeat to select multiple case-insensitive whole participant handles.
+            Each value is limited to 256 Unicode code points and must not begin
+            with a hyphen or contain a comma or control character.
+          style: form
+          explode: true
+          schema:
+            type: array
+            maxItems: 32
+            items:
+              type: string
+              minLength: 1
+              maxLength: 256
+              pattern: '^[^-]'
+        - name: start
+          in: query
+          description: >-
+            Inclusive, calendar-valid RFC 3339 date-time. Use uppercase T and Z,
+            seconds 00-59 (no leap second), an optional fractional part with one
+            to nine digits, and either Z or a numeric UTC offset no greater than
+            14:00.
+          schema:
+            type: string
+            format: date-time
+            minLength: 20
+            maxLength: 35
+            pattern: '^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,9})?(?:Z|[+-](?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00))$'
+        - name: end
+          in: query
+          description: >-
+            Exclusive, calendar-valid RFC 3339 date-time. Use uppercase T and Z,
+            seconds 00-59 (no leap second), an optional fractional part with one
+            to nine digits, and either Z or a numeric UTC offset no greater than
+            14:00. When both bounds are present, end must be later than start.
+          schema:
+            type: string
+            format: date-time
+            minLength: 20
+            maxLength: 35
+            pattern: '^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,9})?(?:Z|[+-](?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00))$'
+      responses:
+        "200":
+          description: >-
+            Messages sorted by created_at ascending and then numeric message ID,
+            with host paths removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [messages]
+                properties:
+                  messages:
+                    type: array
+                    maxItems: 200
+                    items:
+                      $ref: "#/components/schemas/Message"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "431":
+          $ref: "#/components/responses/HeadersTooLarge"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "504":
+          $ref: "#/components/responses/Timeout"
+  /api/chats/{chat_id}/background:
+    parameters:
+      - $ref: "#/components/parameters/ChatId"
+    get:
+      operationId: getChatBackground
+      tags: [Chats]
+      summary: Inspect safe chat-background state.
       description: >-
-        Sends to an allowlisted recipient through Messages.app using the iMessage
-        service and AppleScript transport. A 204 response means the send command was
-        accepted, not delivered. This endpoint never sends carrier SMS; callers must
-        not blindly retry an ambiguous timeout.
+        Reads the pinned dependency's local background status and removes host
+        paths, URLs, opaque asset identifiers, background-event row identifiers,
+        communication safety state, and implementation-version fields.
+      x-required-scope: messages:read
+      responses:
+        "200":
+          description: Safe background and cache-presence metadata for one chat.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatBackground"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "431":
+          $ref: "#/components/responses/HeadersTooLarge"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "504":
+          $ref: "#/components/responses/Timeout"
+  /api/messages:
+    post:
+      operationId: sendMessage
+      tags: [Messages]
+      summary: Send one text as an iMessage.
+      description: >-
+        Exactly one recipient or chat_id is required. The server always selects
+        iMessage and disables carrier-SMS fallback. The idempotency key makes an
+        accepted or ambiguous attempt safe from automatic duplicate execution.
+      x-required-scope: messages:send
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/SmsStyleSendRequest"
+              $ref: "#/components/schemas/SendMessageRequest"
+      responses:
+        "202":
+          description: Messages.app accepted the command; this is not delivery confirmation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendOperation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "431":
+          $ref: "#/components/responses/HeadersTooLarge"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "504":
+          $ref: "#/components/responses/Timeout"
+  /api/scheduled-messages:
+    get:
+      operationId: listScheduledMessages
+      tags: [Messages]
+      summary: List future Send Later rows read-only.
+      x-required-scope: messages:read
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: A bounded list of scheduled messages.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [messages]
+                properties:
+                  messages:
+                    type: array
+                    maxItems: 100
+                    items:
+                      $ref: "#/components/schemas/ScheduledMessage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "431":
+          $ref: "#/components/responses/HeadersTooLarge"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "504":
+          $ref: "#/components/responses/Timeout"
+  /api/statistics/messages:
+    get:
+      operationId: getMessageStatistics
+      tags: [Insights]
+      summary: Calculate message and optional media statistics.
+      x-required-scope: messages:read
+      parameters:
+        - name: chat_id
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+        - name: time_zone
+          in: query
+          description: >-
+            UTC or an exact, case-sensitive name in the host macOS
+            NSTimeZone.knownTimeZoneNames set. The UTF-8 representation is
+            limited to 64 bytes.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+          example: Europe/Vienna
+        - name: include_media
+          in: query
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Aggregate statistics from the local Messages database.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageStatistics"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "431":
+          $ref: "#/components/responses/HeadersTooLarge"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "504":
+          $ref: "#/components/responses/Timeout"
+  /api/audit-events:
+    get:
+      operationId: listAuditEvents
+      tags: [Audit]
+      summary: List bounded privacy-safe audit metadata.
+      description: >-
+        Returns newest-first request metadata without credentials, hashes,
+        message content, recipients, chat identifiers, or dependency output.
+      x-required-scope: admin
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+      responses:
+        "200":
+          description: A bounded newest-first list of audit events.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [events]
+                properties:
+                  events:
+                    type: array
+                    maxItems: 1000
+                    items:
+                      $ref: "#/components/schemas/AuditEvent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "431":
+          $ref: "#/components/responses/HeadersTooLarge"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /api/keys:
+    get:
+      operationId: listApiKeys
+      tags: [API keys]
+      summary: List API-key metadata without credentials or hashes.
+      x-required-scope: admin
+      responses:
+        "200":
+          description: API-key metadata, including active, expired, and revoked keys.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [keys]
+                properties:
+                  keys:
+                    type: array
+                    maxItems: 1000
+                    description: Newest-created rows first; storage and output are capped at 1000.
+                    items:
+                      $ref: "#/components/schemas/ApiKeyMetadata"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "431":
+          $ref: "#/components/responses/HeadersTooLarge"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: createApiKey
+      tags: [API keys]
+      summary: Create an API key and reveal it once.
+      x-required-scope: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateApiKeyRequest"
+      responses:
+        "201":
+          description: The plaintext key is returned exactly once.
+          headers:
+            Location:
+              description: Relative URI of the created API-key metadata resource.
+              schema:
+                type: string
+                format: uri-reference
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedApiKey"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "431":
+          $ref: "#/components/responses/HeadersTooLarge"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /api/keys/{key_id}:
+    parameters:
+      - name: key_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getApiKey
+      tags: [API keys]
+      summary: Get API-key metadata without the credential or hash.
+      x-required-scope: admin
+      responses:
+        "200":
+          description: Metadata for the selected API key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKeyMetadata"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "431":
+          $ref: "#/components/responses/HeadersTooLarge"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    delete:
+      operationId: revokeApiKey
+      tags: [API keys]
+      summary: Revoke an API key immediately.
+      description: The final active administrator cannot be revoked.
+      x-required-scope: admin
       responses:
         "204":
-          description: Messages.app accepted the send command; no delivery confirmation is returned.
+          description: The key is revoked. Repeating the request is safe.
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "408":
           $ref: "#/components/responses/RequestTimeout"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "413":
           $ref: "#/components/responses/TooLarge"
-        "415":
-          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "431":
           $ref: "#/components/responses/HeadersTooLarge"
-        "500":
-          $ref: "#/components/responses/InternalError"
         "502":
           $ref: "#/components/responses/BadGateway"
         "503":
           $ref: "#/components/responses/Unavailable"
-        "504":
-          $ref: "#/components/responses/Timeout"
 components:
   securitySchemes:
-    basicAuth:
+    bearerAuth:
       type: http
-      scheme: basic
-      description: Use a distinct Caddy credential for each API client.
+      scheme: bearer
+      bearerFormat: API key
+      description: >-
+        Send exactly `Authorization: Bearer <key>` with one scoped iMessage Proxy
+        key. Keys are never accepted through query parameters, cookies, another
+        authorization scheme, or request bodies.
+  parameters:
+    ChatId:
+      name: chat_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+    ChatLimit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: A fresh opaque value for one logical send attempt.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+        pattern: "^[A-Za-z0-9._~-]+$"
   responses:
     BadRequest:
-      description: >-
-        The request does not satisfy iMessage Proxy's narrow contract. When present,
-        the body is either a bridge JSON error or facade diagnostic text.
+      description: The request does not satisfy the endpoint contract.
       content:
-        application/json:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/HttpError"
-        text/plain:
-          schema:
-            type: string
-    Unauthorized:
-      description: >-
-        Client or bridge credentials are missing or invalid. When present, the body
-        is either a bridge JSON error or facade diagnostic text.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/HttpError"
-        text/plain:
-          schema:
-            type: string
-    Forbidden:
-      description: >-
-        The method, parameter, or send target is not allowed. When present, the body
-        is either a bridge JSON error or facade diagnostic text.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/HttpError"
-        text/plain:
-          schema:
-            type: string
-    TooLarge:
-      description: >-
-        The request exceeds an iMessage Proxy size limit. When present, the body is
-        either a bridge JSON error or facade diagnostic text.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/HttpError"
-        text/plain:
-          schema:
-            type: string
+            $ref: "#/components/schemas/Problem"
     RequestTimeout:
-      description: >-
-        The client did not send or receive the bounded request in time. When present,
-        the body is either a bridge JSON error or facade diagnostic text.
+      description: The bounded request transfer exceeded its deadline.
       content:
-        application/json:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/HttpError"
-        text/plain:
+            $ref: "#/components/schemas/Problem"
+    Unauthorized:
+      description: The bearer key is missing, malformed, unknown, expired, or revoked.
+      headers:
+        WWW-Authenticate:
           schema:
             type: string
+            pattern: '^Bearer(?: realm="imessage-proxy")?$'
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Forbidden:
+      description: The key lacks scope, the request origin is disallowed, or the send target is not allowlisted.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    NotFound:
+      description: The requested resource does not exist.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Conflict:
+      description: >-
+        The request conflicts with idempotency state, the selected chat service,
+        API-key capacity, or final-administrator protection.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    TooLarge:
+      description: The request exceeds the 64 KiB API body limit.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
     HeadersTooLarge:
       description: >-
-        The HTTP request headers exceed iMessage Proxy's 16 KiB limit. When present,
-        the body is either a bridge JSON error or facade diagnostic text.
+        The request headers exceeded the configured parser budget. A transport
+        parser can reject the request before API routing and return plain text.
       content:
-        application/json:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/HttpError"
+            $ref: "#/components/schemas/Problem"
         text/plain:
           schema:
             type: string
     UnsupportedMediaType:
-      description: >-
-        The endpoint requires application/json. When present, the body is either a
-        bridge JSON error or facade diagnostic text.
+      description: A JSON endpoint requires application/json.
       content:
-        application/json:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/HttpError"
-        text/plain:
+            $ref: "#/components/schemas/Problem"
+    RateLimited:
+      description: The bounded per-source or per-key rate limit was exceeded.
+      headers:
+        Retry-After:
           schema:
-            type: string
+            type: integer
+            minimum: 1
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
     BadGateway:
       description: >-
-        imsg failed or returned an invalid or oversized response. When present, the
-        body is either a bridge JSON error or facade diagnostic text.
+        The HTTPS edge could not reach the native service, or the pinned imsg
+        command failed or returned invalid bounded output.
       content:
-        application/json:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/HttpError"
-        text/plain:
-          schema:
-            type: string
-    InternalError:
-      description: >-
-        iMessage Proxy encountered an internal error. When present, the body is
-        either a bridge JSON error or facade diagnostic text.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/HttpError"
-        text/plain:
-          schema:
-            type: string
+            $ref: "#/components/schemas/Problem"
     Unavailable:
-      description: >-
-        The Messages read path is unavailable or iMessage Proxy is overloaded. When
-        present, the body is a bridge JSON error or facade diagnostic text.
+      description: The Messages read path or native service is unavailable.
       content:
-        application/json:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/HttpError"
-        text/plain:
-          schema:
-            type: string
+            $ref: "#/components/schemas/Problem"
     Timeout:
-      description: >-
-        The bounded imsg request exceeded its deadline. When present, the body is a
-        bridge JSON error or facade diagnostic text.
+      description: The bounded imsg operation did not finish before its deadline.
       content:
-        application/json:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/HttpError"
-        text/plain:
-          schema:
-            type: string
+            $ref: "#/components/schemas/Problem"
   schemas:
-    JsonRpcId:
-      oneOf:
-        - type: string
-          minLength: 1
-          maxLength: 256
-        - type: number
-    Health:
+    Status:
       type: object
       additionalProperties: false
-      required: [status, version]
+      required: [status, version, uptime_seconds, messages, key]
       properties:
         status:
+          type: string
           const: ok
         version:
           type: string
-    RpcRequest:
+          example: 1.0.0
+        uptime_seconds:
+          type: integer
+          minimum: 0
+        messages:
+          type: object
+          additionalProperties: false
+          required: [status, dependency_version]
+          properties:
+            status:
+              type: string
+              const: ready
+            dependency_version:
+              type: string
+              example: 0.13.4
+        key:
+          $ref: "#/components/schemas/AuthenticatedKey"
+    AuthenticatedKey:
       type: object
       additionalProperties: false
-      required: [jsonrpc, id, method]
+      required: [id, name, key_prefix, scopes, expires_at]
       properties:
-        jsonrpc:
-          const: "2.0"
         id:
-          $ref: "#/components/schemas/JsonRpcId"
-        method:
           type: string
-          enum:
-            - chats.list
-            - messages.history
-            - messages.after
-            - send
-            - message.send_status
-        params:
-          type: object
-          description: Method-specific parameters documented in docs/api.md.
-    RpcResponse:
-      type: object
-      additionalProperties: true
-      required: [jsonrpc, id]
-      properties:
-        jsonrpc:
-          const: "2.0"
-        id:
-          $ref: "#/components/schemas/JsonRpcId"
-        result: {}
-        error:
-          type: object
-      oneOf:
-        - required: [result]
-          properties:
-            error: false
-        - required: [error]
-          properties:
-            result: false
-    SmsStyleSendRequest:
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: Normalized display name, also limited to 80 UTF-8 bytes.
+        key_prefix:
+          $ref: "#/components/schemas/KeyPrefix"
+        scopes:
+          type: array
+          minItems: 1
+          maxItems: 3
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Scope"
+        expires_at:
+          type: [string, "null"]
+          format: date-time
+    Chat:
       type: object
       additionalProperties: false
-      required: [smsId, recipient, message]
+      required: [id, name, identifier, service, is_group, participants]
       properties:
-        smsId:
+        id:
+          type: integer
+          minimum: 1
+        name:
+          type: string
+        display_name:
+          type: [string, "null"]
+        contact_name:
+          type: [string, "null"]
+        identifier:
+          type: string
+        guid:
+          type: [string, "null"]
+        service:
+          type: string
+        is_group:
+          type: boolean
+        participants:
+          type: array
+          items:
+            type: string
+        last_message_at:
+          type: [string, "null"]
+          format: date-time
+        unread_count:
+          type: [integer, "null"]
+          minimum: 0
+    ChatBackground:
+      type: object
+      additionalProperties: false
+      required:
+        - chat_id
+        - background_set
+        - file_size
+        - cache_exists
+        - watch_background_exists
+        - latest_event
+      properties:
+        chat_id:
+          type: integer
+          minimum: 1
+        background_set:
+          type: boolean
+        file_size:
+          type: [integer, "null"]
+          minimum: 0
+          description: Declared background asset size when the database provides it.
+        cache_exists:
+          type: [boolean, "null"]
+          description: Whether the dependency observed its local transcript cache entry.
+        watch_background_exists:
+          type: [boolean, "null"]
+          description: Whether the dependency observed its local watch-background cache entry.
+        latest_event:
+          oneOf:
+            - $ref: "#/components/schemas/ChatBackgroundEvent"
+            - type: "null"
+    ChatBackgroundEvent:
+      type: object
+      additionalProperties: false
+      required: [action, date]
+      properties:
+        action:
+          type: string
+          enum: [set, clear]
+        date:
+          type: string
+          format: date-time
+    Message:
+      type: object
+      additionalProperties: false
+      required: [id, chat_id, guid, sender, is_from_me, text, created_at]
+      properties:
+        id:
+          type: integer
+        chat_id:
+          type: integer
+        guid:
+          type: string
+        reply_to_guid:
+          type: [string, "null"]
+        reply_to_text:
+          type: [string, "null"]
+        reply_to_sender:
+          type: [string, "null"]
+        sender:
+          type: string
+        sender_name:
+          type: [string, "null"]
+        is_from_me:
+          type: boolean
+        text:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        is_read:
+          type: [boolean, "null"]
+        date_read:
+          type: [string, "null"]
+          format: date-time
+        reactions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Reaction"
+        attachments:
+          type: array
+          description: Metadata only; host filesystem paths are never returned.
+          items:
+            $ref: "#/components/schemas/Attachment"
+    Reaction:
+      type: object
+      additionalProperties: false
+      required: [id, type, emoji, sender, is_from_me, created_at]
+      properties:
+        id:
+          type: integer
+        type:
+          type: string
+        emoji:
+          type: string
+        sender:
+          type: string
+        sender_name:
+          type: [string, "null"]
+        is_from_me:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+    Attachment:
+      type: object
+      additionalProperties: false
+      properties:
+        filename:
+          type: [string, "null"]
+        mime_type:
+          type: [string, "null"]
+        uti:
+          type: [string, "null"]
+        byte_size:
+          type: [integer, "null"]
+          minimum: 0
+        is_sticker:
+          type: [boolean, "null"]
+    ScheduledMessage:
+      type: object
+      additionalProperties: false
+      required: [id, guid, chat_id, chat_name, text, service, scheduled_at]
+      properties:
+        id:
+          type: integer
+        guid:
+          type: string
+        chat_id:
+          type: integer
+        chat_name:
+          type: string
+        text:
+          type: string
+        service:
+          type: string
+        scheduled_at:
+          type: string
+          format: date-time
+        schedule_state:
+          type: integer
+        schedule_type:
+          type: integer
+    MessageStatistics:
+      type: object
+      additionalProperties: false
+      required:
+        - total_messages
+        - sent_messages
+        - received_messages
+        - time_zone
+        - chats
+        - senders
+        - services
+        - dates
+        - media
+        - truncated_dimensions
+      properties:
+        total_messages:
+          type: integer
+          minimum: 0
+        sent_messages:
+          type: integer
+          minimum: 0
+        received_messages:
+          type: integer
+          minimum: 0
+        time_zone:
           type: string
           minLength: 1
           maxLength: 64
           description: >-
-            Required opaque value; validated and discarded, never logged or returned,
-            and not used for correlation, deduplication, or idempotency.
-          example: request-1
+            UTC or an exact name in the host macOS known-time-zone set, as used
+            for date aggregation.
+        chats:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/ChatMessageStatistics"
+        senders:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/SenderMessageStatistics"
+        services:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/ServiceMessageStatistics"
+        dates:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/DateMessageStatistics"
+        media:
+          oneOf:
+            - $ref: "#/components/schemas/MediaStatistics"
+            - type: "null"
+        truncated_dimensions:
+          type: array
+          maxItems: 6
+          uniqueItems: true
+          description: >-
+            Only breakdown dimensions whose upstream arrays exceeded 100 rows,
+            in the fixed order chats, senders, services, dates, media.types,
+            media.chats. The first 100 rows are returned; totals remain global.
+          items:
+            type: string
+            enum: [chats, senders, services, dates, media.types, media.chats]
+    ChatMessageStatistics:
+      type: object
+      additionalProperties: false
+      required: [chat_id, identifier, name, service, message_count]
+      properties:
+        chat_id:
+          type: integer
+          minimum: 1
+        identifier:
+          type: string
+        name:
+          type: string
+        service:
+          type: string
+        message_count:
+          type: integer
+          minimum: 0
+    SenderMessageStatistics:
+      type: object
+      additionalProperties: false
+      required: [handle, message_count]
+      properties:
+        handle:
+          type: string
+        message_count:
+          type: integer
+          minimum: 0
+    ServiceMessageStatistics:
+      type: object
+      additionalProperties: false
+      required: [service, message_count]
+      properties:
+        service:
+          type: string
+        message_count:
+          type: integer
+          minimum: 0
+    DateMessageStatistics:
+      type: object
+      additionalProperties: false
+      required: [date, message_count]
+      properties:
+        date:
+          type: string
+          format: date
+        message_count:
+          type: integer
+          minimum: 0
+    MediaStatistics:
+      type: object
+      additionalProperties: false
+      required: [total_attachments, total_bytes, types, chats]
+      properties:
+        total_attachments:
+          type: integer
+          minimum: 0
+        total_bytes:
+          type: integer
+          minimum: 0
+        types:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/MediaTypeStatistics"
+        chats:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/ChatMediaStatistics"
+    MediaTypeStatistics:
+      type: object
+      additionalProperties: false
+      required: [uti, mime_type, attachment_count, total_bytes]
+      properties:
+        uti:
+          type: string
+        mime_type:
+          type: string
+        attachment_count:
+          type: integer
+          minimum: 0
+        total_bytes:
+          type: integer
+          minimum: 0
+    ChatMediaStatistics:
+      type: object
+      additionalProperties: false
+      required: [chat_id, identifier, name, attachment_count, total_bytes]
+      properties:
+        chat_id:
+          type: integer
+          minimum: 1
+        identifier:
+          type: string
+        name:
+          type: string
+        attachment_count:
+          type: integer
+          minimum: 0
+        total_bytes:
+          type: integer
+          minimum: 0
+    SendMessageRequest:
+      type: object
+      additionalProperties: false
+      required: [text]
+      properties:
         recipient:
           type: string
           minLength: 1
           maxLength: 256
-          description: Exact allowlisted Messages recipient.
+          pattern: '^(?:\+[1-9][0-9]{6,14}|[^\s@\u0000-\u001F\u007F-\u009F-][^\s@\u0000-\u001F\u007F-\u009F]*@[^\s@\u0000-\u001F\u007F-\u009F]+)$'
+          description: >-
+            Exact allowlisted direct handle: either + followed by 7-15 ASCII
+            digits with a nonzero first digit, or one email-like @ handle with
+            no whitespace. The value contains at most 256 Unicode code points
+            and cannot begin with a hyphen or contain a control character.
+            Contact names are rejected.
           example: person@example.net
-        message:
+        chat_id:
+          type: integer
+          minimum: 1
+        text:
           type: string
           minLength: 1
-          maxLength: 460
-          description: Text sent through Messages.app.
+          maxLength: 4000
+          pattern: '^[^-]'
+          description: >-
+            One to 4000 Unicode code points; tab, line feed, and carriage return
+            are allowed, while other control characters and a leading hyphen are
+            rejected.
           example: Hello from iMessage Proxy
-        sendAt:
-          type: number
-          const: -1
-          deprecated: true
-          description: Legacy immediate-send marker; omit it in new requests. Scheduling is not supported.
-    HttpError:
+      oneOf:
+        - required: [recipient]
+          properties:
+            recipient: {}
+        - required: [chat_id]
+          properties:
+            chat_id: {}
+    SendOperation:
       type: object
       additionalProperties: false
-      required: [error]
+      required: [operation_id, state]
       properties:
-        error:
+        operation_id:
           type: string
+          format: uuid
+        state:
+          type: string
+          const: accepted
+        message_id:
+          type: integer
+          minimum: 1
+        guid:
+          type: string
+    Scope:
+      type: string
+      enum: [messages:read, messages:send, admin]
+    ApiKeyMetadata:
+      type: object
+      additionalProperties: false
+      required: [id, name, key_prefix, scopes, created_at, expires_at, revoked_at, last_used_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: Normalized display name, also limited to 80 UTF-8 bytes.
+        key_prefix:
+          $ref: "#/components/schemas/KeyPrefix"
+        scopes:
+          type: array
+          minItems: 1
+          maxItems: 3
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Scope"
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: [string, "null"]
+          format: date-time
+        revoked_at:
+          type: [string, "null"]
+          format: date-time
+        last_used_at:
+          type: [string, "null"]
+          format: date-time
+    AuditEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - request_id
+        - key_id
+        - target_key_id
+        - source
+        - action
+        - phase
+        - status
+        - duration_ms
+        - created_at
+      properties:
+        request_id:
+          type: string
+          format: uuid
+        key_id:
+          type: [string, "null"]
+          format: uuid
+        target_key_id:
+          type: [string, "null"]
+          format: uuid
+        source:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: >-
+            Observed client IP address, local for a direct Unix-socket caller,
+            or invalid when rejected proxy metadata cannot be parsed.
+        action:
+          type: string
+          enum:
+            - request.invalid
+            - request.rate_limited
+            - auth.unavailable
+            - auth.rate_limited
+            - auth.reject
+            - origin.reject
+            - route.not_found
+            - status.read
+            - chats.list
+            - chats.read
+            - background.read
+            - messages.history
+            - scheduled.list
+            - statistics.read
+            - messages.send
+            - keys.list
+            - keys.read
+            - keys.create
+            - keys.revoke
+            - audit.list
+            - server.overloaded
+        phase:
+          type: string
+          enum: [attempted, final]
+        status:
+          type: [integer, "null"]
+          minimum: 100
+          maximum: 599
+        duration_ms:
+          type: [integer, "null"]
+          minimum: 0
+        created_at:
+          type: string
+          format: date-time
+    CreateApiKeyRequest:
+      type: object
+      additionalProperties: false
+      required: [name, scopes]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: >-
+            Display name after trimming leading and trailing whitespace. The
+            normalized value must encode to between 1 and 80 UTF-8 bytes and
+            contain no Unicode control characters.
+        scopes:
+          type: array
+          minItems: 1
+          maxItems: 3
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Scope"
+        expires_in_days:
+          type: integer
+          minimum: 1
+          maximum: 365
+          default: 90
+    CreatedApiKey:
+      type: object
+      additionalProperties: false
+      required: [id, name, key_prefix, scopes, created_at, expires_at, revoked_at, last_used_at, key]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: Normalized display name, also limited to 80 UTF-8 bytes.
+        key_prefix:
+          $ref: "#/components/schemas/KeyPrefix"
+        scopes:
+          type: array
+          minItems: 1
+          maxItems: 3
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Scope"
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: [string, "null"]
+          format: date-time
+        revoked_at:
+          type: [string, "null"]
+          format: date-time
+        last_used_at:
+          type: [string, "null"]
+          format: date-time
+        key:
+          type: string
+          pattern: "^imp_[A-Za-z0-9_-]{43}$"
+          readOnly: true
+          description: Returned only by this response; store it immediately.
+    KeyPrefix:
+      type: string
+      minLength: 12
+      maxLength: 12
+      pattern: "^imp_[A-Za-z0-9_-]{8}$"
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, detail, request_id]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          description: Stable native problem URI, or about:blank for an edge-generated problem.
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+        request_id:
+          type: string
+          format: uuid

@@ -8,7 +8,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        iMessage Proxy deliberately favors a narrow trust boundary over feature count. Explain the operator problem, not just a preferred implementation. Features requiring public-Internet exposure, unrestricted host control, or weaker macOS protections are out of scope.
+        iMessage Proxy deliberately favors a narrow trust boundary over feature count. Explain the operator problem, not just a preferred implementation. Additional or unreviewed public-ingress paths, unrestricted host control, and weaker macOS protections are out of scope.
   - type: checkboxes
     id: preflight
     attributes:
@@ -16,7 +16,7 @@ body:
       options:
         - label: I searched existing issues, discussions, and the roadmap.
           required: true
-        - label: This proposal preserves authenticated private-network operation and normal macOS security controls.
+        - label: This proposal preserves scoped API-key authentication, Unix-socket isolation, the public-exposure gate, and normal macOS security controls.
           required: true
         - label: I have not included private infrastructure or personal message data.
           required: true
