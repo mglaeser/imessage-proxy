@@ -18,7 +18,11 @@ INSTALL_DATADIR := $(abspath $(DESTDIR)$(DATADIR))
 SOURCE := src/stella-bridge.m
 RELEASE_BINARY := $(BUILD_DIR)/stella-bridge
 DEBUG_BINARY := $(BUILD_DIR)/stella-bridge-debug
-SHELL_SOURCES := bin/stella tests/test-stella-bridge.sh tests/fixtures/fake-imsg.sh
+SHELL_SOURCES := \
+	bin/stella \
+	tests/test-stella-bridge.sh \
+	tests/test-stella-cli.sh \
+	tests/fixtures/fake-imsg.sh
 CONFIG_FILES := \
 	config/Caddyfile \
 	config/io.github.mglaeser.stella.plist.in \
@@ -58,9 +62,10 @@ analyze: ## Run Clang's static analyzer.
 	@$(MAKE) --no-print-directory _require-macos
 	"$(CLANG)" --analyze $(SDKFLAGS) $(CPPFLAGS) $(CFLAGS) $(OBJCFLAGS) -Xanalyzer -analyzer-output=text "$(SOURCE)"
 
-test: ## Run the bridge integration test suite (macOS only).
+test: ## Run the integration and lifecycle test suites (macOS only).
 	@$(MAKE) --no-print-directory _require-macos
 	bash tests/test-stella-bridge.sh
+	bash tests/test-stella-cli.sh
 
 lint: ## Check Objective-C, shell, Markdown, and LaunchAgent files.
 	@command -v clang-format >/dev/null 2>&1 || { printf 'error: clang-format is required\n' >&2; exit 127; }

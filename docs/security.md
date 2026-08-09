@@ -97,7 +97,7 @@ Native audit lines intentionally contain only a sanitized client ID, allowed/rej
 ## Known limitations
 
 - The project is Alpha and does not yet have an independent security audit or broad host compatibility matrix.
-- Client authorization is coarse: a valid facade client can use every read method and every target allowed globally. There are no per-client scopes in 0.1.0.
+- Client authorization is coarse: a valid facade client can use every read method and every target allowed globally. There are currently no per-client scopes.
 - The native HTTP implementation is intentionally small and supports a limited subset of HTTP/1.1.
 - Caddy's internal CA requires manual, secure trust distribution and lifecycle planning.
 - The availability and semantics of `imsg` and macOS Messages can change outside Stella's release cycle.

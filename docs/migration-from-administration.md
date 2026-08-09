@@ -7,7 +7,7 @@ The migration has two separate outcomes:
 1. runtime operation comes from a checksum-pinned standalone Stella release; and
 2. the administration repository stops owning copied Stella source and references the canonical repository instead.
 
-Stella 0.1.0 is Alpha. Plan downtime and preserve a tested rollback path.
+Stella 0.1.1 is Alpha. Plan downtime and preserve a tested rollback path.
 
 ## What changes
 

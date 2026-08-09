@@ -1,6 +1,6 @@
 # API reference
 
-Stella 0.1.0 exposes three HTTPS routes through its Caddy facade. The API is Alpha and may change before 1.0.
+Stella 0.1.1 exposes three HTTPS routes through its Caddy facade. The API is Alpha and may change before 1.0.
 
 The repository also ships an [OpenAPI 3.1 description](../openapi.yaml) for tooling and client generation. This document defines the method-specific policy details that the compact OpenAPI schema references; changes to either must update both.
 
@@ -35,7 +35,7 @@ Other route/method combinations return `404`.
 ```json
 {
   "status": "ok",
-  "version": "0.1.0"
+  "version": "0.1.1"
 }
 ```
 
