@@ -21,11 +21,27 @@ choose_test_port() {
   printf 'ERROR: could not select a free loopback test port\n' >&2
   return 1
 }
-readonly TEST_PORT="${IMESSAGE_TEST_PORT:-$(choose_test_port)}"
+readonly TEST_PORT="${IMESSAGE_PROXY_TEST_PORT:-${IMESSAGE_TEST_PORT:-$(choose_test_port)}}"
 TOKEN="$(openssl rand -hex 32)"
 readonly TOKEN
-temporary="$(mktemp -d /tmp/stella-bridge-test.XXXXXX)"
+temporary="$(mktemp -d /tmp/imessage-proxy-bridge-test.XXXXXX)"
 server_pid=""
+
+unset \
+  IMESSAGE_ALLOWED_TARGETS_FILE \
+  IMESSAGE_BRIDGE_PORT \
+  IMESSAGE_BRIDGE_TOKEN_FILE \
+  IMESSAGE_PROXY_ALLOWED_TARGETS_FILE \
+  IMESSAGE_PROXY_BRIDGE_MAX_CONCURRENCY \
+  IMESSAGE_PROXY_BRIDGE_PORT \
+  IMESSAGE_PROXY_BRIDGE_SOCKET_TIMEOUT_SECONDS \
+  IMESSAGE_PROXY_BRIDGE_TOKEN_FILE \
+  IMESSAGE_PROXY_IMSG_BIN \
+  IMESSAGE_PROXY_RPC_TIMEOUT_SECONDS \
+  IMESSAGE_RPC_TIMEOUT_SECONDS \
+  IMSG_BIN \
+  STELLA_BRIDGE_MAX_CONCURRENCY \
+  STELLA_BRIDGE_SOCKET_TIMEOUT_SECONDS
 
 report_failure() {
   local exit_code="$1" line="$2"
@@ -63,19 +79,19 @@ xcrun clang \
   -Wextra \
   -framework Foundation \
   -o "$temporary/bridge" \
-  "$REPO_DIR/src/stella-bridge.m"
+  "$REPO_DIR/src/imessage-proxy-bridge.m"
 
 printf '%s\n' "$TOKEN" > "$temporary/test-token.txt"
 chmod 600 "$temporary/test-token.txt"
 install -m 0600 "$FIXTURES/allowed-targets.txt" "$temporary/allowed-targets.txt"
 
-IMESSAGE_BRIDGE_PORT="$TEST_PORT" \
-IMESSAGE_BRIDGE_TOKEN_FILE="$temporary/test-token.txt" \
-IMESSAGE_ALLOWED_TARGETS_FILE="$temporary/allowed-targets.txt" \
-IMSG_BIN="$FIXTURES/fake-imsg.sh" \
-IMESSAGE_RPC_TIMEOUT_SECONDS=2 \
-STELLA_BRIDGE_MAX_CONCURRENCY=2 \
-STELLA_BRIDGE_SOCKET_TIMEOUT_SECONDS=2 \
+IMESSAGE_PROXY_BRIDGE_PORT="$TEST_PORT" \
+IMESSAGE_PROXY_BRIDGE_TOKEN_FILE="$temporary/test-token.txt" \
+IMESSAGE_PROXY_ALLOWED_TARGETS_FILE="$temporary/allowed-targets.txt" \
+IMESSAGE_PROXY_IMSG_BIN="$FIXTURES/fake-imsg.sh" \
+IMESSAGE_PROXY_RPC_TIMEOUT_SECONDS=2 \
+IMESSAGE_PROXY_BRIDGE_MAX_CONCURRENCY=2 \
+IMESSAGE_PROXY_BRIDGE_SOCKET_TIMEOUT_SECONDS=2 \
   "$temporary/bridge" serve > "$temporary/server.log" 2>&1 &
 server_pid="$!"
 
@@ -208,29 +224,112 @@ status="$(curl --silent --output "$temporary/body.json" --write-out '%{http_code
 wait "$timeout_a_pid"
 wait "$timeout_b_pid"
 
-if IMESSAGE_BRIDGE_PORT="$TEST_PORT" \
-  IMESSAGE_BRIDGE_TOKEN_FILE="$temporary/test-token.txt" \
-  IMESSAGE_ALLOWED_TARGETS_FILE="$temporary/allowed-targets.txt" \
-  IMSG_BIN="$FIXTURES/fake-imsg.sh" \
-  IMESSAGE_RPC_TIMEOUT_SECONDS=30junk \
+if IMESSAGE_PROXY_BRIDGE_PORT="$TEST_PORT" \
+  IMESSAGE_PROXY_BRIDGE_TOKEN_FILE="$temporary/test-token.txt" \
+  IMESSAGE_PROXY_ALLOWED_TARGETS_FILE="$temporary/allowed-targets.txt" \
+  IMESSAGE_PROXY_IMSG_BIN="$FIXTURES/fake-imsg.sh" \
+  IMESSAGE_PROXY_RPC_TIMEOUT_SECONDS=30junk \
     "$temporary/bridge" check-config >/dev/null 2>&1; then
   printf 'ERROR: malformed RPC timeout was accepted\n' >&2
   exit 1
 fi
 
 chmod 0644 "$temporary/test-token.txt"
-if IMESSAGE_BRIDGE_TOKEN_FILE="$temporary/test-token.txt" \
-  IMESSAGE_ALLOWED_TARGETS_FILE="$temporary/allowed-targets.txt" \
-  IMSG_BIN="$FIXTURES/fake-imsg.sh" \
+if IMESSAGE_PROXY_BRIDGE_TOKEN_FILE="$temporary/test-token.txt" \
+  IMESSAGE_PROXY_ALLOWED_TARGETS_FILE="$temporary/allowed-targets.txt" \
+  IMESSAGE_PROXY_IMSG_BIN="$FIXTURES/fake-imsg.sh" \
     "$temporary/bridge" check-config >/dev/null 2>&1; then
   printf 'ERROR: insecure token permissions were accepted\n' >&2
   exit 1
 fi
 chmod 0600 "$temporary/test-token.txt"
 
+# Every pre-rename bridge variable remains a supported alias for one
+# transition release. A complete legacy-only configuration must still work.
+IMESSAGE_BRIDGE_PORT="$TEST_PORT" \
+IMESSAGE_BRIDGE_TOKEN_FILE="$temporary/test-token.txt" \
+IMESSAGE_ALLOWED_TARGETS_FILE="$temporary/allowed-targets.txt" \
+IMSG_BIN="$FIXTURES/fake-imsg.sh" \
+IMESSAGE_RPC_TIMEOUT_SECONDS=2 \
+STELLA_BRIDGE_MAX_CONCURRENCY=2 \
+STELLA_BRIDGE_SOCKET_TIMEOUT_SECONDS=2 \
+  "$temporary/bridge" check-config >/dev/null
+
+# Identical canonical and legacy definitions are unambiguous and accepted.
+IMESSAGE_PROXY_BRIDGE_PORT="$TEST_PORT" \
+IMESSAGE_BRIDGE_PORT="$TEST_PORT" \
+IMESSAGE_PROXY_BRIDGE_TOKEN_FILE="$temporary/test-token.txt" \
+IMESSAGE_BRIDGE_TOKEN_FILE="$temporary/test-token.txt" \
+IMESSAGE_PROXY_ALLOWED_TARGETS_FILE="$temporary/allowed-targets.txt" \
+IMESSAGE_ALLOWED_TARGETS_FILE="$temporary/allowed-targets.txt" \
+IMESSAGE_PROXY_IMSG_BIN="$FIXTURES/fake-imsg.sh" \
+IMSG_BIN="$FIXTURES/fake-imsg.sh" \
+IMESSAGE_PROXY_RPC_TIMEOUT_SECONDS=2 \
+IMESSAGE_RPC_TIMEOUT_SECONDS=2 \
+IMESSAGE_PROXY_BRIDGE_MAX_CONCURRENCY=2 \
+STELLA_BRIDGE_MAX_CONCURRENCY=2 \
+IMESSAGE_PROXY_BRIDGE_SOCKET_TIMEOUT_SECONDS=2 \
+STELLA_BRIDGE_SOCKET_TIMEOUT_SECONDS=2 \
+  "$temporary/bridge" check-config >/dev/null
+
+expect_alias_conflict() {
+  local canonical_assignment="$1" legacy_assignment="$2"
+  local canonical_name="${canonical_assignment%%=*}"
+  local legacy_name="${legacy_assignment%%=*}"
+  local output
+  if output="$(
+    env \
+      IMESSAGE_PROXY_BRIDGE_PORT="$TEST_PORT" \
+      IMESSAGE_PROXY_BRIDGE_TOKEN_FILE="$temporary/test-token.txt" \
+      IMESSAGE_PROXY_ALLOWED_TARGETS_FILE="$temporary/allowed-targets.txt" \
+      IMESSAGE_PROXY_IMSG_BIN="$FIXTURES/fake-imsg.sh" \
+      IMESSAGE_PROXY_RPC_TIMEOUT_SECONDS=2 \
+      IMESSAGE_PROXY_BRIDGE_MAX_CONCURRENCY=2 \
+      IMESSAGE_PROXY_BRIDGE_SOCKET_TIMEOUT_SECONDS=2 \
+      "$canonical_assignment" \
+      "$legacy_assignment" \
+      "$temporary/bridge" check-config 2>&1
+  )"; then
+    printf 'ERROR: conflicting aliases were accepted: %s and %s\n' \
+      "$canonical_name" "$legacy_name" >&2
+    return 1
+  fi
+  [[ "$output" == \
+    "ERROR: $canonical_name and $legacy_name disagree; unset one or make them identical" ]] || {
+    printf 'ERROR: conflict output was not value-free for %s and %s\n' \
+      "$canonical_name" "$legacy_name" >&2
+    return 1
+  }
+}
+
+expect_alias_conflict \
+  'IMESSAGE_PROXY_ALLOWED_TARGETS_FILE=/canonical/allowed-targets' \
+  'IMESSAGE_ALLOWED_TARGETS_FILE=/legacy/allowed-targets'
+expect_alias_conflict \
+  'IMESSAGE_PROXY_BRIDGE_PORT=8765' \
+  'IMESSAGE_BRIDGE_PORT=8766'
+expect_alias_conflict \
+  'IMESSAGE_PROXY_BRIDGE_TOKEN_FILE=/canonical/token' \
+  'IMESSAGE_BRIDGE_TOKEN_FILE=/legacy/token'
+expect_alias_conflict \
+  'IMESSAGE_PROXY_BRIDGE_TOKEN_FILE=' \
+  'IMESSAGE_BRIDGE_TOKEN_FILE=/legacy/token'
+expect_alias_conflict \
+  'IMESSAGE_PROXY_RPC_TIMEOUT_SECONDS=2' \
+  'IMESSAGE_RPC_TIMEOUT_SECONDS=3'
+expect_alias_conflict \
+  'IMESSAGE_PROXY_IMSG_BIN=/canonical/imsg' \
+  'IMSG_BIN=/legacy/imsg'
+expect_alias_conflict \
+  'IMESSAGE_PROXY_BRIDGE_MAX_CONCURRENCY=2' \
+  'STELLA_BRIDGE_MAX_CONCURRENCY=3'
+expect_alias_conflict \
+  'IMESSAGE_PROXY_BRIDGE_SOCKET_TIMEOUT_SECONDS=2' \
+  'STELLA_BRIDGE_SOCKET_TIMEOUT_SECONDS=3'
+
 if "$temporary/bridge" unknown-command >/dev/null 2>&1; then
   printf 'ERROR: unknown command returned success\n' >&2
   exit 1
 fi
 
-printf 'iMessage host bridge tests passed.\n'
+printf 'iMessage Proxy bridge tests passed.\n'

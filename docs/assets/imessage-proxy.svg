@@ -1,22 +1,22 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="stella-title stella-description">
-  <title id="stella-title">Stella</title>
-  <desc id="stella-description">A gold star shining inside a white message bubble on a midnight blue circle.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="imessage-proxy-title imessage-proxy-description">
+  <title id="imessage-proxy-title">iMessage Proxy</title>
+  <desc id="imessage-proxy-description">A gold star shining inside a white message bubble on a midnight blue circle.</desc>
   <defs>
-    <linearGradient id="stella-sky" x1="24" y1="18" x2="137" y2="146" gradientUnits="userSpaceOnUse">
+    <linearGradient id="imessage-proxy-sky" x1="24" y1="18" x2="137" y2="146" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#172554"/>
       <stop offset="0.55" stop-color="#1d4ed8"/>
       <stop offset="1" stop-color="#0f766e"/>
     </linearGradient>
-    <linearGradient id="stella-star" x1="61" y1="53" x2="103" y2="104" gradientUnits="userSpaceOnUse">
+    <linearGradient id="imessage-proxy-star" x1="61" y1="53" x2="103" y2="104" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#fde68a"/>
       <stop offset="0.55" stop-color="#fbbf24"/>
       <stop offset="1" stop-color="#f97316"/>
     </linearGradient>
-    <filter id="stella-shadow" x="28" y="28" width="112" height="112" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+    <filter id="imessage-proxy-shadow" x="28" y="28" width="112" height="112" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
       <feDropShadow dx="0" dy="5" stdDeviation="5" flood-color="#020617" flood-opacity="0.28"/>
     </filter>
   </defs>
-  <circle cx="80" cy="80" r="72" fill="url(#stella-sky)"/>
+  <circle cx="80" cy="80" r="72" fill="url(#imessage-proxy-sky)"/>
   <circle cx="80" cy="80" r="71" fill="none" stroke="#93c5fd" stroke-opacity="0.45" stroke-width="2"/>
   <g fill="#bfdbfe" opacity="0.72">
     <circle cx="45" cy="45" r="3"/>
@@ -24,10 +24,10 @@
     <circle cx="126" cy="103" r="3"/>
     <circle cx="41" cy="106" r="2"/>
   </g>
-  <g filter="url(#stella-shadow)">
+  <g filter="url(#imessage-proxy-shadow)">
     <path fill="#f8fafc" d="M45 42h70c9.4 0 17 7.6 17 17v42c0 9.4-7.6 17-17 17H75l-21.6 14.4c-2.7 1.8-6.4-.1-6.4-3.4v-11.2A17 17 0 0 1 28 101V59c0-9.4 7.6-17 17-17Z"/>
     <path fill="#e2e8f0" d="M47 117.9h28L53.4 132.4c-2.7 1.8-6.4-.1-6.4-3.4v-11.1Z"/>
   </g>
-  <path fill="url(#stella-star)" stroke="#b45309" stroke-width="1.5" stroke-linejoin="round" d="m80 52 6.4 18.1L104 63.6l-10.5 15.9 17.5 7.1-19.1 1.1.9 19.1L80 92.7l-12.8 14.1.9-19.1L49 86.6l17.5-7.1L56 63.6l17.6 6.5L80 52Z"/>
+  <path fill="url(#imessage-proxy-star)" stroke="#b45309" stroke-width="1.5" stroke-linejoin="round" d="m80 52 6.4 18.1L104 63.6l-10.5 15.9 17.5 7.1-19.1 1.1.9 19.1L80 92.7l-12.8 14.1.9-19.1L49 86.6l17.5-7.1L56 63.6l17.6 6.5L80 52Z"/>
   <circle cx="80" cy="80" r="4.5" fill="#fff7d6"/>
 </svg>

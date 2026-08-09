@@ -1,9 +1,10 @@
 # Roadmap
 
-Stella's roadmap prioritizes a small, understandable security boundary over feature count. Milestones describe intent, not delivery commitments.
+iMessage Proxy's roadmap prioritizes a small, understandable security boundary over feature count. Milestones describe intent, not delivery commitments.
 
-## Now — Alpha hardening (`0.1.x`)
+## Now — Alpha hardening (`0.2.x`)
 
+- [x] Adopt descriptive public naming while preserving 0.1.x runtime identities through a documented transition release.
 - [ ] Validate installation and lifecycle on a documented macOS compatibility matrix.
 - [ ] Add parser and policy regression coverage for every accepted and rejected request shape.
 - [ ] Exercise install, upgrade, restart, credential rotation, and recovery paths on clean hosts.
@@ -11,7 +12,7 @@ Stella's roadmap prioritizes a small, understandable security boundary over feat
 - [ ] Publish checksummed, reproducible source releases.
 - [ ] Gather operator feedback without expanding the public-network threat boundary.
 
-## Next — Beta readiness (`0.2.x`)
+## Next — Beta readiness (`0.3.x`)
 
 - [ ] Stabilize management commands, state paths, and configuration names.
 - [ ] Add configuration schema/version detection and preflight diagnostics.
@@ -38,4 +39,4 @@ Stella's roadmap prioritizes a small, understandable security boundary over feat
 - storing plaintext client passwords in the repository;
 - multi-tenant hosting with mutually untrusted users.
 
-Propose roadmap changes through the [feature request form](https://github.com/mglaeser/stella/issues/new?template=feature_request.yml). Security and maintenance cost are acceptance criteria, not follow-up work.
+Propose roadmap changes through the [feature request form](https://github.com/mglaeser/imessage-proxy/issues/new?template=feature_request.yml). Security and maintenance cost are acceptance criteria, not follow-up work.

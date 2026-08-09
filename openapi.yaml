@@ -1,19 +1,19 @@
 openapi: 3.1.0
 info:
-  title: Stella API
-  version: 0.1.1
+  title: iMessage Proxy API
+  version: 0.2.0
   summary: A narrow, authenticated iMessage proxy for trusted private networks.
   description: >-
-    Stella exposes allowlisted read and text-send operations through a private
+    iMessage Proxy exposes allowlisted read and text-send operations through a private
     Caddy facade. It is alpha software and must not be exposed to the Internet.
   license:
     name: Apache-2.0
     identifier: Apache-2.0
   contact:
-    url: https://github.com/mglaeser/stella
+    url: https://github.com/mglaeser/imessage-proxy
 servers:
   - url: https://messages.example.internal:9443
-    description: Replace with the operator's private Stella endpoint.
+    description: Replace with the operator's private iMessage Proxy endpoint.
 security:
   - basicAuth: []
 paths:
@@ -23,7 +23,7 @@ paths:
       summary: Exercise the facade, bridge, and imsg read path.
       responses:
         "200":
-          description: Stella and the Messages read path are healthy.
+          description: iMessage Proxy and the Messages read path are healthy.
           content:
             application/json:
               schema:
@@ -114,7 +114,7 @@ components:
       description: Use a distinct Caddy credential for each API client.
   responses:
     BadRequest:
-      description: The request does not satisfy Stella's narrow contract.
+      description: The request does not satisfy iMessage Proxy's narrow contract.
       content:
         application/json:
           schema:
@@ -132,7 +132,7 @@ components:
           schema:
             $ref: "#/components/schemas/HttpError"
     TooLarge:
-      description: The request exceeds Stella's size limit.
+      description: The request exceeds iMessage Proxy's size limit.
       content:
         application/json:
           schema:
@@ -144,7 +144,7 @@ components:
           schema:
             $ref: "#/components/schemas/HttpError"
     HeadersTooLarge:
-      description: The HTTP request headers exceed Stella's 16 KiB limit.
+      description: The HTTP request headers exceed iMessage Proxy's 16 KiB limit.
       content:
         application/json:
           schema:
@@ -162,7 +162,7 @@ components:
           schema:
             $ref: "#/components/schemas/HttpError"
     Unavailable:
-      description: The Messages read path is unavailable or Stella is overloaded.
+      description: The Messages read path is unavailable or iMessage Proxy is overloaded.
       content:
         application/json:
           schema:

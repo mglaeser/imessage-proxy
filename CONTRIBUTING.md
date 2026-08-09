@@ -1,23 +1,23 @@
-# Contributing to Stella
+# Contributing to iMessage Proxy
 
-Thank you for helping make private-network Messages automation safer. Stella welcomes focused bug reports, documentation improvements, tests, and carefully scoped code changes.
+Thank you for helping make private-network Messages automation safer. iMessage Proxy welcomes focused bug reports, documentation improvements, tests, and carefully scoped code changes.
 
 ## Before you start
 
 - Read the [Code of Conduct](CODE_OF_CONDUCT.md).
-- Search [existing issues](https://github.com/mglaeser/stella/issues) and pull requests.
+- Search [existing issues](https://github.com/mglaeser/imessage-proxy/issues) and pull requests.
 - For a substantial feature or architecture change, open a proposal issue before writing code.
 - Report security concerns through the private process in [SECURITY.md](SECURITY.md).
 
-Stella is intentionally narrow. Features that broaden host control, weaken authentication, expose the bridge beyond loopback, bypass macOS protections, or encourage public-Internet operation are unlikely to be accepted.
+iMessage Proxy is intentionally narrow. Features that broaden host control, weaken authentication, expose the bridge beyond loopback, bypass macOS protections, or encourage public-Internet operation are unlikely to be accepted.
 
 ## Development setup
 
 Most source-level validation requires macOS and Xcode Command Line Tools. The integration test uses a fake `imsg` backend and does not access real conversations or send a message.
 
 ```bash
-git clone https://github.com/mglaeser/stella.git
-cd stella
+git clone https://github.com/mglaeser/imessage-proxy.git
+cd imessage-proxy
 make build
 make test
 ```
@@ -43,7 +43,7 @@ When changing the native parser or policy layer, include negative tests for malf
 
 A good pull request:
 
-- explains the problem and why it belongs in Stella's scope;
+- explains the problem and why it belongs in iMessage Proxy's scope;
 - describes security and privacy impact;
 - links an issue when one exists;
 - contains tests and documentation appropriate to the risk;
@@ -65,7 +65,7 @@ Add a body when the motivation, compatibility impact, or threat model is not obv
 
 ## Compatibility and releases
 
-Stella uses Semantic Versioning, with the usual caveat that `0.x` versions may contain breaking changes. Maintainers create releases; contributors should not update the version unless a maintainer asks.
+iMessage Proxy uses Semantic Versioning, with the usual caveat that `0.x` versions may contain breaking changes. Maintainers create releases; contributors should not update the version unless a maintainer asks.
 
 ## Licensing
 

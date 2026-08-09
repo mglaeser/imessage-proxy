@@ -1,13 +1,13 @@
 cff-version: 1.2.0
-message: "If Stella supports your work, please cite the software using this metadata."
-title: "Stella: a security-first private-network iMessage proxy for macOS"
+message: "If iMessage Proxy supports your work, please cite the software using this metadata."
+title: "iMessage Proxy"
 type: software
 authors:
   - name: mglaeser
     website: "https://github.com/mglaeser"
-repository-code: "https://github.com/mglaeser/stella"
-url: "https://github.com/mglaeser/stella"
-version: 0.1.1
+repository-code: "https://github.com/mglaeser/imessage-proxy"
+url: "https://github.com/mglaeser/imessage-proxy"
+version: 0.2.0
 date-released: 2026-08-09
 license: Apache-2.0
 keywords:
@@ -17,6 +17,6 @@ keywords:
   - private network
   - messaging automation
 abstract: >-
-  Stella is a small, security-first proxy that exposes a deliberately narrow
-  Messages interface from macOS to explicitly authorized clients on a private
-  LAN or VPN.
+  iMessage Proxy is a small, security-first proxy that exposes a deliberately
+  narrow Messages interface from macOS to explicitly authorized clients on a
+  private LAN or VPN.

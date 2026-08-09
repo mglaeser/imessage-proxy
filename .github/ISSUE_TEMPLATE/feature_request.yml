@@ -1,5 +1,5 @@
 name: Feature request
-description: Propose a focused improvement that preserves Stella's security model
+description: Propose a focused improvement that preserves iMessage Proxy's security model
 title: "[Feature]: "
 labels:
   - enhancement
@@ -8,7 +8,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Stella deliberately favors a narrow trust boundary over feature count. Explain the operator problem, not just a preferred implementation. Features requiring public-Internet exposure, unrestricted host control, or weaker macOS protections are out of scope.
+        iMessage Proxy deliberately favors a narrow trust boundary over feature count. Explain the operator problem, not just a preferred implementation. Features requiring public-Internet exposure, unrestricted host control, or weaker macOS protections are out of scope.
   - type: checkboxes
     id: preflight
     attributes:
@@ -38,7 +38,7 @@ body:
     id: alternatives
     attributes:
       label: Alternatives considered
-      description: Include workarounds and the option of keeping Stella unchanged.
+      description: Include workarounds and the option of keeping iMessage Proxy unchanged.
     validations:
       required: true
   - type: textarea

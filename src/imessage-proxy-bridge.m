@@ -13,13 +13,17 @@
 #import <time.h>
 #import <unistd.h>
 
-#ifndef STELLA_VERSION
-#define STELLA_VERSION "0.1.1"
+#ifndef IMESSAGE_PROXY_VERSION
+#ifdef STELLA_VERSION
+#define IMESSAGE_PROXY_VERSION STELLA_VERSION
+#else
+#define IMESSAGE_PROXY_VERSION "0.2.0"
 #endif
-#define STELLA_NSSTRING_IMPL(value) @value
-#define STELLA_NSSTRING(value) STELLA_NSSTRING_IMPL(value)
+#endif
+#define IMESSAGE_PROXY_NSSTRING_IMPL(value) @value
+#define IMESSAGE_PROXY_NSSTRING(value) IMESSAGE_PROXY_NSSTRING_IMPL(value)
 
-static NSString *const BridgeVersion = STELLA_NSSTRING(STELLA_VERSION);
+static NSString *const BridgeVersion = IMESSAGE_PROXY_NSSTRING(IMESSAGE_PROXY_VERSION);
 static const NSUInteger MaxHeaderBytes = 16 * 1024;
 static const NSUInteger MaxRequestBytes = 64 * 1024;
 static const NSUInteger MaxRPCResponseBytes = 4 * 1024 * 1024;
@@ -45,6 +49,28 @@ static NSString *Trim(NSString *value) {
 }
 
 static NSString *StringOrFallback(NSString *value, NSString *fallback) { return value != nil ? value : fallback; }
+
+static BOOL ResolveEnvironmentSetting(NSDictionary<NSString *, NSString *> *environment, NSString *canonicalName,
+                                      NSString *legacyName, NSString *fallback, NSString **result,
+                                      NSError *_Nullable *_Nonnull error) {
+    NSString *canonicalValue = environment[canonicalName];
+    NSString *legacyValue = environment[legacyName];
+    BOOL hasCanonicalValue = canonicalValue != nil;
+    BOOL hasLegacyValue = legacyValue != nil;
+    if (hasCanonicalValue && hasLegacyValue && ![canonicalValue isEqualToString:legacyValue]) {
+        *error = BridgeError(500, [NSString stringWithFormat:@"%@ and %@ disagree; unset one or make them identical",
+                                                             canonicalName, legacyName]);
+        return NO;
+    }
+    if (hasCanonicalValue) {
+        *result = canonicalValue;
+    } else if (hasLegacyValue) {
+        *result = legacyValue;
+    } else {
+        *result = fallback;
+    }
+    return YES;
+}
 
 static BOOL ParseUnsignedInteger(NSString *text, NSUInteger minimum, NSUInteger maximum, NSUInteger *result) {
     if (text.length == 0) {
@@ -119,17 +145,25 @@ static NSData *ReadPrivateFile(NSString *path, NSString *label, NSUInteger maxim
 
 static BOOL LoadConfiguration(NSError *_Nullable *_Nonnull error) {
     NSDictionary<NSString *, NSString *> *environment = NSProcessInfo.processInfo.environment;
-    NSString *portText = StringOrFallback(environment[@"IMESSAGE_BRIDGE_PORT"], @"8765");
+    NSString *portText = nil;
+    if (!ResolveEnvironmentSetting(environment, @"IMESSAGE_PROXY_BRIDGE_PORT", @"IMESSAGE_BRIDGE_PORT", @"8765",
+                                   &portText, error)) {
+        return NO;
+    }
     NSUInteger portValue = 0;
     if (!ParseUnsignedInteger(portText, 1, 65535, &portValue)) {
-        *error = BridgeError(500, @"IMESSAGE_BRIDGE_PORT must be 1-65535");
+        *error = BridgeError(500, @"IMESSAGE_PROXY_BRIDGE_PORT must be 1-65535");
         return NO;
     }
     bridgePort = (uint16_t)portValue;
 
-    NSString *tokenPath = environment[@"IMESSAGE_BRIDGE_TOKEN_FILE"];
+    NSString *tokenPath = nil;
+    if (!ResolveEnvironmentSetting(environment, @"IMESSAGE_PROXY_BRIDGE_TOKEN_FILE", @"IMESSAGE_BRIDGE_TOKEN_FILE", nil,
+                                   &tokenPath, error)) {
+        return NO;
+    }
     if (tokenPath.length == 0) {
-        *error = BridgeError(500, @"IMESSAGE_BRIDGE_TOKEN_FILE is required");
+        *error = BridgeError(500, @"IMESSAGE_PROXY_BRIDGE_TOKEN_FILE is required");
         return NO;
     }
     NSData *tokenData = ReadPrivateFile(tokenPath, @"bridge token file", 1024, error);
@@ -145,9 +179,13 @@ static BOOL LoadConfiguration(NSError *_Nullable *_Nonnull error) {
         return NO;
     }
 
-    NSString *targetsPath = environment[@"IMESSAGE_ALLOWED_TARGETS_FILE"];
+    NSString *targetsPath = nil;
+    if (!ResolveEnvironmentSetting(environment, @"IMESSAGE_PROXY_ALLOWED_TARGETS_FILE",
+                                   @"IMESSAGE_ALLOWED_TARGETS_FILE", nil, &targetsPath, error)) {
+        return NO;
+    }
     if (targetsPath.length == 0) {
-        *error = BridgeError(500, @"IMESSAGE_ALLOWED_TARGETS_FILE is required");
+        *error = BridgeError(500, @"IMESSAGE_PROXY_ALLOWED_TARGETS_FILE is required");
         return NO;
     }
     NSData *targetsData = ReadPrivateFile(targetsPath, @"allowed targets file", 64 * 1024, error);
@@ -184,31 +222,46 @@ static BOOL LoadConfiguration(NSError *_Nullable *_Nonnull error) {
     }
     allowedTargets = [targets copy];
 
-    imsgPath = StringOrFallback(environment[@"IMSG_BIN"], @"/opt/homebrew/bin/imsg");
+    if (!ResolveEnvironmentSetting(environment, @"IMESSAGE_PROXY_IMSG_BIN", @"IMSG_BIN", @"/opt/homebrew/bin/imsg",
+                                   &imsgPath, error)) {
+        return NO;
+    }
     if (![NSFileManager.defaultManager isExecutableFileAtPath:imsgPath]) {
         *error = BridgeError(500, @"imsg is not executable at configured path");
         return NO;
     }
 
-    NSString *timeoutText = StringOrFallback(environment[@"IMESSAGE_RPC_TIMEOUT_SECONDS"], @"30");
+    NSString *timeoutText = nil;
+    if (!ResolveEnvironmentSetting(environment, @"IMESSAGE_PROXY_RPC_TIMEOUT_SECONDS", @"IMESSAGE_RPC_TIMEOUT_SECONDS",
+                                   @"30", &timeoutText, error)) {
+        return NO;
+    }
     NSUInteger timeoutValue = 0;
     if (!ParseUnsignedInteger(timeoutText, 1, 120, &timeoutValue)) {
-        *error = BridgeError(500, @"IMESSAGE_RPC_TIMEOUT_SECONDS must be 1-120");
+        *error = BridgeError(500, @"IMESSAGE_PROXY_RPC_TIMEOUT_SECONDS must be 1-120");
         return NO;
     }
     rpcTimeout = (NSTimeInterval)timeoutValue;
 
-    NSString *socketTimeoutText = StringOrFallback(environment[@"STELLA_BRIDGE_SOCKET_TIMEOUT_SECONDS"], @"10");
+    NSString *socketTimeoutText = nil;
+    if (!ResolveEnvironmentSetting(environment, @"IMESSAGE_PROXY_BRIDGE_SOCKET_TIMEOUT_SECONDS",
+                                   @"STELLA_BRIDGE_SOCKET_TIMEOUT_SECONDS", @"10", &socketTimeoutText, error)) {
+        return NO;
+    }
     NSUInteger socketTimeoutValue = 0;
     if (!ParseUnsignedInteger(socketTimeoutText, 1, 60, &socketTimeoutValue)) {
-        *error = BridgeError(500, @"STELLA_BRIDGE_SOCKET_TIMEOUT_SECONDS must be 1-60");
+        *error = BridgeError(500, @"IMESSAGE_PROXY_BRIDGE_SOCKET_TIMEOUT_SECONDS must be 1-60");
         return NO;
     }
     socketTimeout = (NSTimeInterval)socketTimeoutValue;
 
-    NSString *concurrencyText = StringOrFallback(environment[@"STELLA_BRIDGE_MAX_CONCURRENCY"], @"8");
+    NSString *concurrencyText = nil;
+    if (!ResolveEnvironmentSetting(environment, @"IMESSAGE_PROXY_BRIDGE_MAX_CONCURRENCY",
+                                   @"STELLA_BRIDGE_MAX_CONCURRENCY", @"8", &concurrencyText, error)) {
+        return NO;
+    }
     if (!ParseUnsignedInteger(concurrencyText, 1, 64, &maxConcurrentRequests)) {
-        *error = BridgeError(500, @"STELLA_BRIDGE_MAX_CONCURRENCY must be 1-64");
+        *error = BridgeError(500, @"IMESSAGE_PROXY_BRIDGE_MAX_CONCURRENCY must be 1-64");
         return NO;
     }
     return YES;
@@ -694,10 +747,10 @@ static NSData *RunRPC(NSData *request, NSError *_Nullable *_Nonnull error) {
         return nil;
     }
     if (stderrExceeded) {
-        fprintf(stderr, "stella-bridge: imsg diagnostics exceeded the size limit\n");
+        fprintf(stderr, "imessage-proxy-bridge: imsg diagnostics exceeded the size limit\n");
     }
     if (task.terminationStatus != 0) {
-        fprintf(stderr, "stella-bridge: imsg exited status=%d\n", task.terminationStatus);
+        fprintf(stderr, "imessage-proxy-bridge: imsg exited status=%d\n", task.terminationStatus);
         *error = BridgeError(502, @"imsg RPC failed");
         return nil;
     }
@@ -740,7 +793,7 @@ static BOOL IsJSONContentType(NSString *value) {
 
 static void Audit(NSString *caller, NSString *method, NSInteger status, NSDate *started) {
     NSInteger milliseconds = (NSInteger)(-[started timeIntervalSinceNow] * 1000);
-    fprintf(stderr, "stella-bridge: caller=%s method=%s status=%ld duration_ms=%ld\n", caller.UTF8String,
+    fprintf(stderr, "imessage-proxy-bridge: caller=%s method=%s status=%ld duration_ms=%ld\n", caller.UTF8String,
             method.UTF8String, (long)status, (long)milliseconds);
 }
 
@@ -1155,7 +1208,7 @@ static BOOL RunServer(NSError *_Nullable *_Nonnull error) {
         return NO;
     }
 
-    fprintf(stderr, "stella-bridge %s listening on 127.0.0.1:%u\n", BridgeVersion.UTF8String, bridgePort);
+    fprintf(stderr, "imessage-proxy-bridge %s listening on 127.0.0.1:%u\n", BridgeVersion.UTF8String, bridgePort);
     dispatch_queue_t clients =
         dispatch_queue_create("io.github.mglaeser.stella.bridge.clients", DISPATCH_QUEUE_CONCURRENT);
     dispatch_queue_t rejections =
@@ -1203,15 +1256,16 @@ static BOOL RunServer(NSError *_Nullable *_Nonnull error) {
 }
 
 static void Usage(void) {
-    puts("Usage: stella-bridge serve | check-config | version\n\n"
+    puts("Usage: imessage-proxy-bridge serve | check-config | version\n\n"
          "Environment:\n"
-         "  IMESSAGE_BRIDGE_PORT\n"
-         "  IMESSAGE_BRIDGE_TOKEN_FILE\n"
-         "  IMESSAGE_ALLOWED_TARGETS_FILE\n"
-         "  IMSG_BIN\n"
-         "  IMESSAGE_RPC_TIMEOUT_SECONDS\n"
-         "  STELLA_BRIDGE_MAX_CONCURRENCY\n"
-         "  STELLA_BRIDGE_SOCKET_TIMEOUT_SECONDS");
+         "  IMESSAGE_PROXY_BRIDGE_PORT\n"
+         "  IMESSAGE_PROXY_BRIDGE_TOKEN_FILE\n"
+         "  IMESSAGE_PROXY_ALLOWED_TARGETS_FILE\n"
+         "  IMESSAGE_PROXY_IMSG_BIN\n"
+         "  IMESSAGE_PROXY_RPC_TIMEOUT_SECONDS\n"
+         "  IMESSAGE_PROXY_BRIDGE_MAX_CONCURRENCY\n"
+         "  IMESSAGE_PROXY_BRIDGE_SOCKET_TIMEOUT_SECONDS\n\n"
+         "Stella v0.1 environment names remain accepted as deprecated aliases.");
 }
 
 int main(int argc, const char *argv[]) {

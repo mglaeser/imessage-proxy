@@ -1,6 +1,6 @@
 # Governance
 
-Stella uses a maintainer-led, contribution-friendly governance model. The goal is clear accountability while the project is small, with a path to shared stewardship as the contributor community grows.
+iMessage Proxy uses a maintainer-led, contribution-friendly governance model. The goal is clear accountability while the project is small, with a path to shared stewardship as the contributor community grows.
 
 ## Roles
 
