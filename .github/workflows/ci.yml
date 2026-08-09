@@ -51,7 +51,8 @@ jobs:
           tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
           chmod 0755 "$RUNNER_TEMP/actionlint"
       - name: Validate workflows
-        run: "$RUNNER_TEMP/actionlint"
+        run: |
+          "$RUNNER_TEMP/actionlint"
       - name: Validate OpenAPI contract
         run: npx --yes @redocly/cli@2.46.0 lint openapi.yaml
 
