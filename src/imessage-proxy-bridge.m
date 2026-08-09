@@ -222,10 +222,12 @@ static BOOL LoadConfiguration(NSError *_Nullable *_Nonnull error) {
     }
     allowedTargets = [targets copy];
 
+    NSString *resolvedImsgPath = nil;
     if (!ResolveEnvironmentSetting(environment, @"IMESSAGE_PROXY_IMSG_BIN", @"IMSG_BIN", @"/opt/homebrew/bin/imsg",
-                                   &imsgPath, error)) {
+                                   &resolvedImsgPath, error)) {
         return NO;
     }
+    imsgPath = resolvedImsgPath;
     if (![NSFileManager.defaultManager isExecutableFileAtPath:imsgPath]) {
         *error = BridgeError(500, @"imsg is not executable at configured path");
         return NO;
