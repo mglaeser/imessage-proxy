@@ -2,7 +2,7 @@
 	admin off
 	auto_https disable_redirects
 	servers {
-		max_header_size 16KB
+		max_header_size 16KiB
 		timeouts {
 			read_body 15s
 			read_header 5s
@@ -21,11 +21,11 @@ https://{$STELLA_API_HOST}:{$STELLA_API_PORT} {
 	}
 
 	route {
-		@outside not remote_ip private_ranges
+		@outside not remote_ip private_ranges 100.64.0.0/10
 		abort @outside
 
 		request_body {
-			max_size 64KB
+			max_size 64KiB
 		}
 
 		basic_auth {
@@ -64,11 +64,11 @@ https://{$STELLA_API_HOST}:{$STELLA_API_PORT} {
 			}
 		}
 
-		@sipgate_sms {
+		@sms_style_send {
 			method POST
 			path /v2/sessions/sms
 		}
-		handle @sipgate_sms {
+		handle @sms_style_send {
 			reverse_proxy http://{$STELLA_BRIDGE_HOST}:{$STELLA_BRIDGE_PORT} {
 				header_up Authorization "Bearer {$STELLA_BRIDGE_TOKEN}"
 				header_up X-API-Client {http.auth.user.id}

@@ -1,6 +1,6 @@
 # API reference
 
-iMessage Proxy 0.2.0 exposes three HTTPS routes through its Caddy facade. The API is Alpha and may change before 1.0.
+iMessage Proxy 0.3.0 exposes three HTTPS routes through its Caddy facade. The API is Alpha and may change before 1.0.
 
 The repository also ships an [OpenAPI 3.1 description](../openapi.yaml) for tooling and client generation. This document defines the method-specific policy details that the compact OpenAPI schema references; changes to either must update both.
 
@@ -14,6 +14,11 @@ https://messages.example.internal:9443
 
 External clients authenticate to Caddy with HTTP Basic Auth over TLS. Every client should have a distinct username and password. Clients must trust the private Caddy root CA and must not disable certificate verification.
 
+Authorization is currently coarse: every valid facade client can use every read
+method and can send to any target in the deployment-wide allowlist. Give
+credentials only to clients that may read the exposed conversations, and revoke
+each client independently.
+
 The bearer credential between Caddy and the native bridge is an internal implementation detail. Never distribute it to API clients or send it to the HTTPS facade.
 
 POST request bodies use UTF-8 JSON with `Content-Type: application/json`. Query strings, chunked transfer encoding, duplicate headers, bodies over 64 KiB, and headers over 16 KiB are rejected. Responses include `Cache-Control: no-store`.
@@ -24,7 +29,7 @@ POST request bodies use UTF-8 JSON with `Content-Type: application/json`. Query 
 | --- | --- | --- | --- |
 | `GET` | `/healthz` | Exercise the facade, bridge, `imsg`, and a minimal Messages read | `200` JSON |
 | `POST` | `/v1/rpc` | Submit one allowlisted JSON-RPC 2.0 request | `200` JSON-RPC |
-| `POST` | `/v2/sessions/sms` | Submit one immediate Sipgate-shaped text send | `204` empty body |
+| `POST` | `/v2/sessions/sms` | Send one allowlisted iMessage with a compact JSON body | `204` empty body |
 
 Other route/method combinations return `404`.
 
@@ -35,7 +40,7 @@ Other route/method combinations return `404`.
 ```json
 {
   "status": "ok",
-  "version": "0.2.0"
+  "version": "0.3.0"
 }
 ```
 
@@ -134,6 +139,10 @@ Sends text through Messages.app. iMessage Proxy requires exactly one target sele
 | `service` | No | `auto`, `imessage`, or `sms`; normalized to lowercase |
 | `region` | No | String, maximum `16` characters |
 
+Unlike the simple endpoint below, this advanced RPC may request carrier SMS via
+`service: "sms"` or let Messages choose via `service: "auto"`. Client
+credentials are not scoped per route or method.
+
 The target's exact allowlist representation must appear in `allowed-targets.txt`:
 
 ```text
@@ -168,31 +177,39 @@ Looks up the status of one sent message.
 {"jsonrpc":"2.0","id":"status-1","method":"message.send_status","params":{"guid":"example-guid"}}
 ```
 
-## Sipgate-shaped compatibility endpoint
+## Simple SMS-style endpoint
 
-`POST /v2/sessions/sms` accepts the immediate-send shape used by Sipgate clients. It is a narrow compatibility adapter—not an implementation of Sipgate accounts, caller IDs, balances, history, or scheduling.
+`POST /v2/sessions/sms` is an easy-to-use endpoint for immediate iMessage
+sends without a JSON-RPC envelope. Its small JSON body works like sending an
+SMS: provide the required opaque `smsId` value, recipient, and message. The endpoint always forces
+the `imessage` service and normal AppleScript transport; it is not a carrier SMS
+gateway and exposes no provider-side account, caller-ID, balance, history, or
+scheduling surface.
 
 The request must use `Content-Type: application/json` and contain only:
 
 | Field | Required | Constraint |
 | --- | --- | --- |
-| `smsId` | Yes | Non-empty string, maximum `64` characters; accepted for compatibility only |
+| `smsId` | Yes | Opaque string, maximum `64` characters; validated and discarded, never logged or returned, and not used for correlation, deduplication, or idempotency |
 | `recipient` | Yes | Non-empty string, maximum `256` characters; must be exactly allowlisted |
 | `message` | Yes | String containing `1`–`460` characters |
-| `sendAt` | No | Omit or use numeric `-1`; scheduled timestamps are rejected |
+| `sendAt` | No | Legacy immediate marker; omit it in new requests, or use numeric `-1`; scheduled timestamps are rejected |
 
-The adapter forces `service: imessage` and the AppleScript transport. Success returns `204 No Content`.
+Success returns `204 No Content`, which means Messages.app accepted the send
+command—not that the recipient received it. Do not automatically retry after an
+ambiguous timeout; reconcile through message history to avoid duplicate sends.
 
 ```bash
 curl \
   --cacert /secure/path/imessage-proxy-root.crt \
-  --user compatibility-a \
+  --user automation-a \
   --header 'Content-Type: application/json' \
-  --data '{"smsId":"request-1","recipient":"person@example.net","message":"iMessage Proxy compatibility test","sendAt":-1}' \
+  --data '{"smsId":"request-1","recipient":"person@example.net","message":"Hello from iMessage Proxy"}' \
   https://messages.example.internal:9443/v2/sessions/sms
 ```
 
-Use a new iMessage Proxy credential even when a client's username resembles an existing token ID. Never reuse a third-party provider password or token.
+Use a distinct iMessage Proxy credential for every client. Never reuse a
+password or token from another service.
 
 ## Errors
 
@@ -208,12 +225,14 @@ Bridge-generated errors use a small JSON object:
 | `401` | Missing or invalid credentials at an authentication boundary |
 | `403` | RPC method, parameter, or send target is forbidden |
 | `404` | Route or HTTP method not found |
+| `408` | The bounded HTTP request timed out at the facade or bridge |
 | `413` | Request body exceeds 64 KiB |
 | `415` | A POST endpoint is not using JSON content type |
 | `431` | Headers exceed 16 KiB |
-| `502` | `imsg` failed, returned no JSON, returned an error for a compatibility send, or exceeded 4 MiB |
-| `503` | Functional health could not read through `imsg`, or the bridge concurrency limit is full |
-| `504` | `imsg` exceeded the configured RPC timeout |
+| `500` | The bridge or facade encountered an internal error |
+| `502` | `imsg` failed or returned an invalid response, an SMS-style send failed, or the facade could not use the bridge upstream |
+| `503` | Functional health failed, the bridge concurrency limit is full, or the facade/upstream is temporarily unavailable |
+| `504` | The bridge's `imsg` deadline or the facade's wait for the bridge expired |
 
 Caddy can reject a request before it reaches the bridge; its error body is not part of iMessage Proxy's JSON error contract. Clients should primarily branch on HTTP status and treat bodies as diagnostic text.
 

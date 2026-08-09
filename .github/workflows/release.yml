@@ -18,9 +18,10 @@ jobs:
     name: Source archive and provenance
     if: github.ref_type == 'tag'
     runs-on: macos-15
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       attestations: write
+      checks: read
       contents: write
       id-token: write
     steps:
@@ -33,6 +34,43 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Require the tagged commit on main
+        shell: bash
+        run: |
+          git fetch --no-tags origin \
+            '+refs/heads/main:refs/remotes/origin/main'
+          git merge-base --is-ancestor \
+            "$GITHUB_SHA" refs/remotes/origin/main
+          tag_ref="refs/tags/$GITHUB_REF_NAME^{}"
+          tag_record="$(git ls-remote --exit-code origin "$tag_ref")"
+          test "$tag_record" = "$GITHUB_SHA"$'\t'"$tag_ref"
+      - name: Require successful main checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          check_runs="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100")"
+          for required_check in \
+            'Workflows and API contract' \
+            'Caddy facade integration (ARM64)' \
+            'Build, lint, and test' \
+            'Install layout' \
+            'Analyze GitHub Actions' \
+            'Gitleaks' \
+            'Supply-chain analysis'; do
+            jq -e --arg name "$required_check" '
+              any(.check_runs[];
+                .name == $name and
+                .status == "completed" and
+                .conclusion == "success")
+            ' <<< "$check_runs" >/dev/null || {
+              printf 'Required check is not successful: %s\n' \
+                "$required_check" >&2
+              exit 1
+            }
+          done
       - name: Validate release version
         id: metadata
         shell: bash
@@ -41,10 +79,17 @@ jobs:
           test "$GITHUB_REF_NAME" = "v$version"
           test "$version" = "$(make --no-print-directory version)"
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-      - name: Create reproducible source archive and checksum
+      - name: Install validation tools
+        run: brew install caddy clang-format markdownlint-cli2 shellcheck
+      - name: Revalidate tagged source
+        run: |
+          make check STRICT=1
+          npx --yes @redocly/cli@2.46.0 lint openapi.yaml
+      - name: Create source archive and checksum
         env:
           VERSION: ${{ steps.metadata.outputs.version }}
         run: |
+          set -o pipefail
           mkdir -p dist
           export COPYFILE_DISABLE=1
           git archive --format=tar --prefix="imessage-proxy-$VERSION/" "$GITHUB_SHA" |
@@ -59,6 +104,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          verify_remote_tag() {
+            local tag_record tag_ref
+            tag_ref="refs/tags/$GITHUB_REF_NAME^{}"
+            tag_record="$(git ls-remote --exit-code origin "$tag_ref")"
+            test "$tag_record" = "$GITHUB_SHA"$'\t'"$tag_ref"
+          }
+          verify_remote_tag
           archive="dist/imessage-proxy-${{ steps.metadata.outputs.version }}.tar.gz"
           archive_name="${archive##*/}"
           if release_is_draft="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null)"; then
@@ -71,6 +123,7 @@ jobs:
                 --pattern "$archive_name"
               cmp -s dist/SHA256SUMS "$temporary/SHA256SUMS"
               cmp -s "$archive" "$temporary/$archive_name"
+              verify_remote_tag
               printf 'Published release assets already match this tag; no mutation required.\n'
               exit 0
             fi
@@ -82,4 +135,5 @@ jobs:
               --verify-tag
           fi
           gh release upload "$GITHUB_REF_NAME" dist/SHA256SUMS "$archive" --clobber
+          verify_remote_tag
           gh release edit "$GITHUB_REF_NAME" --draft=false

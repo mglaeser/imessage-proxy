@@ -21,6 +21,7 @@ DEBUG_BINARY := $(BUILD_DIR)/imessage-proxy-bridge-debug
 SHELL_SOURCES := \
 	bin/imessage-proxy \
 	bin/stella \
+	tests/test-caddy-facade.sh \
 	tests/test-imessage-proxy-bridge.sh \
 	tests/test-imessage-proxy-cli.sh \
 	tests/fixtures/fake-imsg.sh

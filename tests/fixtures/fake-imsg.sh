@@ -26,7 +26,7 @@ while IFS= read -r request; do
     printf '{"jsonrpc":"2.0","id":"read","error":{"code":-32602,"message":"unsafe read params"}}\n'
     continue
   fi
-  if [[ "$id" == send || "$id" == sipgate-sms ]] && [[ "$request" != *'"transport":"applescript"'* ]]; then
+  if [[ "$id" == send || "$id" == sms-style-send ]] && [[ "$request" != *'"transport":"applescript"'* ]]; then
     printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32602,"message":"unsafe send transport"}}\n' "$id"
     continue
   fi

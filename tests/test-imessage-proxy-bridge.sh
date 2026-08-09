@@ -60,6 +60,7 @@ cleanup() {
   fi
   rm -f \
     "$temporary/allowed-targets.txt" \
+    "$temporary/allowed-targets.original" \
     "$temporary/body.json" \
     "$temporary/bridge" \
     "$temporary/server.log" \
@@ -84,6 +85,45 @@ xcrun clang \
 printf '%s\n' "$TOKEN" > "$temporary/test-token.txt"
 chmod 600 "$temporary/test-token.txt"
 install -m 0600 "$FIXTURES/allowed-targets.txt" "$temporary/allowed-targets.txt"
+unicode_identifier="$(printf '😀%.0s' {1..256})"
+readonly unicode_identifier
+printf 'chat_identifier:%s\n' "$unicode_identifier" >> "$temporary/allowed-targets.txt"
+install -m 0600 "$temporary/allowed-targets.txt" "$temporary/allowed-targets.original"
+
+configuration_fingerprint() {
+  IMESSAGE_PROXY_BRIDGE_PORT="$TEST_PORT" \
+  IMESSAGE_PROXY_BRIDGE_TOKEN_FILE="$temporary/test-token.txt" \
+  IMESSAGE_PROXY_ALLOWED_TARGETS_FILE="$temporary/allowed-targets.txt" \
+  IMESSAGE_PROXY_IMSG_BIN="$FIXTURES/fake-imsg.sh" \
+  IMESSAGE_PROXY_RPC_TIMEOUT_SECONDS=2 \
+  IMESSAGE_PROXY_BRIDGE_MAX_CONCURRENCY=2 \
+  IMESSAGE_PROXY_BRIDGE_SOCKET_TIMEOUT_SECONDS=2 \
+    "$temporary/bridge" config-fingerprint
+}
+
+expected_fingerprint="$(configuration_fingerprint)"
+readonly expected_fingerprint
+[[ "$expected_fingerprint" =~ ^sha256:[0-9a-f]{64}$ ]]
+[[ "$expected_fingerprint" != *"$TOKEN"* &&
+  "$expected_fingerprint" != *'+15551234567'* ]]
+
+printf '# exact-byte fingerprint regression\n' >> "$temporary/allowed-targets.txt"
+changed_targets_fingerprint="$(configuration_fingerprint)"
+[[ "$changed_targets_fingerprint" =~ ^sha256:[0-9a-f]{64}$ &&
+  "$changed_targets_fingerprint" != "$expected_fingerprint" ]]
+install -m 0600 "$temporary/allowed-targets.original" "$temporary/allowed-targets.txt"
+
+printf '%064d\n' 0 > "$temporary/test-token.txt"
+changed_token_fingerprint="$(configuration_fingerprint)"
+[[ "$changed_token_fingerprint" =~ ^sha256:[0-9a-f]{64}$ &&
+  "$changed_token_fingerprint" != "$expected_fingerprint" ]]
+
+printf '%s' "$TOKEN" > "$temporary/test-token.txt"
+changed_token_bytes_fingerprint="$(configuration_fingerprint)"
+[[ "$changed_token_bytes_fingerprint" =~ ^sha256:[0-9a-f]{64}$ &&
+  "$changed_token_bytes_fingerprint" != "$expected_fingerprint" ]]
+printf '%s\n' "$TOKEN" > "$temporary/test-token.txt"
+chmod 0600 "$temporary/test-token.txt"
 
 IMESSAGE_PROXY_BRIDGE_PORT="$TEST_PORT" \
 IMESSAGE_PROXY_BRIDGE_TOKEN_FILE="$temporary/test-token.txt" \
@@ -110,6 +150,39 @@ status="$(curl --silent --output "$temporary/body.json" --write-out '%{http_code
 [[ "$status" == "401" ]]
 
 status="$(curl --silent --output "$temporary/body.json" --write-out '%{http_code}' \
+  "http://127.0.0.1:$TEST_PORT/_internal/configuration-fingerprint")"
+[[ "$status" == "401" ]]
+
+status="$(curl --silent --output "$temporary/body.json" --write-out '%{http_code}' \
+  --header "Authorization: Bearer $TOKEN" \
+  --request POST \
+  "http://127.0.0.1:$TEST_PORT/_internal/configuration-fingerprint")"
+[[ "$status" == "404" ]]
+
+status="$(curl --silent --output "$temporary/body.json" --write-out '%{http_code}' \
+  --header "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$TEST_PORT/_internal/configuration-fingerprint")"
+[[ "$status" == "200" ]]
+[[ "$(< "$temporary/body.json")" == \
+  "{\"configurationFingerprint\":\"$expected_fingerprint\"}" ]]
+if grep -Fq "$TOKEN" "$temporary/body.json" ||
+  grep -Fq '+15551234567' "$temporary/body.json"; then
+  printf 'ERROR: internal configuration fingerprint exposed configuration values\n' >&2
+  exit 1
+fi
+
+# The server fingerprint represents its startup snapshot, not later file drift.
+printf '# drift after bridge startup\n' >> "$temporary/allowed-targets.txt"
+[[ "$(configuration_fingerprint)" != "$expected_fingerprint" ]]
+status="$(curl --silent --output "$temporary/body.json" --write-out '%{http_code}' \
+  --header "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$TEST_PORT/_internal/configuration-fingerprint")"
+[[ "$status" == "200" ]]
+[[ "$(< "$temporary/body.json")" == \
+  "{\"configurationFingerprint\":\"$expected_fingerprint\"}" ]]
+install -m 0600 "$temporary/allowed-targets.original" "$temporary/allowed-targets.txt"
+
+status="$(curl --silent --output "$temporary/body.json" --write-out '%{http_code}' \
   --header "Authorization: Bearer $TOKEN" \
   --header "X-API-Client: test-client" \
   "http://127.0.0.1:$TEST_PORT/healthz")"
@@ -123,6 +196,14 @@ status="$(curl --silent --output "$temporary/body.json" --write-out '%{http_code
   "http://127.0.0.1:$TEST_PORT/v1/rpc")"
 [[ "$status" == "200" ]]
 grep -Fq '"id":"read"' "$temporary/body.json"
+grep -Fq '"ok":true' "$temporary/body.json"
+
+status="$(curl --silent --output "$temporary/body.json" --write-out '%{http_code}' \
+  --header "Authorization: Bearer $TOKEN" \
+  --header 'Content-Type: application/json' \
+  --data "{\"jsonrpc\":\"2.0\",\"id\":\"unicode-allowlist\",\"method\":\"send\",\"params\":{\"chat_identifier\":\"${unicode_identifier}\",\"text\":\"test\"}}" \
+  "http://127.0.0.1:$TEST_PORT/v1/rpc")"
+[[ "$status" == "200" ]]
 grep -Fq '"ok":true' "$temporary/body.json"
 
 status="$(curl --silent --output "$temporary/body.json" --write-out '%{http_code}' \
@@ -143,10 +224,26 @@ status="$(curl --silent --output "$temporary/body.json" --write-out '%{http_code
 status="$(curl --silent --output "$temporary/body.json" --write-out '%{http_code}' \
   --header "Authorization: Bearer $TOKEN" \
   --header 'Content-Type: application/json' \
-  --data '{"smsId":"s0","recipient":"+15551234567","message":"Sipgate-compatible test","sendAt":-1}' \
+  --data '{"smsId":"s0","recipient":"+15551234567","message":"SMS-style endpoint test","sendAt":-1}' \
   "http://127.0.0.1:$TEST_PORT/v2/sessions/sms")"
 [[ "$status" == "204" ]]
 [[ ! -s "$temporary/body.json" ]]
+
+sms_message_at_limit="$(printf '😀%.0s' {1..460})"
+status="$(curl --silent --output "$temporary/body.json" --write-out '%{http_code}' \
+  --header "Authorization: Bearer $TOKEN" \
+  --header 'Content-Type: application/json' \
+  --data "{\"smsId\":\"unicode-limit\",\"recipient\":\"+15551234567\",\"message\":\"${sms_message_at_limit}\"}" \
+  "http://127.0.0.1:$TEST_PORT/v2/sessions/sms")"
+[[ "$status" == "204" ]]
+
+sms_message_over_limit="${sms_message_at_limit}😀"
+status="$(curl --silent --output "$temporary/body.json" --write-out '%{http_code}' \
+  --header "Authorization: Bearer $TOKEN" \
+  --header 'Content-Type: application/json' \
+  --data "{\"smsId\":\"unicode-over-limit\",\"recipient\":\"+15551234567\",\"message\":\"${sms_message_over_limit}\"}" \
+  "http://127.0.0.1:$TEST_PORT/v2/sessions/sms")"
+[[ "$status" == "400" ]]
 
 status="$(curl --silent --output "$temporary/body.json" --write-out '%{http_code}' \
   --header "Authorization: Bearer $TOKEN" \

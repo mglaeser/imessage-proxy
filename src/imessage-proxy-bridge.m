@@ -1,3 +1,4 @@
+#import <CommonCrypto/CommonDigest.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <Foundation/Foundation.h>
 #import <arpa/inet.h>
@@ -17,7 +18,7 @@
 #ifdef STELLA_VERSION
 #define IMESSAGE_PROXY_VERSION STELLA_VERSION
 #else
-#define IMESSAGE_PROXY_VERSION "0.2.0"
+#define IMESSAGE_PROXY_VERSION "0.3.0"
 #endif
 #endif
 #define IMESSAGE_PROXY_NSSTRING_IMPL(value) @value
@@ -31,12 +32,20 @@ static const NSUInteger MaxRPCDiagnosticBytes = 64 * 1024;
 
 static uint16_t bridgePort = 8765;
 static NSString *bridgeToken;
+static NSData *bridgeTokenFileData;
+static NSString *bridgeTokenPath;
 static NSString *imsgPath;
 static NSSet<NSString *> *allowedTargets;
+static NSData *allowedTargetsFileData;
+static NSString *allowedTargetsPath;
+static NSDictionary<NSString *, NSString *> *configurationEnvironment;
+static NSString *configurationFingerprint;
 static BOOL allowEveryTarget = NO;
 static NSTimeInterval rpcTimeout = 30;
 static NSTimeInterval socketTimeout = 10;
 static NSUInteger maxConcurrentRequests = 8;
+
+static NSString *ComputeConfigurationFingerprint(void);
 
 static NSError *BridgeError(NSInteger status, NSString *message) {
     return [NSError errorWithDomain:@"io.github.mglaeser.stella.bridge"
@@ -49,6 +58,19 @@ static NSString *Trim(NSString *value) {
 }
 
 static NSString *StringOrFallback(NSString *value, NSString *fallback) { return value != nil ? value : fallback; }
+
+static NSUInteger UnicodeCodePointLength(NSString *value) {
+    NSUInteger count = 0;
+    for (NSUInteger index = 0; index < value.length; index++) {
+        UniChar character = [value characterAtIndex:index];
+        if (CFStringIsSurrogateHighCharacter(character) && index + 1 < value.length &&
+            CFStringIsSurrogateLowCharacter([value characterAtIndex:index + 1])) {
+            index++;
+        }
+        count++;
+    }
+    return count;
+}
 
 static BOOL ResolveEnvironmentSetting(NSDictionary<NSString *, NSString *> *environment, NSString *canonicalName,
                                       NSString *legacyName, NSString *fallback, NSString **result,
@@ -145,6 +167,29 @@ static NSData *ReadPrivateFile(NSString *path, NSString *label, NSUInteger maxim
 
 static BOOL LoadConfiguration(NSError *_Nullable *_Nonnull error) {
     NSDictionary<NSString *, NSString *> *environment = NSProcessInfo.processInfo.environment;
+    NSArray<NSString *> *recognizedEnvironmentNames = @[
+        @"IMESSAGE_PROXY_ALLOWED_TARGETS_FILE",
+        @"IMESSAGE_ALLOWED_TARGETS_FILE",
+        @"IMESSAGE_PROXY_BRIDGE_MAX_CONCURRENCY",
+        @"STELLA_BRIDGE_MAX_CONCURRENCY",
+        @"IMESSAGE_PROXY_BRIDGE_PORT",
+        @"IMESSAGE_BRIDGE_PORT",
+        @"IMESSAGE_PROXY_BRIDGE_SOCKET_TIMEOUT_SECONDS",
+        @"STELLA_BRIDGE_SOCKET_TIMEOUT_SECONDS",
+        @"IMESSAGE_PROXY_BRIDGE_TOKEN_FILE",
+        @"IMESSAGE_BRIDGE_TOKEN_FILE",
+        @"IMESSAGE_PROXY_IMSG_BIN",
+        @"IMSG_BIN",
+        @"IMESSAGE_PROXY_RPC_TIMEOUT_SECONDS",
+        @"IMESSAGE_RPC_TIMEOUT_SECONDS",
+    ];
+    NSMutableDictionary<NSString *, NSString *> *loadedEnvironment = [NSMutableDictionary dictionary];
+    for (NSString *name in recognizedEnvironmentNames) {
+        if (environment[name] != nil) {
+            loadedEnvironment[name] = environment[name];
+        }
+    }
+    configurationEnvironment = [loadedEnvironment copy];
     NSString *portText = nil;
     if (!ResolveEnvironmentSetting(environment, @"IMESSAGE_PROXY_BRIDGE_PORT", @"IMESSAGE_BRIDGE_PORT", @"8765",
                                    &portText, error)) {
@@ -166,10 +211,12 @@ static BOOL LoadConfiguration(NSError *_Nullable *_Nonnull error) {
         *error = BridgeError(500, @"IMESSAGE_PROXY_BRIDGE_TOKEN_FILE is required");
         return NO;
     }
+    bridgeTokenPath = [tokenPath copy];
     NSData *tokenData = ReadPrivateFile(tokenPath, @"bridge token file", 1024, error);
     if (tokenData == nil) {
         return NO;
     }
+    bridgeTokenFileData = [tokenData copy];
     NSString *tokenText =
         StringOrFallback([[NSString alloc] initWithData:tokenData encoding:NSUTF8StringEncoding], @"");
     bridgeToken = tokenText.length == 65 && [tokenText hasSuffix:@"\n"] ? [tokenText substringToIndex:64] : tokenText;
@@ -188,10 +235,12 @@ static BOOL LoadConfiguration(NSError *_Nullable *_Nonnull error) {
         *error = BridgeError(500, @"IMESSAGE_PROXY_ALLOWED_TARGETS_FILE is required");
         return NO;
     }
+    allowedTargetsPath = [targetsPath copy];
     NSData *targetsData = ReadPrivateFile(targetsPath, @"allowed targets file", 64 * 1024, error);
     if (targetsData == nil) {
         return NO;
     }
+    allowedTargetsFileData = [targetsData copy];
     NSString *targetsText = [[NSString alloc] initWithData:targetsData encoding:NSUTF8StringEncoding];
     if (targetsText == nil) {
         *error = BridgeError(500, @"allowed targets file must be valid UTF-8");
@@ -205,7 +254,7 @@ static BOOL LoadConfiguration(NSError *_Nullable *_Nonnull error) {
         if (value.length == 0 || [value hasPrefix:@"#"]) {
             return;
         }
-        if (value.length > 512 || targets.count >= 256) {
+        if (UnicodeCodePointLength(value) > 512 || targets.count >= 256) {
             invalidTarget = @"allowed targets file exceeds its entry or line limit";
             *stop = YES;
             return;
@@ -266,7 +315,43 @@ static BOOL LoadConfiguration(NSError *_Nullable *_Nonnull error) {
         *error = BridgeError(500, @"IMESSAGE_PROXY_BRIDGE_MAX_CONCURRENCY must be 1-64");
         return NO;
     }
+    configurationFingerprint = ComputeConfigurationFingerprint();
+    if (configurationFingerprint == nil) {
+        *error = BridgeError(500, @"could not fingerprint the loaded configuration");
+        return NO;
+    }
     return YES;
+}
+
+static NSString *ComputeConfigurationFingerprint(void) {
+    NSDictionary *configuration = @{
+        @"allowed_targets_file_bytes_base64": [allowedTargetsFileData base64EncodedStringWithOptions:0],
+        @"allowed_targets_file_path": allowedTargetsPath,
+        @"bridge_port": [NSString stringWithFormat:@"%u", bridgePort],
+        @"bridge_token": bridgeToken,
+        @"bridge_token_file_bytes_base64": [bridgeTokenFileData base64EncodedStringWithOptions:0],
+        @"bridge_token_file_path": bridgeTokenPath,
+        @"bridge_version": BridgeVersion,
+        @"configuration_environment": configurationEnvironment,
+        @"imsg_path": imsgPath,
+        @"max_concurrent_requests": [NSString stringWithFormat:@"%lu", (unsigned long)maxConcurrentRequests],
+        @"rpc_timeout_seconds": [NSString stringWithFormat:@"%.0f", rpcTimeout],
+        @"schema": @"imessage-proxy-live-configuration-v1",
+        @"socket_timeout_seconds": [NSString stringWithFormat:@"%.0f", socketTimeout],
+    };
+    NSData *canonical = [NSJSONSerialization dataWithJSONObject:configuration
+                                                        options:NSJSONWritingSortedKeys
+                                                          error:nil];
+    if (canonical == nil || canonical.length > UINT32_MAX) {
+        return nil;
+    }
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(canonical.bytes, (CC_LONG)canonical.length, digest);
+    NSMutableString *hex = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (NSUInteger index = 0; index < CC_SHA256_DIGEST_LENGTH; index++) {
+        [hex appendFormat:@"%02x", digest[index]];
+    }
+    return [@"sha256:" stringByAppendingString:hex];
 }
 
 static BOOL ConstantTimeEqual(NSString *left, NSString *right) {
@@ -353,7 +438,8 @@ static BOOL ValidateOptionalString(id value, NSString *name, NSUInteger maximum,
     if (value == nil) {
         return YES;
     }
-    if (![value isKindOfClass:NSString.class] || [value length] == 0 || [value length] > maximum) {
+    NSUInteger length = [value isKindOfClass:NSString.class] ? UnicodeCodePointLength(value) : 0;
+    if (![value isKindOfClass:NSString.class] || length == 0 || length > maximum) {
         *error = BridgeError(400, [NSString stringWithFormat:@"%@ must be a non-empty string of at most %lu characters",
                                                              name, (unsigned long)maximum]);
         return NO;
@@ -363,7 +449,8 @@ static BOOL ValidateOptionalString(id value, NSString *name, NSUInteger maximum,
 
 static BOOL ValidJSONRPCID(id value) {
     if ([value isKindOfClass:NSString.class]) {
-        return [value length] > 0 && [value length] <= 256;
+        NSUInteger length = UnicodeCodePointLength(value);
+        return length > 0 && length <= 256;
     }
     if ([value isKindOfClass:NSNumber.class]) {
         return CFGetTypeID((__bridge CFTypeRef)value) != CFBooleanGetTypeID();
@@ -461,8 +548,8 @@ static NSData *ValidateAndSanitizeRPC(NSData *data, NSString **methodOut, NSErro
                 return nil;
             }
             for (id participant in participants) {
-                if (![participant isKindOfClass:NSString.class] || [participant length] == 0 ||
-                    [participant length] > 256) {
+                if (![participant isKindOfClass:NSString.class] || UnicodeCodePointLength(participant) == 0 ||
+                    UnicodeCodePointLength(participant) > 256) {
                     *error = BridgeError(400, @"participants must contain non-empty strings of at most 256 characters");
                     return nil;
                 }
@@ -500,7 +587,8 @@ static NSData *ValidateAndSanitizeRPC(NSData *data, NSString **methodOut, NSErro
             return nil;
         }
         NSString *text = [params[@"text"] isKindOfClass:NSString.class] ? params[@"text"] : nil;
-        if (text.length == 0 || text.length > 4000) {
+        NSUInteger textLength = UnicodeCodePointLength(text);
+        if (textLength == 0 || textLength > 4000) {
             *error = BridgeError(400, @"send needs text containing 1-4000 characters");
             return nil;
         }
@@ -525,7 +613,7 @@ static NSData *ValidateAndSanitizeRPC(NSData *data, NSString **methodOut, NSErro
             params[@"service"] = service;
         }
         if (params[@"region"] != nil &&
-            (![params[@"region"] isKindOfClass:NSString.class] || [params[@"region"] length] > 16)) {
+            (![params[@"region"] isKindOfClass:NSString.class] || UnicodeCodePointLength(params[@"region"]) > 16)) {
             *error = BridgeError(400, @"region must be a string no longer than 16 characters");
             return nil;
         }
@@ -535,7 +623,8 @@ static NSData *ValidateAndSanitizeRPC(NSData *data, NSString **methodOut, NSErro
             return nil;
         }
         NSString *guid = [params[@"guid"] isKindOfClass:NSString.class] ? params[@"guid"] : nil;
-        if (guid.length == 0 || guid.length > 256) {
+        NSUInteger guidLength = UnicodeCodePointLength(guid);
+        if (guidLength == 0 || guidLength > 256) {
             *error = BridgeError(400, @"message.send_status needs a valid guid");
             return nil;
         }
@@ -551,14 +640,14 @@ static NSData *ValidateAndSanitizeRPC(NSData *data, NSString **methodOut, NSErro
     return [NSJSONSerialization dataWithJSONObject:object options:NSJSONWritingSortedKeys error:error];
 }
 
-static NSData *BuildSipgateSendRPC(NSData *data, NSString **methodOut, NSError *_Nullable *_Nonnull error) {
+static NSData *BuildSmsStyleSendRPC(NSData *data, NSString **methodOut, NSError *_Nullable *_Nonnull error) {
     if (data.length == 0 || data.length > MaxRequestBytes) {
-        *error = BridgeError(400, @"invalid Sipgate SMS request");
+        *error = BridgeError(400, @"invalid SMS-style send request");
         return nil;
     }
     id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:error];
     if (![parsed isKindOfClass:NSDictionary.class]) {
-        *error = BridgeError(400, @"Sipgate SMS body must be a JSON object");
+        *error = BridgeError(400, @"SMS-style request body must be a JSON object");
         return nil;
     }
     NSDictionary *object = parsed;
@@ -569,15 +658,18 @@ static NSData *BuildSipgateSendRPC(NSData *data, NSString **methodOut, NSError *
     NSString *smsID = [object[@"smsId"] isKindOfClass:NSString.class] ? object[@"smsId"] : nil;
     NSString *recipient = [object[@"recipient"] isKindOfClass:NSString.class] ? object[@"recipient"] : nil;
     NSString *message = [object[@"message"] isKindOfClass:NSString.class] ? object[@"message"] : nil;
-    if (smsID.length == 0 || smsID.length > 64) {
+    NSUInteger smsIDLength = UnicodeCodePointLength(smsID);
+    if (smsID == nil || smsIDLength == 0 || smsIDLength > 64) {
         *error = BridgeError(400, @"smsId must be a non-empty string no longer than 64 characters");
         return nil;
     }
-    if (recipient.length == 0 || recipient.length > 256) {
+    NSUInteger recipientLength = UnicodeCodePointLength(recipient);
+    if (recipient == nil || recipientLength == 0 || recipientLength > 256) {
         *error = BridgeError(400, @"recipient must be a non-empty string no longer than 256 characters");
         return nil;
     }
-    if (message.length == 0 || message.length > 460) {
+    NSUInteger messageLength = UnicodeCodePointLength(message);
+    if (message == nil || messageLength == 0 || messageLength > 460) {
         *error = BridgeError(400, @"message must contain 1-460 characters");
         return nil;
     }
@@ -598,12 +690,12 @@ static NSData *BuildSipgateSendRPC(NSData *data, NSString **methodOut, NSError *
 
     NSDictionary *rpc = @{
         @"jsonrpc": @"2.0",
-        @"id": @"sipgate-sms",
+        @"id": @"sms-style-send",
         @"method": @"send",
         @"params": @{@"to": recipient, @"text": message, @"service": @"imessage", @"transport": @"applescript"}
     };
     if (methodOut != NULL) {
-        *methodOut = @"sipgate.sms.send";
+        *methodOut = @"sms.style.send";
     }
     return [NSJSONSerialization dataWithJSONObject:rpc options:NSJSONWritingSortedKeys error:error];
 }
@@ -949,6 +1041,10 @@ static NSDictionary *RouteRequest(NSDictionary *request, NSError *_Nullable *_No
     NSString *caller = SanitizeCaller(headers[@"x-api-client"]);
     NSDate *started = [NSDate date];
 
+    if ([method isEqualToString:@"GET"] && [path isEqualToString:@"/_internal/configuration-fingerprint"]) {
+        return @{@"status": @200, @"body": JSONData(@{@"configurationFingerprint": configurationFingerprint})};
+    }
+
     if ([method isEqualToString:@"GET"] && [path isEqualToString:@"/healthz"]) {
         NSDictionary *health =
             @{@"jsonrpc": @"2.0",
@@ -994,13 +1090,13 @@ static NSDictionary *RouteRequest(NSDictionary *request, NSError *_Nullable *_No
     if ([method isEqualToString:@"POST"] && [path isEqualToString:@"/v2/sessions/sms"]) {
         if (!IsJSONContentType(headers[@"content-type"])) {
             *error = BridgeError(415, @"Content-Type must be application/json");
-            Audit(caller, @"sipgate.sms.rejected", 415, started);
+            Audit(caller, @"sms.style.rejected", 415, started);
             return nil;
         }
         NSString *auditMethod = nil;
-        NSData *sanitized = BuildSipgateSendRPC(request[@"body"], &auditMethod, error);
+        NSData *sanitized = BuildSmsStyleSendRPC(request[@"body"], &auditMethod, error);
         if (sanitized == nil) {
-            Audit(caller, StringOrFallback(auditMethod, @"sipgate.sms.rejected"), (*error).code, started);
+            Audit(caller, StringOrFallback(auditMethod, @"sms.style.rejected"), (*error).code, started);
             return nil;
         }
         NSData *response = RunRPC(sanitized, error);
@@ -1258,7 +1354,7 @@ static BOOL RunServer(NSError *_Nullable *_Nonnull error) {
 }
 
 static void Usage(void) {
-    puts("Usage: imessage-proxy-bridge serve | check-config | version\n\n"
+    puts("Usage: imessage-proxy-bridge serve | check-config | config-fingerprint | version\n\n"
          "Environment:\n"
          "  IMESSAGE_PROXY_BRIDGE_PORT\n"
          "  IMESSAGE_PROXY_BRIDGE_TOKEN_FILE\n"
@@ -1277,7 +1373,8 @@ int main(int argc, const char *argv[]) {
             puts(BridgeVersion.UTF8String);
             return 0;
         }
-        if (argc != 2 || (![command isEqualToString:@"serve"] && ![command isEqualToString:@"check-config"])) {
+        if (argc != 2 || (![command isEqualToString:@"serve"] && ![command isEqualToString:@"check-config"] &&
+                          ![command isEqualToString:@"config-fingerprint"])) {
             Usage();
             return 64;
         }
@@ -1289,6 +1386,10 @@ int main(int argc, const char *argv[]) {
         }
         if ([command isEqualToString:@"check-config"]) {
             puts("configuration ok");
+            return 0;
+        }
+        if ([command isEqualToString:@"config-fingerprint"]) {
+            puts(configurationFingerprint.UTF8String);
             return 0;
         }
         if (!RunServer(&error)) {

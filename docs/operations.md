@@ -1,6 +1,6 @@
 # Operations
 
-This guide covers a review-first iMessage Proxy 0.2.0 deployment. iMessage Proxy is Alpha software: use a harmless test recipient, schedule a maintenance window, and keep an independent way to access the Mac.
+This guide covers a review-first iMessage Proxy 0.3.0 deployment. iMessage Proxy is Alpha software: use a harmless test recipient, schedule a maintenance window, and keep an independent way to access the Mac.
 
 ## Operating principles
 
@@ -8,9 +8,39 @@ This guide covers a review-first iMessage Proxy 0.2.0 deployment. iMessage Proxy
 - Keep the repository and runtime state separate.
 - Pin the iMessage Proxy revision and Caddy image digest; review both before changing them.
 - Publish only on a selected private interface reachable from an authenticated LAN or VPN.
-- Give every client its own credential and the minimum operational access it needs.
+- Give every client its own credential, and enroll it only if it may use the
+  complete current read API plus the deployment-wide send allowlist.
 - Never disable TLS verification, SIP, TCC, or the outbound target allowlist to make a check pass.
 - Stop on unexpected output. iMessage Proxy intentionally avoids automatic deletion, reset, pruning, and retrying sends.
+
+### Automated orchestration
+
+Treat automated mutation as a state machine, not as a command that can be
+blindly rerun:
+
+- Acquire a private exclusive lock owned by the deployment user. Refuse
+  symbolic links, unexpected ownership or modes, and a competing lock holder.
+- Validate the pinned release, current receipt, stable source link, runtime
+  resources, and listener state before the lock and again immediately after
+  acquiring it. Never turn an inventory error into an observation of absence.
+- Atomically create a mode-`0600`, metadata-only receipt in `in_progress` before
+  the first mutation. Store only its schema, timestamps, immutable release pins,
+  sanitized observations, and resource identities—never credentials, message
+  data, recipients, or private key material.
+- Allow only `in_progress` to `failed_observation_required` or
+  `pending_acceptance`, and `pending_acceptance` to `accepted`. Write a complete
+  temporary receipt in the same private directory, set its mode, sync it as
+  supported, and atomically replace the prior file; never edit one in place.
+- Make `accepted` a separate explicit action after the complete acceptance
+  test. An invalid receipt, `in_progress`, or `failed_observation_required`
+  requires human observation and blocks retry, rollback automation, and a
+  second deployment. Keep a failed receipt as durable evidence rather than
+  transitioning it backward; any later recovery needs a separately reviewed
+  generation. Ambiguity is not a safe retry condition.
+
+The administration system chooses its private lock and receipt paths. Do not
+publish deployment users, addresses, private artifact pins, or receipt paths in
+this repository.
 
 ## 1. Preflight
 
@@ -38,14 +68,39 @@ Review [`imsg` upstream](https://github.com/openclaw/imsg) before upgrades; the 
 
 ## 2. Obtain and verify iMessage Proxy
 
-Clone the canonical repository and check out the reviewed release or full commit:
+For an operated deployment, record a reviewed release tag, the full
+40-character commit to which it resolves, and the release archive SHA-256 in
+independent desired state. Use the private staging, member validation, build,
+test, and atomic stable-link promotion procedure in
+[Migration from an administration repository](migration-from-administration.md#1-establish-the-standalone-source).
+That procedure rejects escaping or link entries before extraction and retains
+the previously selected versioned directory for rollback. Do not obtain
+production code from a default branch, a `latest` URL, or a checksum fetched
+alongside the artifact as the only integrity decision.
+
+For source review or development, initialize a detached checkout and prove that
+the reviewed tag resolves to the recorded commit before executing it:
 
 ```bash
-git clone https://github.com/mglaeser/imessage-proxy.git
+(
+set -Eeuo pipefail
+readonly imessage_proxy_tag='REPLACE_WITH_REVIEWED_TAG'
+readonly imessage_proxy_revision='REPLACE_WITH_REVIEWED_40_HEX_COMMIT'
+
+[[ "$imessage_proxy_revision" =~ ^[0-9a-f]{40}$ ]]
+mkdir imessage-proxy
 cd imessage-proxy
+git init
+git remote add origin https://github.com/mglaeser/imessage-proxy.git
+git fetch --depth=1 origin \
+  "refs/tags/$imessage_proxy_tag:refs/tags/$imessage_proxy_tag"
+test "$(git rev-parse "$imessage_proxy_tag^{commit}")" = \
+  "$imessage_proxy_revision"
+git checkout --detach "$imessage_proxy_revision"
 git status --short
 make build
 make test
+)
 ```
 
 For the complete maintainer check suite, install the lint tools named by the Makefile and run:
@@ -54,7 +109,9 @@ For the complete maintainer check suite, install the lint tools named by the Mak
 make check
 ```
 
-You can operate directly from the checkout with `bin/imessage-proxy`. For a user-local installation that keeps runtime state untouched:
+You can operate directly from the verified candidate with
+`bin/imessage-proxy`. For a user-local installation that keeps runtime state
+untouched, install only after the candidate passes its tests:
 
 ```bash
 make PREFIX="$HOME/.local" install
@@ -67,16 +124,22 @@ Installed project assets live under `$PREFIX/share/imessage-proxy`; runtime stat
 
 The canonical command and environment prefix are `bin/imessage-proxy` and `IMESSAGE_PROXY_*`. The deprecated `bin/stella` shim and `STELLA_*` aliases remain available for this transition release. Do not define both forms with different values; ambiguity is rejected instead of choosing one silently.
 
-Version 0.2.0 does not automatically rename or move runtime resources. It retains:
+Version 0.3.0 continues the 0.2 transition and does not automatically rename or move runtime resources. It retains:
 
 - runtime home `~/Library/Application Support/Stella`;
 - runtime bridge binary `stella-bridge` and LaunchAgent label `io.github.mglaeser.stella.bridge`;
 - Apple Container name `stella`; and
 - host route `stella-host.container.internal`.
 
-The repository source and public build artifact are named `imessage-proxy-bridge`; `build-host` installs that code as the legacy-named runtime binary to preserve macOS TCC approval. Keeping the runtime home also preserves the private Caddy CA instead of silently rotating client trust. During an upgrade, leave these identities in place and translate operator automation to the canonical command and environment names separately.
+The repository source and public build artifact are named
+`imessage-proxy-bridge`; `build-host` installs that code as the legacy-named
+runtime binary to preserve macOS TCC approval. Retaining the runtime path avoids
+an unreviewed path and TCC migration, but iMessage Proxy never treats that as
+permission to preserve old credentials silently. Plan credential and CA
+rotation explicitly for a migration or recovery, and translate operator
+automation to the canonical command and environment names separately.
 
-If version 0.1.x was installed with `make install`, its read-only package assets live under the separate prefix path `share/stella`. From the exact retained 0.1.x source checkout, run its `make uninstall` before installing 0.2.0, then run the 0.2.0 install command. The old uninstaller does not touch runtime state. The 0.2.0 installer deliberately does not delete an unknown pre-existing `share/stella` tree; if the old checkout is unavailable, inspect that tree and remove only verified 0.1.x package files through a separately reviewed cleanup.
+If version 0.1.x was installed with `make install`, its read-only package assets live under the separate prefix path `share/stella`. From the exact retained 0.1.x source checkout, run its `make uninstall` before installing the current release, then run the current install command. The old uninstaller does not touch runtime state. Current installers deliberately do not delete an unknown pre-existing `share/stella` tree; if the old checkout is unavailable, inspect that tree and remove only verified 0.1.x package files through a separately reviewed cleanup.
 
 ## 3. Create operator configuration
 
@@ -111,6 +174,18 @@ set +a
 
 `IMESSAGE_PROXY_HOME` defaults to `~/Library/Application Support/Stella`. It holds secrets and private CA material; do not put it in the repository or a broadly synchronized folder.
 
+For a migration or recovery, the default is a fresh bridge token, fresh
+per-client passwords, and a new private Caddy CA followed by authenticated
+client enrollment and independent fingerprint confirmation. Keep replaced
+material only in a protected, bounded rollback snapshot.
+
+Preserving credentials or the CA is an advanced continuity exception. First
+quiesce both facade and bridge, create an encrypted permission-preserving
+snapshot, and verify the exact state root, ownership, modes, and CA fingerprint.
+Restore only reviewed material, record an owner and deadline for rotation, and
+never allow preserved and replacement identities to accept traffic at the same
+time.
+
 ## 4. Diagnose and prepare
 
 Run the non-mutating preflight first:
@@ -119,11 +194,26 @@ Run the non-mutating preflight first:
 bin/imessage-proxy doctor
 ```
 
-Resolve every failed required check. Then create private runtime directories, initial secrets, generated facade environment, Caddy configuration, and LaunchAgent template:
+`doctor` validates the toolchain plus sourced static API, route, image, private
+bind, and Alpha-gate settings, reporting independent setting failures together.
+It does not claim that generated files,
+LaunchAgent state, route resolution, listeners, or container topology are
+already ready; their owning lifecycle actions verify those live states before
+mutation. Resolve every failed required check. Then create private runtime
+directories, initial secrets, generated facade environment, Caddy configuration,
+and LaunchAgent template:
 
 ```bash
 bin/imessage-proxy prepare
 ```
+
+`prepare` creates missing material but deliberately does not rotate an existing
+token or CA. An existing token must be exactly 64 lowercase hexadecimal bytes
+with at most one trailing newline; any other byte shape is rejected before it
+can be copied into the facade environment. For a migration or recovery with an existing runtime home, keep the
+facade and bridge quiesced and complete the reviewed rotation or advanced
+preservation procedure before relying on the generated configuration. Do not
+delete live state ad hoc merely to make `prepare` generate replacements.
 
 Review the generated files below `~/Library/Application Support/Stella/`. Directories containing runtime or secret data should be accessible only to the user, and files in `secrets/` should be mode `0600`.
 
@@ -181,6 +271,25 @@ target only when it is a private, regular file whose bytes exactly match the
 generated legacy-identity plist; inspect any refusal before using the separately
 confirmed reload workflow.
 
+The confirmed reload refuses to stop a same-label job whose loaded plist or
+program identity differs. If the replacement cannot become ready, automatic
+rollback may execute the previous plist only when that backup independently
+matches the complete reviewed schema. Otherwise the prior file is preserved at
+the reported private backup path for manual inspection and is not bootstrapped.
+
+Before `create` or `start` can expose the facade, the manager rechecks that the
+prepared plist still has the complete reviewed program, environment, limits,
+and log-path definition; the active plist matches it byte for byte; the loaded
+job reports the exact plist and bridge executable; one stable running PID
+exists; and that PID owns exactly one TCP listener, at
+`127.0.0.1:<bridge-port>`. It also compares a bearer-authenticated digest of the
+configuration loaded by that process with fresh, isolated evaluations of the
+exact token and allowlist file bytes, paths, and bounded runtime settings. The
+digest response exposes none of those values, its internal route is not
+published by Caddy, and expected state is sampled on both sides of the live
+request. A stale configuration, wildcard/IPv6/extra listener, same-label,
+crash-looping, replaced, or ambiguous job is not treated as ready.
+
 ## 6. Create the private facade
 
 Create the Apple Container host route:
@@ -198,7 +307,11 @@ repair it only through the explicit `host-route-refresh` confirmation.
 > [!CAUTION]
 > Apple Container's localhost host-routing feature can disable iCloud Private Relay, and its route may need to be recreated after a Mac restart. Confirm the behavior for the installed Apple Container release before enabling it.
 
-After completing the security checklist, deliberately set `IMESSAGE_PROXY_ENABLE_ALPHA=yes` in the private operator configuration, source it again, and rerun `bin/imessage-proxy doctor`.
+After completing the security checklist, deliberately set
+`IMESSAGE_PROXY_ENABLE_ALPHA=yes` in the private operator configuration, source
+it again, and rerun `bin/imessage-proxy doctor` to confirm that the static
+settings and gate are valid. The following `create` command independently
+enforces the generated files and observed runtime prerequisites.
 
 Create the resource-bounded Caddy container:
 
@@ -207,10 +320,25 @@ bin/imessage-proxy create
 bin/imessage-proxy status
 ```
 
-`create` verifies the configured private address is assigned to the host,
+`create` accepts only an assigned RFC 1918 or RFC 6598 IPv4 address. The facade's
+source filter admits the same client ranges (plus Caddy's loopback and IPv6 ULA
+ranges), then still requires an individual credential. `create` also
 checks the caller file, requires the LaunchAgent and exact route DNS mapping,
 and refuses colliding API/bridge ports, an occupied API port, or the existing
 legacy-named `stella` container.
+
+`status` deliberately prints only the container name, lifecycle state, and
+sanitized published-port fields. Raw inventory is projected at the subprocess
+boundary, so it never returns the container environment, bridge token, mounts,
+or other unbounded inspection data.
+
+`start` fails closed unless the existing container matches the reviewed image
+digest, default runtime/network/DNS/process-security shape, resource limits,
+read-only mode, exact mounts and tmpfs, entrypoint and arguments, bounded
+environment (including the prepared token without printing it), and configured
+private publication. It then revalidates the LaunchAgent identity, stable PID,
+exact loopback-only listener ownership, live configuration fingerprint, and host
+route before starting a stopped container.
 
 ## 7. Enroll a client
 
@@ -243,7 +371,9 @@ Before relying on iMessage Proxy, verify all of the following:
 4. A bounded `messages.after` call succeeds without attachments or reactions.
 5. An unknown RPC method returns `403`.
 6. A send to an unlisted synthetic target returns `403` and sends nothing.
-7. One consenting, harmless allowlisted target receives one intentional test message.
+7. One consenting, harmless allowlisted target receives one intentional test
+   message and confirms the actual Messages sender account or handle is the
+   expected identity.
 8. Audit output contains caller, method, status, and duration but no content or recipient.
 9. The API is unreachable from an untrusted network.
 10. Stop/start and a Mac restart follow the documented recovery sequence.
@@ -254,7 +384,7 @@ Do not automatically retry an ambiguous send; inspect history or send status fir
 
 | Task | Command | Notes |
 | --- | --- | --- |
-| Preflight | `bin/imessage-proxy doctor` | Non-mutating diagnostics |
+| Static preflight | `bin/imessage-proxy doctor` | Non-mutating toolchain, settings, bind, and Alpha-gate diagnostics |
 | Host config validation | `bin/imessage-proxy check-host` | Checks secret files, bridge, and `imsg` |
 | LaunchAgent state | `bin/imessage-proxy agent-status` | Uses the current GUI user domain |
 | Facade state | `bin/imessage-proxy status` | Returns only the configured container entry |
@@ -309,30 +439,71 @@ Plan this as downtime and retain a reviewed rollback value until verification co
 ## Upgrade
 
 1. Read the release notes, changelog, security advisories, and source diff.
-2. Record the current revision, configuration, dependency versions, and sanitized health result.
-3. Stop the facade.
-4. Check out the immutable target release or full commit.
-5. Run `make check` and update a user-local installation if used.
+2. Record the current immutable release pins, configuration, dependency
+   versions, runtime identities, and sanitized health result.
+3. Obtain the target through the verified archive procedure, extract it only
+   into a private stage, validate its members and `VERSION`, and run the complete
+   `make check` suite before promoting its versioned directory. Keep the stable
+   link on the current release during these checks.
+4. Stop the facade and record that its expected listener is absent.
+5. Atomically select the already-tested target while retaining the prior
+   versioned directory. Update a user-local installation if used.
 6. Source the private operator configuration.
-7. Run `bin/imessage-proxy doctor`, `bin/imessage-proxy prepare`, `bin/imessage-proxy build-host`, and `bin/imessage-proxy check-host`.
+7. Run `bin/imessage-proxy doctor`, `bin/imessage-proxy prepare`,
+   `bin/imessage-proxy build-host`, and `bin/imessage-proxy check-host`.
 8. Reload the LaunchAgent with the exact confirmation.
-9. Restart the existing facade only when its environment and container definition remain compatible.
-10. Run the full acceptance test and retain the prior source revision until confidence is established.
+9. Restart the existing facade only when its environment and container
+   definition remain compatible.
+10. Run the full acceptance test, including receiver confirmation of the actual
+    Messages sender identity, before recording acceptance or removing the prior
+    version.
 
 ```bash
 bin/imessage-proxy agent-reload \
   --confirm 'RELOAD IMESSAGE HOST BRIDGE'
-bin/imessage-proxy stop
+```
+
+Only after the exact compatibility check in step 9 succeeds, restart the facade
+that was stopped in step 4:
+
+```bash
 bin/imessage-proxy start
 ```
 
 During Alpha, `prepare` updates bind-mounted configuration but cannot reconcile environment variables or the definition of an already-created container. If the release changes those values, use a planned, exact-container recreation as described for token rotation. This is a current limitation, not an invitation to use broad cleanup commands.
 
+### Failure and rollback decision
+
+Choose from observed state:
+
+- **Failure before mutation:** leave the active release and runtime untouched,
+  discard only the validated private stage, and investigate. No rollback is
+  needed.
+- **Fully observed, reversible mutation:** quiesce the facade and bridge, restore
+  the exact prior stable source selection and any matching reviewed runtime,
+  DNS, credential, and client-trust state, then repeat non-sending checks before
+  reopening access. Never activate old and new stacks together.
+- **Uncertain partial failure:** contain network access, preserve receipts and
+  sanitized diagnostics, and inventory the actual stable link, processes,
+  listeners, LaunchAgent, container definition, route, DNS, credentials, and CA
+  trust. Record `failed_observation_required` and do not automatically retry,
+  roll forward, or roll back until an operator establishes one coherent state.
+
+A delivered message cannot be rolled back. If a send result is ambiguous,
+inspect history and confirm with the receiver; do not repeat it as part of
+recovery.
+
 ## Backup and recovery
 
 The source is recoverable from GitHub and the bridge can be rebuilt. Do not back up or copy the Messages database as part of iMessage Proxy operations.
 
-If continuity of client trust matters, protect an encrypted backup of the iMessage Proxy runtime state—especially the Caddy CA—and restrict restore access like a credential vault. Otherwise, prefer regenerating secrets and deliberately enrolling clients in a new private CA. Never commit a runtime backup.
+Prefer regenerating the bridge token and caller credentials, issuing a new
+private CA, and deliberately enrolling clients. If continuity of client trust
+makes preservation unavoidable, treat it as an advanced exception: quiesce the
+facade and bridge before capturing an encrypted, permission-preserving runtime
+backup—especially the Caddy CA—and restrict restore access like a credential
+vault. Never capture live changing state, commit a runtime backup, or restore it
+alongside replacement credentials or CA material.
 
 Recovery should be reproducible from:
 

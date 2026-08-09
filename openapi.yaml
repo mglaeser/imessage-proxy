@@ -1,11 +1,12 @@
 openapi: 3.1.0
 info:
   title: iMessage Proxy API
-  version: 0.2.0
+  version: 0.3.0
   summary: A narrow, authenticated iMessage proxy for trusted private networks.
   description: >-
-    iMessage Proxy exposes allowlisted read and text-send operations through a private
-    Caddy facade. It is alpha software and must not be exposed to the Internet.
+    iMessage Proxy exposes a fixed, tightly validated set of read and send operations
+    through a private Caddy facade; outbound targets are allowlisted. It is alpha
+    software and must not be exposed to the Internet.
   license:
     name: Apache-2.0
     identifier: Apache-2.0
@@ -28,14 +29,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Health"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "408":
           $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/TooLarge"
         "431":
           $ref: "#/components/responses/HeadersTooLarge"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
         "503":
           $ref: "#/components/responses/Unavailable"
+        "504":
+          $ref: "#/components/responses/Timeout"
   /v1/rpc:
     post:
       operationId: callMessagesRpc
@@ -67,25 +78,32 @@ paths:
           $ref: "#/components/responses/UnsupportedMediaType"
         "431":
           $ref: "#/components/responses/HeadersTooLarge"
+        "500":
+          $ref: "#/components/responses/InternalError"
         "502":
           $ref: "#/components/responses/BadGateway"
-        "504":
-          $ref: "#/components/responses/Timeout"
         "503":
           $ref: "#/components/responses/Unavailable"
+        "504":
+          $ref: "#/components/responses/Timeout"
   /v2/sessions/sms:
     post:
-      operationId: sendSipgateCompatibleSms
-      summary: Send an immediate iMessage using Sipgate-compatible request fields.
+      operationId: sendSmsStyleMessage
+      summary: Send an immediate iMessage through a simple SMS-style request.
+      description: >-
+        Sends to an allowlisted recipient through Messages.app using the iMessage
+        service and AppleScript transport. A 204 response means the send command was
+        accepted, not delivered. This endpoint never sends carrier SMS; callers must
+        not blindly retry an ambiguous timeout.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/SipgateSendRequest"
+              $ref: "#/components/schemas/SmsStyleSendRequest"
       responses:
         "204":
-          description: Messages accepted the immediate send request.
+          description: Messages.app accepted the send command; no delivery confirmation is returned.
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -100,12 +118,14 @@ paths:
           $ref: "#/components/responses/UnsupportedMediaType"
         "431":
           $ref: "#/components/responses/HeadersTooLarge"
+        "500":
+          $ref: "#/components/responses/InternalError"
         "502":
           $ref: "#/components/responses/BadGateway"
-        "504":
-          $ref: "#/components/responses/Timeout"
         "503":
           $ref: "#/components/responses/Unavailable"
+        "504":
+          $ref: "#/components/responses/Timeout"
 components:
   securitySchemes:
     basicAuth:
@@ -114,65 +134,126 @@ components:
       description: Use a distinct Caddy credential for each API client.
   responses:
     BadRequest:
-      description: The request does not satisfy iMessage Proxy's narrow contract.
+      description: >-
+        The request does not satisfy iMessage Proxy's narrow contract. When present,
+        the body is either a bridge JSON error or facade diagnostic text.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/HttpError"
+        text/plain:
+          schema:
+            type: string
     Unauthorized:
-      description: Client or bridge credentials are missing or invalid.
+      description: >-
+        Client or bridge credentials are missing or invalid. When present, the body
+        is either a bridge JSON error or facade diagnostic text.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/HttpError"
+        text/plain:
+          schema:
+            type: string
     Forbidden:
-      description: The method, parameter, or send target is not allowed.
+      description: >-
+        The method, parameter, or send target is not allowed. When present, the body
+        is either a bridge JSON error or facade diagnostic text.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/HttpError"
+        text/plain:
+          schema:
+            type: string
     TooLarge:
-      description: The request exceeds iMessage Proxy's size limit.
+      description: >-
+        The request exceeds an iMessage Proxy size limit. When present, the body is
+        either a bridge JSON error or facade diagnostic text.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/HttpError"
+        text/plain:
+          schema:
+            type: string
     RequestTimeout:
-      description: The client did not send or receive the bounded request in time.
+      description: >-
+        The client did not send or receive the bounded request in time. When present,
+        the body is either a bridge JSON error or facade diagnostic text.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/HttpError"
+        text/plain:
+          schema:
+            type: string
     HeadersTooLarge:
-      description: The HTTP request headers exceed iMessage Proxy's 16 KiB limit.
+      description: >-
+        The HTTP request headers exceed iMessage Proxy's 16 KiB limit. When present,
+        the body is either a bridge JSON error or facade diagnostic text.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/HttpError"
+        text/plain:
+          schema:
+            type: string
     UnsupportedMediaType:
-      description: The endpoint requires application/json.
+      description: >-
+        The endpoint requires application/json. When present, the body is either a
+        bridge JSON error or facade diagnostic text.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/HttpError"
+        text/plain:
+          schema:
+            type: string
     BadGateway:
-      description: imsg failed or returned an invalid or oversized response.
+      description: >-
+        imsg failed or returned an invalid or oversized response. When present, the
+        body is either a bridge JSON error or facade diagnostic text.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/HttpError"
+        text/plain:
+          schema:
+            type: string
+    InternalError:
+      description: >-
+        iMessage Proxy encountered an internal error. When present, the body is
+        either a bridge JSON error or facade diagnostic text.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HttpError"
+        text/plain:
+          schema:
+            type: string
     Unavailable:
-      description: The Messages read path is unavailable or iMessage Proxy is overloaded.
+      description: >-
+        The Messages read path is unavailable or iMessage Proxy is overloaded. When
+        present, the body is a bridge JSON error or facade diagnostic text.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/HttpError"
+        text/plain:
+          schema:
+            type: string
     Timeout:
-      description: The bounded imsg request exceeded its deadline.
+      description: >-
+        The bounded imsg request exceeded its deadline. When present, the body is a
+        bridge JSON error or facade diagnostic text.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/HttpError"
+        text/plain:
+          schema:
+            type: string
   schemas:
     JsonRpcId:
       oneOf:
@@ -228,7 +309,7 @@ components:
         - required: [error]
           properties:
             result: false
-    SipgateSendRequest:
+    SmsStyleSendRequest:
       type: object
       additionalProperties: false
       required: [smsId, recipient, message]
@@ -237,17 +318,27 @@ components:
           type: string
           minLength: 1
           maxLength: 64
+          description: >-
+            Required opaque value; validated and discarded, never logged or returned,
+            and not used for correlation, deduplication, or idempotency.
+          example: request-1
         recipient:
           type: string
           minLength: 1
           maxLength: 256
+          description: Exact allowlisted Messages recipient.
+          example: person@example.net
         message:
           type: string
           minLength: 1
           maxLength: 460
+          description: Text sent through Messages.app.
+          example: Hello from iMessage Proxy
         sendAt:
           type: number
           const: -1
+          deprecated: true
+          description: Legacy immediate-send marker; omit it in new requests. Scheduling is not supported.
     HttpError:
       type: object
       additionalProperties: false

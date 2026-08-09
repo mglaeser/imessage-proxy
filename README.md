@@ -20,9 +20,40 @@ iMessage Proxy exposes a deliberately narrow Messages interface to explicitly au
 > [!WARNING]
 > iMessage Proxy is **Alpha software**. It handles private conversations and can send messages as the signed-in macOS user. Review the threat model, test with a harmless recipient, and keep it off the public Internet.
 
+## Send an iMessage with one request
+
+> [!TIP]
+> **A familiar SMS-style request, delivered as iMessage.** Once the private
+> service is installed, provide the required `smsId` field, an allowlisted recipient, and
+> message text to one authenticated endpoint.
+
+```bash
+IMESSAGE_PROXY_URL='https://messages.example.internal:9443'
+
+curl --fail-with-body \
+  --cacert /secure/path/imessage-proxy-root.crt \
+  --user automation-a \
+  --header 'Content-Type: application/json' \
+  --data '{"smsId":"request-1","recipient":"person@example.net","message":"Hello from iMessage Proxy"}' \
+  "$IMESSAGE_PROXY_URL/v2/sessions/sms"
+```
+
+`204 No Content` means Messages.app accepted the send command; it is not
+delivery confirmation. The recipient must be explicitly allowlisted. The
+endpoint uses a familiar SMS-style path and payload for convenience, but it
+always requests an iMessage—never carrier SMS. Do not blindly retry an
+ambiguous timeout. `smsId` is validated and discarded; it is not logged,
+returned, or used for correlation, deduplication, or idempotency.
+
+> [!NOTE]
+> The never-carrier-SMS guarantee applies to this simple endpoint. The advanced
+> `/v1/rpc` `send` method also accepts `auto` and `sms`. Credentials are not
+> route-scoped, so give one only to a client trusted with the complete read/send
+> API and deployment-wide target allowlist.
+
 ## Why iMessage Proxy?
 
-- **Small attack surface.** Five read/send RPC methods; everything else is rejected.
+- **Small attack surface.** Five tightly validated RPC methods and one compact send route; every other operation is rejected.
 - **Deny-by-default sending.** Exact recipients or chats must be placed on a local allowlist.
 - **Two authentication boundaries.** Clients authenticate to Caddy; Caddy authenticates separately to the loopback bridge.
 - **Private by construction.** The native service binds to `127.0.0.1`, while the facade is intended only for a private LAN or VPN.
@@ -52,7 +83,7 @@ iMessage Proxy currently supports:
 - cursor-based polling for new messages;
 - sending text to an explicitly allowed address or chat;
 - checking a sent message's status;
-- an immediate-send, Sipgate-shaped compatibility endpoint.
+- an easy-to-use, SMS-style endpoint for immediate iMessage sends.
 
 iMessage Proxy intentionally does **not** provide anonymous access, Internet exposure, attachments, webhooks, reactions, contact access, remote URL fetching, message mutation, typing indicators, private framework injection, or scheduled sending.
 
@@ -70,13 +101,27 @@ iMessage Proxy has not yet published a broad macOS compatibility matrix. Treat u
 
 ## Quick start
 
-Clone and verify the source:
+For an operated deployment, use the independently checksum-pinned release
+procedure in [Operations](docs/operations.md#2-obtain-and-verify-imessage-proxy).
+For a source review, detach at the reviewed release and verify its full commit
+before executing project code. Obtain the full commit through the release's
+reviewed provenance, then run:
 
 ```bash
-git clone https://github.com/mglaeser/imessage-proxy.git
+(
+set -Eeuo pipefail
+readonly imessage_proxy_tag='v0.3.0'
+readonly imessage_proxy_revision='REPLACE_WITH_REVIEWED_40_HEX_COMMIT'
+
+[[ "$imessage_proxy_revision" =~ ^[0-9a-f]{40}$ ]]
+git clone --no-checkout https://github.com/mglaeser/imessage-proxy.git
 cd imessage-proxy
+test "$(git rev-parse "$imessage_proxy_tag^{commit}")" = \
+  "$imessage_proxy_revision"
+git checkout --detach "$imessage_proxy_revision"
 make build
 make test
+)
 ```
 
 Create a local configuration from the public example and replace every placeholder:
@@ -100,18 +145,38 @@ bin/imessage-proxy agent-install
 bin/imessage-proxy agent-status
 ```
 
-Then create the private host route, generate a caller password hash, and start the facade. Each operation prints its prerequisites; do not bypass its confirmation gates.
+Then create the private host route and generate a caller password hash. Each
+operation prints its prerequisites; do not bypass its confirmation gates.
 
 ```bash
 bin/imessage-proxy host-route-create
 bin/imessage-proxy hash-password
+```
+
+Copy only the returned hash—not the plaintext password—into the caller file
+printed by `prepare`, for example as `automation-a HASH`. Add one consenting test
+recipient to the printed allowlist path. With the default runtime home, edit:
+
+```bash
+${EDITOR:-vi} "$HOME/Library/Application Support/Stella/secrets/users.caddy"
+${EDITOR:-vi} "$HOME/Library/Application Support/Stella/secrets/allowed-targets.txt"
+```
+
+After completing the security checklist, set
+`IMESSAGE_PROXY_ENABLE_ALPHA=yes` in `imessage-proxy.env`, source it again, and
+only then create the facade:
+
+```bash
+set -a
+. ./imessage-proxy.env
+set +a
 bin/imessage-proxy create
 bin/imessage-proxy status
 ```
 
 The complete, review-first procedure is in [Operations](docs/operations.md). Existing installations extracted from another administration repository should follow the [migration guide](docs/migration-from-administration.md).
 
-## 0.2 compatibility contract
+## 0.2+ compatibility contract
 
 Version 0.2.0 adopts the descriptive `imessage-proxy` project, repository, command, source, configuration, and `IMESSAGE_PROXY_*` environment names. To keep existing private CAs, macOS TCC grants, LaunchAgents, containers, and migration receipts valid, this transition release deliberately retains these runtime identities:
 
@@ -123,9 +188,9 @@ Version 0.2.0 adopts the descriptive `imessage-proxy` project, repository, comma
 - Apple Container name `stella`; and
 - host route `stella-host.container.internal`.
 
-The source and public build artifact are named `imessage-proxy-bridge`, while `build-host` installs the runtime binary as `stella-bridge` for TCC continuity. Version 0.2.0 performs no automatic runtime-state or identity migration. Do not rename or move those resources during an upgrade; use the canonical names for new configuration and automation, and treat conflicting canonical and legacy environment values as an error.
+The source and public build artifact are named `imessage-proxy-bridge`, while `build-host` installs the runtime binary as `stella-bridge` for TCC continuity. Version 0.3.0 retains the 0.2 compatibility contract and performs no automatic runtime-state or identity migration. Do not rename or move those resources during an upgrade; use the canonical names for new configuration and automation, and treat conflicting canonical and legacy environment values as an error.
 
-## First request
+## Explore the API
 
 Export the private API origin and use the Caddy root CA—never `curl -k`. `curl` prompts for the caller's password:
 
@@ -168,7 +233,7 @@ For production-like automation, store the returned cursor durably and use a dist
 
 ## Project status
 
-The current version is **0.2.0** and the maturity level is **Alpha**. Interfaces, state layout, and operator commands may change before 1.0. Changes are recorded in the [changelog](CHANGELOG.md), and intended milestones live in the [roadmap](ROADMAP.md).
+The current version is **0.3.0** and the maturity level is **Alpha**. Interfaces, state layout, and operator commands may change before 1.0. Changes are recorded in the [changelog](CHANGELOG.md), and intended milestones live in the [roadmap](ROADMAP.md).
 
 ## Community and security
 

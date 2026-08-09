@@ -37,7 +37,7 @@ iMessage Proxy does not claim to defend against a fully compromised macOS accoun
 | Bridge listener | IPv4 loopback-only bind, constant-time token comparison, bounded headers/body/socket lifetime/concurrency, no query strings or chunked bodies |
 | Bridge policy | Five exact RPC methods, method-specific parameter allowlists and limits, forced attachment/reaction settings, exact outbound target allowlist, forced AppleScript sends |
 | Bridge to `imsg` | One sanitized JSON-RPC request over stdio, execution timeout, 4 MiB output limit, JSON-only response selection |
-| Runtime state | User-owned private directories, mode-0600 secrets, separate source checkout, non-root LaunchAgent |
+| Runtime state | User-owned private directories, mode-0600 secrets, separate source checkout, non-root LaunchAgent, exact live loopback-listener and authenticated configuration-digest proofs |
 | Audit | Caller, method, status, and duration only; inputs and recipients are omitted |
 
 No single row is sufficient alone. In particular, private IP filtering is defense in depth—not authentication—and a bearer token does not replace the method and target policy.
@@ -45,6 +45,12 @@ No single row is sufficient alone. In particular, private IP filtering is defens
 ## Outbound target policy
 
 Sending is disabled until an operator adds an exact target to `allowed-targets.txt`. Supported forms are a direct phone/email-style address, `chat_id:NUMBER`, `chat_identifier:VALUE`, or `chat_guid:VALUE`.
+
+The simple `/v2/sessions/sms` endpoint always requests iMessage delivery. The
+advanced `/v1/rpc` `send` method can explicitly request `auto` or carrier `sms`
+instead. Authentication is currently not route- or method-scoped: every valid
+client can use that advanced method and the deployment-wide target allowlist.
+Grant a credential only when that complete capability is acceptable.
 
 The literal `*` permits every target and materially changes the threat model. Avoid it. If a broad automation use case appears to require `*`, reconsider whether iMessage Proxy is the right boundary and document the exception outside the repository.
 
@@ -72,15 +78,15 @@ Basic Auth is safe only inside correctly verified TLS. `curl -k`, disabled hostn
 
 ## Network placement
 
-Publish the facade only on a stable private interface and private DNS name. Do not add public DNS, router port forwarding, generic reverse tunnels, public ingress, CDN proxying, or Internet-facing load balancers.
+Publish the facade only on a stable private interface and private DNS name. The facade admits Caddy's built-in private ranges plus RFC 6598 (`100.64.0.0/10`) for authenticated CGNAT/VPN peers; every caller still needs its own credential. Do not add public DNS, router port forwarding, generic reverse tunnels, public ingress, CDN proxying, or Internet-facing load balancers.
 
 VPN access is acceptable only when the VPN authenticates devices/users, preserves an intended private source address, and restricts routing to authorized clients. Host firewall and network segmentation remain recommended even though Caddy authenticates every request.
 
-Apple Container's host-route mechanism is part of the trusted path and can change across host upgrades or restarts. Refresh and retest the exact route using iMessage Proxy's confirmed operation. Do not replace loopback binding with `0.0.0.0` to work around routing trouble.
+Apple Container's host-route mechanism is part of the trusted path and can change across host upgrades or restarts. Creating the localhost route disables iCloud Private Relay, and a Mac restart removes the associated packet-filter rule. Refresh and retest the exact mapping using iMessage Proxy's confirmed operation; an uncertain route state is not proof that it is absent. Do not automate an unobserved delete/recreate cycle or replace loopback binding with `0.0.0.0` to work around routing trouble.
 
 ## Dependencies and supply chain
 
-- Obtain iMessage Proxy from `https://github.com/mglaeser/imessage-proxy` and pin deployments to a reviewed tag or full commit.
+- Obtain iMessage Proxy from `https://github.com/mglaeser/imessage-proxy`; resolve the reviewed tag to an independently recorded full commit, and verify the release archive against an independently recorded digest and provenance before deployment.
 - Review release notes and diffs before upgrading Alpha software.
 - Build the native bridge from the checked-out source with the local Apple toolchain.
 - Use the official Caddy image pinned to an immutable SHA-256 digest, not a floating tag.
@@ -113,6 +119,7 @@ Native audit lines intentionally contain only a sanitized client ID, allowed/rej
 - [ ] Every client has a distinct password and trusts only the intended private CA.
 - [ ] The send allowlist contains only agreed test targets and does not contain `*`.
 - [ ] A forbidden method, forbidden parameter, and unlisted recipient were each rejected.
+- [ ] The consenting recipient confirmed that the test arrived from the intended Messages sender identity shown by their client.
 - [ ] Logs contain no bodies, message text, recipient, raw password, or token.
 - [ ] Full Disk Access and Automation apply only to the intended user and binary.
 - [ ] Restart, upgrade, credential revocation, and incident-stop procedures were rehearsed.
