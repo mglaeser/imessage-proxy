@@ -17,6 +17,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  contracts:
+    name: Workflows and API contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        with:
+          egress-policy: audit
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install verified actionlint
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/actionlint_1.7.12_linux_amd64.tar.gz"
+          curl \
+            --fail \
+            --location \
+            --proto '=https' \
+            --retry 3 \
+            --silent \
+            --show-error \
+            --tlsv1.2 \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            --output "$archive"
+          printf '%s  %s\n' \
+            8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 \
+            "$archive" |
+            sha256sum --check --status
+          tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
+          chmod 0755 "$RUNNER_TEMP/actionlint"
+      - name: Validate workflows
+        run: "$RUNNER_TEMP/actionlint"
+      - name: Validate OpenAPI contract
+        run: npx --yes @redocly/cli@2.46.0 lint openapi.yaml
+
   check:
     name: Build, lint, and test
     runs-on: macos-15
