@@ -1,0 +1,62 @@
+name: Repository labels
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/dependabot.yml"
+      - ".github/release-drafter.yml"
+      - ".github/workflows/labels.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Create and update labels
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        with:
+          egress-policy: audit
+      - name: Synchronize labels
+        shell: bash
+        run: |
+          while IFS='|' read -r label color description; do
+            gh label create "$label" \
+              --color "$color" \
+              --description "$description" \
+              --force
+          done <<'LABELS'
+          breaking|B60205|Introduces an incompatible change
+          enhancement|A2EEEF|Improves an existing capability
+          feature|0E8A16|Adds a new capability
+          bug|D73A4A|Reports incorrect behavior
+          fix|D93F0B|Corrects incorrect behavior
+          security|B60205|Changes the security posture
+          documentation|0075CA|Updates documentation
+          build|5319E7|Changes build or packaging
+          chore|C5DEF5|Repository maintenance
+          ci|1D76DB|Changes continuous integration
+          dependencies|0366D6|Updates a dependency
+          tests|BFD4F2|Adds or changes tests
+          triage|FBCA04|Needs maintainer review
+          good first issue|7057FF|Approachable for a first contribution
+          help wanted|008672|Maintainer welcomes community help
+          question|D876E3|Requests clarification or support
+          major|B60205|Resolve the next release as major
+          minor|0E8A16|Resolve the next release as minor
+          patch|1D76DB|Resolve the next release as patch
+          skip-changelog|EDEDED|Exclude from release notes
+          LABELS

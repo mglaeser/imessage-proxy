@@ -1,0 +1,89 @@
+name: Bug report
+description: Report a reproducible problem in Stella
+title: "[Bug]: "
+labels:
+  - bug
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Stella. Search existing reports first. **Do not include message contents, credentials, recipients, private hosts, private IPs, or other personal data.** Report vulnerabilities privately using the Security Policy.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing issues and discussions.
+          required: true
+        - label: I read the troubleshooting guide and this is not a private security report.
+          required: true
+        - label: I replaced all sensitive values with synthetic examples.
+          required: true
+  - type: input
+    id: version
+    attributes:
+      label: Stella version
+      description: Release tag or commit SHA; run `bin/stella version` when available.
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: macOS version and architecture, Apple Container version, Caddy image version/digest, and imsg version.
+      placeholder: macOS 00.0 (arm64); container ...; Caddy ...; imsg ...
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Native bridge
+        - LaunchAgent
+        - Lifecycle manager
+        - Caddy facade
+        - Apple Container host route
+        - API client behavior
+        - Build or tests
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: What should have happened?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      placeholder: What happened instead? Include sanitized errors only.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Provide the smallest deterministic sequence using synthetic data.
+      placeholder: |
+        1. Run ...
+        2. Request ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Paste short, relevant output. Redact identifiers and secrets; do not attach a full Messages database or unreviewed log archive.
+      render: shell
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Recent upgrades, configuration changes, or other useful context.

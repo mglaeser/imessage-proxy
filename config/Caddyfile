@@ -1,0 +1,85 @@
+{
+	admin off
+	auto_https disable_redirects
+	servers {
+		max_header_size 16KB
+		timeouts {
+			read_body 15s
+			read_header 5s
+			write 40s
+			idle 1m
+		}
+	}
+}
+
+https://{$STELLA_API_HOST}:{$STELLA_API_PORT} {
+	tls internal
+	header {
+		-Server
+		Cache-Control "no-store"
+		X-Content-Type-Options "nosniff"
+	}
+
+	route {
+		@outside not remote_ip private_ranges
+		abort @outside
+
+		request_body {
+			max_size 64KB
+		}
+
+		basic_auth {
+			import {$STELLA_USERS_FILE}
+		}
+
+		@health {
+			method GET
+			path /healthz
+		}
+		handle @health {
+			reverse_proxy http://{$STELLA_BRIDGE_HOST}:{$STELLA_BRIDGE_PORT} {
+				header_up Authorization "Bearer {$STELLA_BRIDGE_TOKEN}"
+				header_up X-API-Client {http.auth.user.id}
+				header_down -Server
+				transport http {
+					dial_timeout 3s
+					response_header_timeout 35s
+				}
+			}
+		}
+
+		@rpc {
+			method POST
+			path /v1/rpc
+		}
+		handle @rpc {
+			reverse_proxy http://{$STELLA_BRIDGE_HOST}:{$STELLA_BRIDGE_PORT} {
+				header_up Authorization "Bearer {$STELLA_BRIDGE_TOKEN}"
+				header_up X-API-Client {http.auth.user.id}
+				header_down -Server
+				transport http {
+					dial_timeout 3s
+					response_header_timeout 35s
+				}
+			}
+		}
+
+		@sipgate_sms {
+			method POST
+			path /v2/sessions/sms
+		}
+		handle @sipgate_sms {
+			reverse_proxy http://{$STELLA_BRIDGE_HOST}:{$STELLA_BRIDGE_PORT} {
+				header_up Authorization "Bearer {$STELLA_BRIDGE_TOKEN}"
+				header_up X-API-Client {http.auth.user.id}
+				header_down -Server
+				transport http {
+					dial_timeout 3s
+					response_header_timeout 35s
+				}
+			}
+		}
+
+		respond 404
+	}
+}

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Rendered by bin/stella; do not place secrets in this template. -->
+<dict>
+	<key>Label</key>
+	<string>io.github.mglaeser.stella.bridge</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__BRIDGE_BIN__</string>
+		<string>serve</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>IMESSAGE_ALLOWED_TARGETS_FILE</key>
+		<string>__TARGETS_FILE__</string>
+		<key>IMESSAGE_BRIDGE_PORT</key>
+		<string>__BRIDGE_PORT__</string>
+		<key>IMESSAGE_BRIDGE_TOKEN_FILE</key>
+		<string>__TOKEN_FILE__</string>
+		<key>IMESSAGE_RPC_TIMEOUT_SECONDS</key>
+		<string>30</string>
+		<key>STELLA_BRIDGE_MAX_CONCURRENCY</key>
+		<string>8</string>
+		<key>STELLA_BRIDGE_SOCKET_TIMEOUT_SECONDS</key>
+		<string>10</string>
+		<key>IMSG_BIN</key>
+		<string>__IMSG_BIN__</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>__ERROR_LOG__</string>
+	<key>StandardOutPath</key>
+	<string>__OUTPUT_LOG__</string>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+</dict>
+</plist>

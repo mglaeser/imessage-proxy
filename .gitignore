@@ -1,0 +1,35 @@
+# macOS metadata
+.DS_Store
+.AppleDouble
+
+# Build and analysis outputs
+/build/
+/dist/
+*.dSYM/
+*.gcda
+*.gcno
+*.profraw
+*.profdata
+compile_commands.json
+
+# Editor state
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local configuration and secrets
+.env
+*.env
+!*.env.example
+!config/*.env.example
+*.token
+*.pem
+*.key
+/users.caddy
+/allowed-targets.txt
+
+# Runtime state
+logs/
+state/
+data/

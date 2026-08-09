@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source-release:
+    name: Source archive and provenance
+    if: github.ref_type == 'tag'
+    runs-on: macos-15
+    timeout-minutes: 15
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        with:
+          egress-policy: audit
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate release version
+        id: metadata
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          test "$GITHUB_REF_NAME" = "v$version"
+          test "$version" = "$(make --no-print-directory version)"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - name: Create reproducible source archive and checksum
+        env:
+          VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          mkdir -p dist
+          export COPYFILE_DISABLE=1
+          git archive --format=tar --prefix="stella-$VERSION/" "$GITHUB_SHA" |
+            gzip -n -9 > "dist/stella-$VERSION.tar.gz"
+          cd dist
+          shasum -a 256 "stella-$VERSION.tar.gz" > SHA256SUMS
+      - name: Attest source archive
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/stella-${{ steps.metadata.outputs.version }}.tar.gz
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archive="dist/stella-${{ steps.metadata.outputs.version }}.tar.gz"
+          archive_name="${archive##*/}"
+          if release_is_draft="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [[ "$release_is_draft" != true ]]; then
+              temporary="$(mktemp -d)"
+              trap 'rm -rf -- "$temporary"' EXIT
+              gh release download "$GITHUB_REF_NAME" \
+                --dir "$temporary" \
+                --pattern SHA256SUMS \
+                --pattern "$archive_name"
+              cmp -s dist/SHA256SUMS "$temporary/SHA256SUMS"
+              cmp -s "$archive" "$temporary/$archive_name"
+              printf 'Published release assets already match this tag; no mutation required.\n'
+              exit 0
+            fi
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --draft \
+              --generate-notes \
+              --title "Stella $GITHUB_REF_NAME" \
+              --verify-tag
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/SHA256SUMS "$archive" --clobber
+          gh release edit "$GITHUB_REF_NAME" --draft=false

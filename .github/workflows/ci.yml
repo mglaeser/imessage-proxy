@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Build, lint, and test
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        with:
+          egress-policy: audit
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install lint tools
+        run: brew install caddy clang-format markdownlint-cli2 shellcheck
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun clang --version
+      - name: Run all checks
+        run: make check STRICT=1
+      - name: Verify version consistency
+        run: |
+          expected="$(< VERSION)"
+          test "$(build/stella-bridge version)" = "$expected"
+          test "$(bin/stella version)" = "$expected"
+      - name: Upload unsigned CI bridge
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unsigned-stella-bridge-${{ runner.arch }}
+          path: build/stella-bridge
+          if-no-files-found: error
+          retention-days: 7
+
+  install-smoke-test:
+    name: Install layout
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        with:
+          egress-policy: audit
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check executable modes
+        run: |
+          test -x bin/stella
+          test -x tests/test-stella-bridge.sh
+      - name: Stage install and uninstall
+        run: |
+          stage="$(mktemp -d)"
+          make install STRICT=1 DESTDIR="$stage" PREFIX=/usr/local
+          test "$("$stage/usr/local/bin/stella" version)" = "$(< VERSION)"
+          test -f "$stage/usr/local/share/stella/VERSION"
+          test -f "$stage/usr/local/share/stella/src/stella-bridge.m"
+          test -f "$stage/usr/local/share/stella/config/Caddyfile"
+          make uninstall DESTDIR="$stage" PREFIX=/usr/local
+          test ! -e "$stage/usr/local/bin/stella"
+          test ! -e "$stage/usr/local/share/stella"

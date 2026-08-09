@@ -1,0 +1,58 @@
+name: Feature request
+description: Propose a focused improvement that preserves Stella's security model
+title: "[Feature]: "
+labels:
+  - enhancement
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Stella deliberately favors a narrow trust boundary over feature count. Explain the operator problem, not just a preferred implementation. Features requiring public-Internet exposure, unrestricted host control, or weaker macOS protections are out of scope.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing issues, discussions, and the roadmap.
+          required: true
+        - label: This proposal preserves authenticated private-network operation and normal macOS security controls.
+          required: true
+        - label: I have not included private infrastructure or personal message data.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Operator problem
+      description: Who is affected, what are they trying to do, and why is the current behavior insufficient?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: Describe observable behavior, not only implementation details.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include workarounds and the option of keeping Stella unchanged.
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security, privacy, and operational impact
+      description: Address trust boundaries, authentication, allowlists, message data, logging, dependencies, migration, and rollback.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Acceptance criteria
+      description: List concrete tests or documentation that would demonstrate completion.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...

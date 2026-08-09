@@ -1,0 +1,10 @@
+# Default review responsibility
+* @mglaeser
+
+# Security-sensitive trust boundaries
+/src/ @mglaeser
+/bin/ @mglaeser
+/config/ @mglaeser
+/tests/ @mglaeser
+/.github/workflows/ @mglaeser
+/SECURITY.md @mglaeser

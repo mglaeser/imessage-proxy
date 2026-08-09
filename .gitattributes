@@ -1,0 +1,18 @@
+* text=auto eol=lf
+
+*.m text diff=cpp
+*.h text diff=cpp
+*.plist.in text diff=xml
+*.sh text eol=lf
+bin/stella text eol=lf
+Makefile text eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+
+CHANGELOG.md export-subst
+.github export-ignore

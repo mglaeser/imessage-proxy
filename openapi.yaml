@@ -1,0 +1,257 @@
+openapi: 3.1.0
+info:
+  title: Stella API
+  version: 0.1.0
+  summary: A narrow, authenticated iMessage proxy for trusted private networks.
+  description: >-
+    Stella exposes allowlisted read and text-send operations through a private
+    Caddy facade. It is alpha software and must not be exposed to the Internet.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+  contact:
+    url: https://github.com/mglaeser/stella
+servers:
+  - url: https://messages.example.internal:9443
+    description: Replace with the operator's private Stella endpoint.
+security:
+  - basicAuth: []
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: Exercise the facade, bridge, and imsg read path.
+      responses:
+        "200":
+          description: Stella and the Messages read path are healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "431":
+          $ref: "#/components/responses/HeadersTooLarge"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/rpc:
+    post:
+      operationId: callMessagesRpc
+      summary: Run one allowlisted imsg JSON-RPC method.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RpcRequest"
+      responses:
+        "200":
+          description: A correlated JSON-RPC result or upstream JSON-RPC error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RpcResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "431":
+          $ref: "#/components/responses/HeadersTooLarge"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "504":
+          $ref: "#/components/responses/Timeout"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v2/sessions/sms:
+    post:
+      operationId: sendSipgateCompatibleSms
+      summary: Send an immediate iMessage using Sipgate-compatible request fields.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SipgateSendRequest"
+      responses:
+        "204":
+          description: Messages accepted the immediate send request.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "431":
+          $ref: "#/components/responses/HeadersTooLarge"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "504":
+          $ref: "#/components/responses/Timeout"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+      description: Use a distinct Caddy credential for each API client.
+  responses:
+    BadRequest:
+      description: The request does not satisfy Stella's narrow contract.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HttpError"
+    Unauthorized:
+      description: Client or bridge credentials are missing or invalid.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HttpError"
+    Forbidden:
+      description: The method, parameter, or send target is not allowed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HttpError"
+    TooLarge:
+      description: The request exceeds Stella's size limit.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HttpError"
+    RequestTimeout:
+      description: The client did not send or receive the bounded request in time.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HttpError"
+    HeadersTooLarge:
+      description: The HTTP request headers exceed Stella's 16 KiB limit.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HttpError"
+    UnsupportedMediaType:
+      description: The endpoint requires application/json.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HttpError"
+    BadGateway:
+      description: imsg failed or returned an invalid or oversized response.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HttpError"
+    Unavailable:
+      description: The Messages read path is unavailable or Stella is overloaded.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HttpError"
+    Timeout:
+      description: The bounded imsg request exceeded its deadline.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HttpError"
+  schemas:
+    JsonRpcId:
+      oneOf:
+        - type: string
+          minLength: 1
+          maxLength: 256
+        - type: number
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status, version]
+      properties:
+        status:
+          const: ok
+        version:
+          type: string
+    RpcRequest:
+      type: object
+      additionalProperties: false
+      required: [jsonrpc, id, method]
+      properties:
+        jsonrpc:
+          const: "2.0"
+        id:
+          $ref: "#/components/schemas/JsonRpcId"
+        method:
+          type: string
+          enum:
+            - chats.list
+            - messages.history
+            - messages.after
+            - send
+            - message.send_status
+        params:
+          type: object
+          description: Method-specific parameters documented in docs/api.md.
+    RpcResponse:
+      type: object
+      additionalProperties: true
+      required: [jsonrpc, id]
+      properties:
+        jsonrpc:
+          const: "2.0"
+        id:
+          $ref: "#/components/schemas/JsonRpcId"
+        result: {}
+        error:
+          type: object
+      oneOf:
+        - required: [result]
+          properties:
+            error: false
+        - required: [error]
+          properties:
+            result: false
+    SipgateSendRequest:
+      type: object
+      additionalProperties: false
+      required: [smsId, recipient, message]
+      properties:
+        smsId:
+          type: string
+          minLength: 1
+          maxLength: 64
+        recipient:
+          type: string
+          minLength: 1
+          maxLength: 256
+        message:
+          type: string
+          minLength: 1
+          maxLength: 460
+        sendAt:
+          type: number
+          const: -1
+    HttpError:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
