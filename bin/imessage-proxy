@@ -53,7 +53,7 @@ if [[ -z "$SOURCE_DIR" || ! -f "$SOURCE_DIR/VERSION" ]]; then
 fi
 version="$(< "$SOURCE_DIR/VERSION")"
 if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  printf 'ERROR: iMessage Proxy VERSION must contain one semantic version (for example, 0.2.0)\n' >&2
+  printf 'ERROR: iMessage Proxy VERSION must contain one semantic version (for example, 0.3.0)\n' >&2
   exit 78
 fi
 readonly VERSION="$version"
@@ -163,8 +163,84 @@ require_private_file() {
   [[ "$owner" == "$(id -un)" ]] || die "private file must be owned by $(id -un): $path"
 }
 
+bridge_token_value() {
+  local encoded path="${1:-$TOKEN_FILE}" token
+  [[ -f "$path" && ! -L "$path" ]] || return 2
+  encoded="$(LC_ALL=C od -An -v -tx1 "$path" 2>/dev/null | tr -d '[:space:]')" || return 2
+  [[ "$encoded" =~ ^((3[0-9])|(6[1-6])){64}(0a)?$ ]] || return 1
+  token="$(LC_ALL=C dd if="$path" bs=64 count=1 2>/dev/null)" || return 2
+  [[ "$token" =~ ^[0-9a-f]{64}$ ]] || return 2
+  printf '%s\n' "$token"
+}
+
 ports_are_distinct() {
   [[ "$1" != "$2" ]]
+}
+
+dns_name_valid() {
+  local label name="$1"
+  local -a labels
+  [[ -n "$name" && "${#name}" -le 253 && "$name" != .* && "$name" != *. && "$name" != *..* ]] ||
+    return 1
+  IFS=. read -r -a labels <<< "$name"
+  for label in "${labels[@]}"; do
+    [[ "${#label}" -le 63 && "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?$ ]] ||
+      return 1
+  done
+}
+
+hostname_valid() {
+  [[ "$1" != *_* ]] && dns_name_valid "$1"
+}
+
+lowercase_hostname_valid() {
+  local LC_ALL=C
+  [[ "$1" != *[A-Z]* ]] && hostname_valid "$1"
+}
+
+ipv4_address_valid() {
+  local octet value="$1"
+  local -a octets
+  [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS=. read -r -a octets <<< "$value"
+  [[ "${#octets[@]}" -eq 4 ]] || return 1
+  for octet in "${octets[@]}"; do
+    [[ "$octet" =~ ^(0|[1-9][0-9]{0,2})$ ]] || return 1
+    ((10#$octet <= 255)) || return 1
+  done
+}
+
+private_bind_ipv4_valid() {
+  local first second _third _fourth
+  ipv4_address_valid "$1" || return 1
+  IFS=. read -r first second _third _fourth <<< "$1"
+  ((
+    first == 10 ||
+    (first == 172 && second >= 16 && second <= 31) ||
+    (first == 192 && second == 168) ||
+    (first == 100 && second >= 64 && second <= 127)
+  ))
+}
+
+host_route_settings_valid() {
+  lowercase_hostname_valid "$1" && ipv4_address_valid "$2"
+}
+
+require_host_route_settings() {
+  lowercase_hostname_valid "$HOST_DOMAIN" ||
+    die "IMESSAGE_PROXY_BRIDGE_HOST must be a lowercase hostname"
+  ipv4_address_valid "$HOST_ALIAS_IP" ||
+    die "IMESSAGE_PROXY_BRIDGE_HOST_IP must be an IPv4 address"
+}
+
+require_private_bind_ip() {
+  local bind_ip
+  bind_ip="$(resolve_setting IMESSAGE_PROXY_BIND_IP STELLA_BIND_IP)" || return $?
+  private_bind_ipv4_valid "$bind_ip" ||
+    die "IMESSAGE_PROXY_BIND_IP must be a private RFC 1918 or RFC 6598 IPv4 address assigned to this Mac"
+  if ! ifconfig | grep -F "inet $bind_ip " >/dev/null 2>&1; then
+    die "IMESSAGE_PROXY_BIND_IP $bind_ip is not assigned to this Mac"
+  fi
 }
 
 port_is_canonical() {
@@ -175,7 +251,7 @@ require_api_settings() {
   local api_host api_port
   api_host="$(resolve_setting IMESSAGE_PROXY_API_HOST STELLA_API_HOST)" || return $?
   api_port="$(resolve_setting IMESSAGE_PROXY_API_PORT STELLA_API_PORT 9443)" || return $?
-  [[ "$api_host" =~ ^[A-Za-z0-9.-]+$ ]] ||
+  hostname_valid "$api_host" ||
     die "IMESSAGE_PROXY_API_HOST must be a private DNS name"
   port_is_canonical "$api_port" ||
     die "IMESSAGE_PROXY_API_PORT must be canonical base-10 in the range 1024-65535"
@@ -183,9 +259,9 @@ require_api_settings() {
     die "IMESSAGE_PROXY_BRIDGE_PORT must be canonical base-10 in the range 1024-65535"
   ports_are_distinct "$api_port" "$BRIDGE_PORT" ||
     die "IMESSAGE_PROXY_API_PORT must differ from IMESSAGE_PROXY_BRIDGE_PORT"
-  [[ "$HOST_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] ||
-    die "IMESSAGE_PROXY_BRIDGE_HOST must be a valid hostname"
-  [[ "$HOST_ALIAS_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] ||
+  lowercase_hostname_valid "$HOST_DOMAIN" ||
+    die "IMESSAGE_PROXY_BRIDGE_HOST must be a lowercase hostname"
+  ipv4_address_valid "$HOST_ALIAS_IP" ||
     die "IMESSAGE_PROXY_BRIDGE_HOST_IP must be an IPv4 address"
 }
 
@@ -196,8 +272,401 @@ require_image() {
     die "IMESSAGE_PROXY_CADDY_IMAGE must be the official Caddy image pinned to a reviewed sha256 digest"
 }
 
+container_inventory_schema_valid() {
+  jq -e '
+    type == "array" and
+    all(.[];
+      (.configuration | type == "object") and
+      (.configuration.id | type == "string" and length > 0) and
+      (.status | type == "object") and
+      (.status.state | type == "string" and
+        (. == "unknown" or . == "stopped" or . == "running" or . == "stopping"))) and
+    ([.[].configuration.id] | length) ==
+      ([.[].configuration.id] | unique | length)
+  ' <<< "$1" >/dev/null 2>&1
+}
+
+container_inventory_json() {
+  local diagnostics diagnostics_file inventory status
+  diagnostics_file="$(mktemp "${TMPDIR:-/tmp}/imessage-proxy-container.XXXXXX")" || return 2
+  if inventory="$(container list --all --format json 2> "${diagnostics_file}")"; then
+    status=0
+  else
+    status=$?
+  fi
+  diagnostics="$(< "${diagnostics_file}")"
+  rm -f -- "${diagnostics_file}"
+  [[ "${status}" -eq 0 && -z "${diagnostics}" ]] || return 2
+  container_inventory_schema_valid "${inventory}" || return 2
+  jq '
+    map({
+      configuration: {
+        id: .configuration.id,
+        publishedPorts: (
+          if (.configuration.publishedPorts | type) == "array" then
+            [
+              .configuration.publishedPorts[] |
+              {
+                hostAddress: .hostAddress,
+                hostPort: .hostPort,
+                containerPort: .containerPort,
+                proto: .proto
+              }
+            ]
+          else
+            []
+          end
+        )
+      },
+      status: {state: .status.state}
+    })
+  ' <<< "${inventory}" || return 2
+}
+
+container_state() {
+  local inventory state
+  inventory="$(container_inventory_json)" || return 2
+  state="$(jq -r --arg name "$CONTAINER_NAME" '
+    [.[] | select(.configuration.id == $name) | .status.state] |
+    if length == 0 then "absent" elif length == 1 then .[0] else "invalid" end
+  ' <<< "${inventory}")" || return 2
+  case "${state}" in
+    absent) return 1 ;;
+    unknown | stopped | running | stopping) printf '%s\n' "${state}" ;;
+    *) return 2 ;;
+  esac
+}
+
 container_exists() {
-  container inspect "$CONTAINER_NAME" >/dev/null 2>&1
+  local state status
+  if state="$(container_state)"; then
+    [[ -n "${state}" ]]
+  else
+    status=$?
+    return "${status}"
+  fi
+}
+
+container_inspect_schema_valid() {
+  jq -e '
+    type == "array" and length == 1 and
+    (.[0].configuration | type == "object") and
+    (.[0].configuration.id | type == "string" and length > 0) and
+    (.[0].configuration.image.descriptor.digest | type == "string" and length > 0) and
+    (.[0].configuration.mounts | type == "array") and
+    all(.[0].configuration.mounts[];
+      type == "object" and
+      (.type | type == "object") and
+      (.source | type == "string") and
+      (.destination | type == "string") and
+      (.options | type == "array") and
+      all(.options[]; type == "string")) and
+    (.[0].configuration.networks | type == "array") and
+    all(.[0].configuration.networks[];
+      type == "object" and
+      (.network | type == "string" and length > 0) and
+      (.options | type == "object") and
+      (.options.hostname | type == "string" and length > 0) and
+      (.options.macAddress == null or (.options.macAddress | type) == "string") and
+      (.options.mtu == null or (.options.mtu | type) == "number")) and
+    (.[0].configuration.dns == null or
+      ((.[0].configuration.dns | type) == "object" and
+        (.[0].configuration.dns.nameservers | type) == "array" and
+        all(.[0].configuration.dns.nameservers[]; type == "string") and
+        (.[0].configuration.dns.domain == null or
+          (.[0].configuration.dns.domain | type) == "string") and
+        (.[0].configuration.dns.searchDomains | type) == "array" and
+        all(.[0].configuration.dns.searchDomains[]; type == "string") and
+        (.[0].configuration.dns.options | type) == "array" and
+        all(.[0].configuration.dns.options[]; type == "string"))) and
+    (.[0].configuration.publishedPorts | type == "array") and
+    all(.[0].configuration.publishedPorts[];
+      type == "object" and
+      (.hostAddress | type == "string") and
+      (.hostPort | type == "number") and
+      (.containerPort | type == "number") and
+      (.proto | type == "string")) and
+    (.[0].configuration.publishedSockets | type == "array") and
+    (.[0].configuration.initProcess | type == "object") and
+    (.[0].configuration.initProcess.executable | type == "string") and
+    (.[0].configuration.initProcess.arguments | type == "array") and
+    all(.[0].configuration.initProcess.arguments[]; type == "string") and
+    (.[0].configuration.initProcess.environment | type == "array") and
+    all(.[0].configuration.initProcess.environment[]; type == "string") and
+    (.[0].configuration.initProcess.workingDirectory | type == "string") and
+    (.[0].configuration.initProcess.terminal | type == "boolean") and
+    (.[0].configuration.initProcess.user | type == "object") and
+    (.[0].configuration.initProcess.supplementalGroups | type == "array") and
+    all(.[0].configuration.initProcess.supplementalGroups[];
+      type == "number" and floor == . and . >= 0) and
+    (.[0].configuration.initProcess.rlimits | type == "array") and
+    all(.[0].configuration.initProcess.rlimits[];
+      type == "object" and
+      (.limit | type == "string") and
+      (.soft | type == "number" and floor == . and . >= 0) and
+      (.hard | type == "number" and floor == . and . >= 0)) and
+    (.[0].configuration.resources | type == "object") and
+    (.[0].configuration.resources.cpus | type == "number") and
+    (.[0].configuration.resources.memoryInBytes | type == "number") and
+    (.[0].configuration.resources.storage == null or
+      (.[0].configuration.resources.storage | type) == "number") and
+    (.[0].configuration.resources.cpuOverhead | type == "number") and
+    (.[0].configuration.platform | type == "object") and
+    (.[0].configuration.platform.os | type == "string") and
+    (.[0].configuration.platform.architecture | type == "string") and
+    (.[0].configuration.platform.variant == null or
+      (.[0].configuration.platform.variant | type) == "string") and
+    (.[0].configuration.shmSize == null or
+      (.[0].configuration.shmSize | type) == "number") and
+    (.[0].configuration.stopSignal == null or
+      (.[0].configuration.stopSignal | type) == "string") and
+    (.[0].configuration.readOnly | type == "boolean") and
+    (.[0].configuration.useInit | type == "boolean") and
+    (.[0].configuration.capAdd | type == "array") and
+    (.[0].configuration.capDrop | type == "array") and
+    (.[0].configuration.runtimeHandler | type == "string" and length > 0) and
+    (.[0].configuration.maskedPaths == null or
+      ((.[0].configuration.maskedPaths | type) == "array" and
+        all(.[0].configuration.maskedPaths[]; type == "string"))) and
+    (.[0].configuration.readonlyPaths == null or
+      ((.[0].configuration.readonlyPaths | type) == "array" and
+        all(.[0].configuration.readonlyPaths[]; type == "string")))
+  ' <<< "$1" >/dev/null 2>&1
+}
+
+facade_env_schema_valid() {
+  awk '
+    BEGIN {
+      allowed["STELLA_API_HOST"] = 1
+      allowed["STELLA_API_PORT"] = 1
+      allowed["STELLA_BRIDGE_HOST"] = 1
+      allowed["STELLA_BRIDGE_PORT"] = 1
+      allowed["STELLA_BRIDGE_TOKEN"] = 1
+      allowed["STELLA_USERS_FILE"] = 1
+    }
+    {
+      separator = index($0, "=")
+      key = substr($0, 1, separator - 1)
+      value = substr($0, separator + 1)
+      if (separator <= 1 || !allowed[key] || value == "" || seen[key]++) {
+        invalid = 1
+        exit
+      }
+      count += 1
+    }
+    END { exit (invalid || count != 6) }
+  ' "$FACADE_ENV"
+}
+
+facade_env_value() {
+  awk -v expected_key="$1" '
+    index($0, expected_key "=") == 1 {
+      count += 1
+      value = substr($0, length(expected_key) + 2)
+    }
+    END {
+      if (count != 1 || value == "") exit 1
+      print value
+    }
+  ' "$FACADE_ENV"
+}
+
+prepared_facade_state_matches() {
+  local api_host api_port facade_api_host facade_api_port facade_bridge_host facade_bridge_port
+  local facade_bridge_token facade_users_file host_bridge_token status
+  api_host="$(resolve_setting IMESSAGE_PROXY_API_HOST STELLA_API_HOST)" || return 2
+  api_port="$(resolve_setting IMESSAGE_PROXY_API_PORT STELLA_API_PORT 9443)" || return 2
+  hostname_valid "$api_host" || return 2
+  port_is_canonical "$api_port" || return 2
+  host_route_settings_valid "$HOST_DOMAIN" "$HOST_ALIAS_IP" || return 2
+  [[ -f "$FACADE_ENV" && ! -L "$FACADE_ENV" && -f "$TOKEN_FILE" && ! -L "$TOKEN_FILE" ]] || return 2
+  [[ -f "$SOURCE_DIR/config/Caddyfile" && -f "$CADDYFILE" && ! -L "$CADDYFILE" ]] || return 2
+  facade_env_schema_valid || return 2
+  cmp -s "$SOURCE_DIR/config/Caddyfile" "$CADDYFILE" || return 1
+
+  facade_api_host="$(facade_env_value STELLA_API_HOST)" || return 2
+  facade_api_port="$(facade_env_value STELLA_API_PORT)" || return 2
+  facade_bridge_host="$(facade_env_value STELLA_BRIDGE_HOST)" || return 2
+  facade_bridge_port="$(facade_env_value STELLA_BRIDGE_PORT)" || return 2
+  facade_bridge_token="$(facade_env_value STELLA_BRIDGE_TOKEN)" || return 2
+  facade_users_file="$(facade_env_value STELLA_USERS_FILE)" || return 2
+  if host_bridge_token="$(bridge_token_value "$TOKEN_FILE")"; then
+    :
+  else
+    status=$?
+    [[ "$status" -eq 1 ]] && return 1
+    return 2
+  fi
+  [[ "$facade_api_host" == "$api_host" && "$facade_api_port" == "$api_port" &&
+    "$facade_bridge_host" == "$HOST_DOMAIN" && "$facade_bridge_port" == "$BRIDGE_PORT" &&
+    "$facade_users_file" == /etc/caddy/users.caddy &&
+    "$facade_bridge_token" =~ ^[0-9a-f]{64}$ &&
+    "$facade_bridge_token" == "$host_bridge_token" ]]
+}
+
+container_environment_names() {
+  jq -er '
+    [
+      .[0].configuration.initProcess.environment[] |
+      capture("^(?<name>[A-Za-z_][A-Za-z0-9_]*)=").name
+    ] |
+    if (unique | length) == length then
+      sort | join("\n")
+    else
+      error("unexpected container environment keys")
+    end
+  ' <<< "$1"
+}
+
+container_environment_value() {
+  jq -er --arg key "$2" '
+    [
+      .[0].configuration.initProcess.environment[] |
+      select(startswith($key + "="))
+    ] |
+    if length == 1 then
+      .[0] | .[(($key | length) + 1):]
+    else
+      error("missing or duplicate container environment key")
+    end
+  ' <<< "$1"
+}
+
+container_definition_matches() {
+  local actual_names actual_value api_host api_port bind_ip diagnostics diagnostics_file expected_names index
+  local facade_api_host facade_api_port facade_bridge_host facade_bridge_port facade_bridge_token
+  local facade_users_file image image_digest inspect status
+  local -a environment_keys environment_values
+
+  api_host="$(resolve_setting IMESSAGE_PROXY_API_HOST STELLA_API_HOST)" || return 2
+  api_port="$(resolve_setting IMESSAGE_PROXY_API_PORT STELLA_API_PORT 9443)" || return 2
+  bind_ip="$(resolve_setting IMESSAGE_PROXY_BIND_IP STELLA_BIND_IP)" || return 2
+  image="$(resolve_setting IMESSAGE_PROXY_CADDY_IMAGE STELLA_CADDY_IMAGE)" || return 2
+  hostname_valid "$api_host" || return 2
+  port_is_canonical "$api_port" || return 2
+  private_bind_ipv4_valid "$bind_ip" || return 2
+  host_route_settings_valid "$HOST_DOMAIN" "$HOST_ALIAS_IP" || return 2
+  [[ "$image" =~ ^docker\.io/library/caddy(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$ ]] || return 2
+  prepared_facade_state_matches || return $?
+
+  facade_api_host="$(facade_env_value STELLA_API_HOST)" || return 2
+  facade_api_port="$(facade_env_value STELLA_API_PORT)" || return 2
+  facade_bridge_host="$(facade_env_value STELLA_BRIDGE_HOST)" || return 2
+  facade_bridge_port="$(facade_env_value STELLA_BRIDGE_PORT)" || return 2
+  facade_bridge_token="$(facade_env_value STELLA_BRIDGE_TOKEN)" || return 2
+  facade_users_file="$(facade_env_value STELLA_USERS_FILE)" || return 2
+
+  diagnostics_file="$(mktemp "${TMPDIR:-/tmp}/imessage-proxy-inspect.XXXXXX")" || return 2
+  if inspect="$(container inspect "$CONTAINER_NAME" 2> "${diagnostics_file}")"; then
+    status=0
+  else
+    status=$?
+  fi
+  diagnostics="$(< "${diagnostics_file}")"
+  rm -f -- "${diagnostics_file}"
+  [[ "$status" -eq 0 && -z "$diagnostics" ]] || return 2
+  container_inspect_schema_valid "$inspect" || return 2
+
+  image_digest="${image##*@}"
+  if jq -e \
+    --arg name "$CONTAINER_NAME" \
+    --arg digest "$image_digest" \
+    --arg host "$bind_ip" \
+    --arg caddyfile "$CADDYFILE" \
+    --arg users "$USERS_FILE" \
+    --arg data "$CADDY_DATA" \
+    --arg config "$CADDY_CONFIG" \
+    --argjson port "$api_port" '
+      .[0].configuration.id == $name and
+      .[0].configuration.image.descriptor.digest == $digest and
+      .[0].configuration.readOnly == true and
+      .[0].configuration.useInit == false and
+      .[0].configuration.runtimeHandler == "container-runtime-linux" and
+      .[0].configuration.maskedPaths == null and
+      .[0].configuration.readonlyPaths == null and
+      .[0].configuration.platform == {"os": "linux", "architecture": "arm64"} and
+      .[0].configuration.shmSize == null and
+      .[0].configuration.stopSignal == null and
+      .[0].configuration.resources.cpus == 1 and
+      .[0].configuration.resources.memoryInBytes == 268435456 and
+      .[0].configuration.resources.storage == null and
+      .[0].configuration.resources.cpuOverhead == 1 and
+      (.[0].configuration.publishedSockets | length) == 0 and
+      (.[0].configuration.publishedPorts | length) == 1 and
+      .[0].configuration.publishedPorts[0].hostAddress == $host and
+      .[0].configuration.publishedPorts[0].hostPort == $port and
+      .[0].configuration.publishedPorts[0].containerPort == $port and
+      .[0].configuration.publishedPorts[0].proto == "tcp" and
+      .[0].configuration.initProcess.executable == "caddy" and
+      .[0].configuration.initProcess.arguments ==
+        ["run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"] and
+      .[0].configuration.initProcess.workingDirectory == "/srv" and
+      .[0].configuration.initProcess.terminal == false and
+      .[0].configuration.initProcess.user == {"id": {"uid": 0, "gid": 0}} and
+      .[0].configuration.initProcess.supplementalGroups == [] and
+      .[0].configuration.initProcess.rlimits == [] and
+      (.[0].configuration.mounts | length) == 5 and
+      ([.[0].configuration.mounts[] |
+        select(.type == {"virtiofs": {}} and .source == $caddyfile and
+          .destination == "/etc/caddy/Caddyfile" and .options == ["ro"])] | length) == 1 and
+      ([.[0].configuration.mounts[] |
+        select(.type == {"virtiofs": {}} and .source == $users and
+          .destination == "/etc/caddy/users.caddy" and .options == ["ro"])] | length) == 1 and
+      ([.[0].configuration.mounts[] |
+        select(.type == {"virtiofs": {}} and .source == $data and
+          .destination == "/data" and .options == [])] | length) == 1 and
+      ([.[0].configuration.mounts[] |
+        select(.type == {"virtiofs": {}} and .source == $config and
+          .destination == "/config" and .options == [])] | length) == 1 and
+      ([.[0].configuration.mounts[] |
+        select(.type == {"tmpfs": {}} and .source == "tmpfs" and
+          .destination == "/tmp" and .options == [])] | length) == 1 and
+      (.[0].configuration.networks | length) == 1 and
+      .[0].configuration.networks[0].network == "default" and
+      .[0].configuration.networks[0].options.hostname ==
+        (if .[0].configuration.dns.domain == null then
+          $name
+        else
+          ($name + "." + .[0].configuration.dns.domain + ".")
+        end) and
+      .[0].configuration.networks[0].options.macAddress == null and
+      .[0].configuration.networks[0].options.mtu == 1280 and
+      (.[0].configuration.dns | type) == "object" and
+      .[0].configuration.dns.nameservers == [] and
+      .[0].configuration.dns.searchDomains == [] and
+      .[0].configuration.dns.options == [] and
+      ((.[0].configuration.labels // {}) | length) == 0 and
+      ((.[0].configuration.sysctls // {}) | length) == 0 and
+      (.[0].configuration.capAdd | length) == 0 and
+      (.[0].configuration.capDrop | length) == 0 and
+      (.[0].configuration.rosetta // false) == false and
+      (.[0].configuration.virtualization // false) == false and
+      (.[0].configuration.ssh // false) == false
+    ' <<< "$inspect" >/dev/null; then
+    :
+  else
+    status=$?
+    [[ "$status" -eq 1 ]] && return 1
+    return 2
+  fi
+
+  expected_names=$'CADDY_VERSION\nPATH\nSTELLA_API_HOST\nSTELLA_API_PORT\nSTELLA_BRIDGE_HOST\nSTELLA_BRIDGE_PORT\nSTELLA_BRIDGE_TOKEN\nSTELLA_USERS_FILE\nXDG_CONFIG_HOME\nXDG_DATA_HOME'
+  actual_names="$(container_environment_names "$inspect")" || return 2
+  [[ "$actual_names" == "$expected_names" ]] || return 1
+
+  environment_keys=(
+    PATH CADDY_VERSION XDG_CONFIG_HOME XDG_DATA_HOME STELLA_API_HOST STELLA_API_PORT
+    STELLA_BRIDGE_HOST STELLA_BRIDGE_PORT STELLA_BRIDGE_TOKEN STELLA_USERS_FILE
+  )
+  environment_values=(
+    /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    v2.11.4 /config /data "$facade_api_host" "$facade_api_port" "$facade_bridge_host"
+    "$facade_bridge_port" "$facade_bridge_token" "$facade_users_file"
+  )
+  for index in "${!environment_keys[@]}"; do
+    actual_value="$(container_environment_value "$inspect" "${environment_keys[$index]}")" || return 2
+    [[ "$actual_value" == "${environment_values[$index]}" ]] || return 1
+  done
 }
 
 write_initial_private_files() {
@@ -249,8 +718,8 @@ render_facade_env() {
   local api_host api_port temporary token
   api_host="$(resolve_setting IMESSAGE_PROXY_API_HOST STELLA_API_HOST)" || return $?
   api_port="$(resolve_setting IMESSAGE_PROXY_API_PORT STELLA_API_PORT 9443)" || return $?
-  token="$(< "$TOKEN_FILE")"
-  [[ "$token" =~ ^[0-9a-f]{64}$ ]] || die "bridge token must contain exactly 64 lowercase hexadecimal characters"
+  token="$(bridge_token_value "$TOKEN_FILE")" ||
+    die "bridge token must contain exactly 64 lowercase hexadecimal characters with at most one trailing newline"
   temporary="$(mktemp "$SECRETS/facade.env.XXXXXX")"
   trap 'rm -f "${temporary:-}"' RETURN
   {
@@ -355,15 +824,340 @@ check_host() {
   "$imsg_bin" --version
 }
 
+launchctl_job_snapshot() {
+  local diagnostics diagnostics_file output status
+  diagnostics_file="$(mktemp "${TMPDIR:-/tmp}/imessage-proxy-launchctl.XXXXXX")" || return 2
+  if output="$(launchctl print "gui/$(id -u)/$LAUNCH_LABEL" 2> "${diagnostics_file}")"; then
+    status=0
+  else
+    status=$?
+  fi
+  diagnostics="$(< "${diagnostics_file}")"
+  rm -f -- "${diagnostics_file}"
+  case "${status}" in
+    0)
+      [[ -n "${output}" && -z "${diagnostics}" ]] || return 2
+      printf '%s\n' "${output}"
+      ;;
+    113)
+      [[ -z "${output}" ]] || return 2
+      grep -Eqi 'could not find service|service not found' <<< "${diagnostics}" || return 2
+      return 1
+      ;;
+    *) return 2 ;;
+  esac
+}
+
 agent_loaded() {
-  launchctl print "gui/$(id -u)/$LAUNCH_LABEL" >/dev/null 2>&1
+  launchctl_job_snapshot >/dev/null
+}
+
+launchctl_snapshot_value() {
+  local key="$1"
+  awk -v key="$key" '
+    {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      prefix = key " = "
+      if (index(line, prefix) == 1) {
+        count += 1
+        value = substr(line, length(prefix) + 1)
+      }
+    }
+    END {
+      if (count != 1 || value == "") exit 1
+      print value
+    }
+  '
+}
+
+agent_job_identity_valid() {
+  local job="$1" job_path job_program
+  job_path="$(launchctl_snapshot_value path <<< "$job")" || return 1
+  job_program="$(launchctl_snapshot_value program <<< "$job")" || return 1
+  [[ "$job_path" == "$PLIST_TARGET" && "$job_program" == "$BRIDGE_BIN" ]]
+}
+
+agent_job_pid() {
+  awk '
+    $1 == "pid" && $2 == "=" {
+      count += 1
+      if ($3 !~ /^[1-9][0-9]*$/ || NF != 3) invalid = 1
+      pid = $3
+    }
+    END {
+      if (invalid || count > 1) exit 2
+      if (count == 0) exit 1
+      print pid
+    }
+  ' <<< "$1"
+}
+
+agent_plist_valid() {
+  local expected_imsg path="$1" plist_json status
+  expected_imsg="$(command -v imsg)" || return 2
+  [[ -n "$expected_imsg" ]] || return 2
+  plist_json="$(plutil -convert json -o - "$path" 2>/dev/null)" || return 2
+  if jq -e \
+    --arg launch_label "$LAUNCH_LABEL" \
+    --arg bridge "$BRIDGE_BIN" \
+    --arg targets "$TARGETS_FILE" \
+    --arg token "$TOKEN_FILE" \
+    --arg port "$BRIDGE_PORT" \
+    --arg imsg "$expected_imsg" \
+    --arg error_log "$LOG_DIR/bridge.err.log" \
+    --arg output_log "$LOG_DIR/bridge.out.log" '
+      . == {
+        "Label": $launch_label,
+        "ProgramArguments": [$bridge, "serve"],
+        "EnvironmentVariables": {
+          "IMESSAGE_ALLOWED_TARGETS_FILE": $targets,
+          "IMESSAGE_BRIDGE_PORT": $port,
+          "IMESSAGE_BRIDGE_TOKEN_FILE": $token,
+          "IMESSAGE_RPC_TIMEOUT_SECONDS": "30",
+          "STELLA_BRIDGE_MAX_CONCURRENCY": "8",
+          "STELLA_BRIDGE_SOCKET_TIMEOUT_SECONDS": "10",
+          "IMSG_BIN": $imsg
+        },
+        "KeepAlive": true,
+        "ProcessType": "Background",
+        "RunAtLoad": true,
+        "StandardErrorPath": $error_log,
+        "StandardOutPath": $output_log,
+        "ThrottleInterval": 10
+      }
+    ' <<< "$plist_json" >/dev/null 2>&1; then
+    return 0
+  else
+    status=$?
+  fi
+  [[ "$status" -eq 1 ]] && return 1
+  return 2
+}
+
+prepared_agent_plist_valid() {
+  agent_plist_valid "$PLIST_STATE"
+}
+
+require_prepared_agent_plist() {
+  local status
+  require_private_file "$PLIST_STATE"
+  if prepared_agent_plist_valid; then
+    return 0
+  else
+    status=$?
+  fi
+  [[ "$status" -eq 1 ]] &&
+    die "prepared LaunchAgent plist differs from the complete reviewed definition"
+  die "could not validate the prepared LaunchAgent plist definition"
+}
+
+expected_agent_configuration_fingerprint() {
+  local diagnostics diagnostics_file expected_imsg fingerprint status
+  [[ -x "$BRIDGE_BIN" ]] || return 2
+  expected_imsg="$(command -v imsg)" || return 2
+  [[ -n "$expected_imsg" ]] || return 2
+  diagnostics_file="$(mktemp "${TMPDIR:-/tmp}/imessage-proxy-fingerprint.XXXXXX")" || return 2
+  if fingerprint="$(
+    env -i \
+      IMESSAGE_ALLOWED_TARGETS_FILE="$TARGETS_FILE" \
+      IMESSAGE_BRIDGE_PORT="$BRIDGE_PORT" \
+      IMESSAGE_BRIDGE_TOKEN_FILE="$TOKEN_FILE" \
+      IMESSAGE_RPC_TIMEOUT_SECONDS=30 \
+      STELLA_BRIDGE_MAX_CONCURRENCY=8 \
+      STELLA_BRIDGE_SOCKET_TIMEOUT_SECONDS=10 \
+      IMSG_BIN="$expected_imsg" \
+      "$BRIDGE_BIN" config-fingerprint 2> "$diagnostics_file"
+  )"; then
+    status=0
+  else
+    status=$?
+  fi
+  diagnostics="$(< "$diagnostics_file")"
+  rm -f -- "$diagnostics_file"
+  [[ "$status" -eq 0 && -z "$diagnostics" &&
+    "$fingerprint" =~ ^sha256:[0-9a-f]{64}$ ]] || return 2
+  printf '%s\n' "$fingerprint"
+}
+
+live_agent_configuration_fingerprint() {
+  local diagnostics diagnostics_file fingerprint http_status response response_with_status status token
+  command -v curl >/dev/null 2>&1 || return 2
+  command -v jq >/dev/null 2>&1 || return 2
+  token="$(bridge_token_value "$TOKEN_FILE")" || return 2
+  diagnostics_file="$(mktemp "${TMPDIR:-/tmp}/imessage-proxy-live-fingerprint.XXXXXX")" || return 2
+  if response_with_status="$(
+    printf 'header = "Authorization: Bearer %s"\n' "$token" |
+      curl --disable \
+        --config - \
+        --connect-timeout 1 \
+        --max-filesize 1024 \
+        --max-time 2 \
+        --noproxy '*' \
+        --proto '=http' \
+        --silent \
+        --show-error \
+        --write-out $'\n%{http_code}' \
+        "http://127.0.0.1:$BRIDGE_PORT/_internal/configuration-fingerprint" \
+        2> "$diagnostics_file"
+  )"; then
+    status=0
+  else
+    status=$?
+  fi
+  diagnostics="$(< "$diagnostics_file")"
+  rm -f -- "$diagnostics_file"
+  [[ "$status" -eq 0 && -z "$diagnostics" && "${#response_with_status}" -le 1024 ]] || return 2
+  [[ "$response_with_status" == *$'\n'* ]] || return 2
+  http_status="${response_with_status##*$'\n'}"
+  response="${response_with_status%$'\n'*}"
+  case "$http_status" in
+    200) ;;
+    4??) return 1 ;;
+    *) return 2 ;;
+  esac
+  [[ "${#response}" -le 512 ]] || return 2
+  fingerprint="$(jq -er '
+    if type == "object" and
+      keys == ["configurationFingerprint"] and
+      (.configurationFingerprint | type == "string")
+    then .configurationFingerprint
+    else error("invalid live configuration fingerprint response")
+    end
+  ' <<< "$response" 2>/dev/null)" || return 2
+  [[ "$fingerprint" =~ ^sha256:[0-9a-f]{64}$ ]] || return 2
+  printf '%s\n' "$fingerprint"
+}
+
+agent_configuration_fingerprint_matches() {
+  local expected_after expected_before live status
+  expected_before="$(expected_agent_configuration_fingerprint)" || return 2
+  if live="$(live_agent_configuration_fingerprint)"; then
+    :
+  else
+    status=$?
+    return "$status"
+  fi
+  expected_after="$(expected_agent_configuration_fingerprint)" || return 2
+  [[ "$expected_before" == "$live" && "$live" == "$expected_after" ]]
+}
+
+reviewed_bridge_listener_owned_by() {
+  local expected inventory process_inventory status
+  expected="$1"$'\t'"IPv4"$'\t'"TCP"$'\t'"127.0.0.1:$BRIDGE_PORT"
+  if inventory="$(tcp_listener_inventory "$BRIDGE_PORT")"; then
+    :
+  else
+    status=$?
+    return "$status"
+  fi
+  [[ "$inventory" == "$expected" ]] || return 1
+  if process_inventory="$(process_tcp_listener_inventory "$1")"; then
+    :
+  else
+    status=$?
+    return "$status"
+  fi
+  [[ "$process_inventory" == "$expected" ]]
+}
+
+agent_ready() {
+  local confirmation confirmation_pid job pid state status
+  if job="$(launchctl_job_snapshot)"; then
+    :
+  else
+    return $?
+  fi
+  agent_job_identity_valid "$job" || return 1
+  state="$(launchctl_snapshot_value state <<< "$job")" || return 2
+  [[ "$state" == running ]] || return 1
+  if pid="$(agent_job_pid "$job")"; then
+    :
+  else
+    status=$?
+    [[ "$status" -eq 1 ]] && return 1
+    return 2
+  fi
+  if reviewed_bridge_listener_owned_by "$pid"; then
+    :
+  else
+    status=$?
+    [[ "$status" -eq 1 ]] && return 1
+    return 2
+  fi
+  if agent_configuration_fingerprint_matches; then
+    :
+  else
+    status=$?
+    [[ "$status" -eq 1 ]] && return 1
+    return 2
+  fi
+  if confirmation="$(launchctl_job_snapshot)"; then
+    :
+  else
+    status=$?
+    [[ "$status" -eq 1 ]] && return 1
+    return 2
+  fi
+  agent_job_identity_valid "$confirmation" || return 1
+  state="$(launchctl_snapshot_value state <<< "$confirmation")" || return 2
+  [[ "$state" == running ]] || return 1
+  if confirmation_pid="$(agent_job_pid "$confirmation")"; then
+    [[ "$confirmation_pid" == "$pid" ]] || return 1
+  else
+    status=$?
+    [[ "$status" -eq 1 ]] && return 1
+    return 2
+  fi
+  if reviewed_bridge_listener_owned_by "$pid"; then
+    return 0
+  else
+    status=$?
+    [[ "$status" -eq 1 ]] && return 1
+    return 2
+  fi
+}
+
+wait_for_agent_ready() {
+  local status=1
+  for _ in {1..10}; do
+    if agent_ready; then
+      return 0
+    else
+      status=$?
+    fi
+    sleep 1
+  done
+  return "$status"
+}
+
+require_agent_ready() {
+  local status
+  require_prepared_agent_plist
+  require_private_file "$PLIST_TARGET"
+  cmp -s "$PLIST_STATE" "$PLIST_TARGET" ||
+    die "loaded LaunchAgent plist differs from the prepared reviewed plist"
+  if agent_ready; then
+    return 0
+  else
+    status=$?
+  fi
+  [[ "$status" -eq 1 ]] &&
+    die "the iMessage Proxy bridge LaunchAgent is not ready with the reviewed identity and sole bridge listener"
+  die "could not inventory the iMessage Proxy bridge LaunchAgent readiness"
 }
 
 agent_install() {
+  local status
   require_macos
   [[ -x "$BRIDGE_BIN" && -f "$PLIST_STATE" ]] || die "run prepare and build-host first"
-  require_private_file "$PLIST_STATE"
-  agent_loaded && die "agent is already loaded; use the confirmed agent-reload action after an update"
+  require_prepared_agent_plist
+  if agent_loaded; then
+    die "agent is already loaded; use the confirmed agent-reload action after an update"
+  else
+    status=$?
+  fi
+  [[ "${status}" -eq 1 ]] || die "could not prove the LaunchAgent is absent; refusing agent install"
   mkdir -p "$HOME/Library/LaunchAgents"
   if [[ -e "$PLIST_TARGET" || -L "$PLIST_TARGET" ]]; then
     [[ -f "$PLIST_TARGET" && ! -L "$PLIST_TARGET" ]] ||
@@ -375,32 +1169,133 @@ agent_install() {
     install -m 0600 "$PLIST_STATE" "$PLIST_TARGET"
   fi
   launchctl bootstrap "gui/$(id -u)" "$PLIST_TARGET"
+  if wait_for_agent_ready; then
+    :
+  else
+    status=$?
+    [[ "$status" -eq 1 ]] &&
+      die "LaunchAgent was bootstrapped but did not become ready with the reviewed identity and sole bridge listener"
+    die "LaunchAgent was bootstrapped but its readiness could not be inventoried"
+  fi
   printf 'Installed and loaded %s\n' "$LAUNCH_LABEL"
 }
 
 agent_reload() {
-  local backup confirmation="${1:-}" was_loaded=no
+  local backup confirmation="${1:-}" job readiness_status status
+  local previous_plist_reviewed=no was_loaded=no
   require_macos
   [[ "$confirmation" == "RELOAD IMESSAGE HOST BRIDGE" ]] || die "agent reload confirmation did not match"
   require_private_file "$PLIST_TARGET"
-  require_private_file "$PLIST_STATE"
+  require_prepared_agent_plist
+  if agent_plist_valid "$PLIST_TARGET"; then
+    previous_plist_reviewed=yes
+  fi
+  if job="$(launchctl_job_snapshot)"; then
+    agent_job_identity_valid "$job" ||
+      die "loaded same-label LaunchAgent has an unexpected plist or executable; refusing agent reload"
+    was_loaded=yes
+  else
+    status=$?
+    [[ "${status}" -eq 1 ]] ||
+      die "could not inventory the LaunchAgent; refusing agent reload"
+  fi
   backup="$(mktemp "$STATE/launch-agent-backup.XXXXXX")"
   install -m 0600 "$PLIST_TARGET" "$backup"
   trap 'rm -f "${backup:-}"' EXIT
-  if agent_loaded; then
-    was_loaded=yes
-    launchctl bootout "gui/$(id -u)/$LAUNCH_LABEL"
+  if [[ "$was_loaded" == yes ]]; then
+    if ! launchctl bootout "gui/$(id -u)/$LAUNCH_LABEL"; then
+      die "could not stop the reviewed LaunchAgent; no plist change was attempted"
+    fi
   fi
-  install -m 0600 "$PLIST_STATE" "$PLIST_TARGET"
-  if ! launchctl bootstrap "gui/$(id -u)" "$PLIST_TARGET"; then
-    install -m 0600 "$backup" "$PLIST_TARGET"
+  if ! install -m 0600 "$PLIST_STATE" "$PLIST_TARGET"; then
+    if [[ "$previous_plist_reviewed" != yes ]]; then
+      trap - EXIT
+      die "could not install the new LaunchAgent plist and the previous plist is not eligible for automatic execution; backup preserved at $backup"
+    fi
+    if ! install -m 0600 "$backup" "$PLIST_TARGET"; then
+      trap - EXIT
+      die "could not install the new LaunchAgent plist or restore the previous plist; backup preserved at $backup"
+    fi
     if [[ "$was_loaded" == yes ]]; then
-      launchctl bootstrap "gui/$(id -u)" "$PLIST_TARGET" || true
+      if ! launchctl bootstrap "gui/$(id -u)" "$PLIST_TARGET"; then
+        die "could not install the new LaunchAgent plist; restored the previous plist but could not reload it"
+      fi
+    fi
+    die "could not install the new LaunchAgent plist; restored the previous plist"
+  fi
+  if ! launchctl bootstrap "gui/$(id -u)" "$PLIST_TARGET"; then
+    if job="$(launchctl_job_snapshot)"; then
+      if ! agent_job_identity_valid "$job"; then
+        trap - EXIT
+        die "new LaunchAgent bootstrap failed and a different same-label identity appeared; backup preserved at $backup"
+      fi
+      if ! launchctl bootout "gui/$(id -u)/$LAUNCH_LABEL"; then
+        trap - EXIT
+        die "new LaunchAgent bootstrap failed and its partial load could not be stopped safely; backup preserved at $backup"
+      fi
+    else
+      status=$?
+      if [[ "$status" -ne 1 ]]; then
+        trap - EXIT
+        die "new LaunchAgent bootstrap failed and loaded state is unknown; backup preserved at $backup"
+      fi
+    fi
+    if [[ "$previous_plist_reviewed" != yes ]]; then
+      trap - EXIT
+      die "new LaunchAgent bootstrap failed; the unreviewed previous plist will not be executed automatically and its backup is preserved at $backup"
+    fi
+    if ! install -m 0600 "$backup" "$PLIST_TARGET"; then
+      trap - EXIT
+      die "new LaunchAgent failed and the previous plist could not be restored; backup preserved at $backup"
+    fi
+    if [[ "$was_loaded" == yes ]]; then
+      if ! launchctl bootstrap "gui/$(id -u)" "$PLIST_TARGET"; then
+        die "new LaunchAgent failed; restored the previous plist but could not reload it"
+      fi
     fi
     die "new LaunchAgent failed; restored the previous plist"
   fi
+  if wait_for_agent_ready; then
+    rm -f "$backup"
+    trap - EXIT
+    printf 'Reloaded and verified %s\n' "$LAUNCH_LABEL"
+    return
+  else
+    readiness_status=$?
+  fi
+  if job="$(launchctl_job_snapshot)"; then
+    if ! agent_job_identity_valid "$job"; then
+      trap - EXIT
+      die "new LaunchAgent did not become ready and the loaded identity changed; automatic rollback is unsafe; previous plist backup preserved at $backup"
+    fi
+    if ! launchctl bootout "gui/$(id -u)/$LAUNCH_LABEL"; then
+      trap - EXIT
+      die "new LaunchAgent did not become ready and could not be stopped safely; automatic rollback is unsafe; previous plist backup preserved at $backup"
+    fi
+  else
+    status=$?
+    if [[ "$status" -ne 1 ]]; then
+      trap - EXIT
+      die "new LaunchAgent readiness became unknown; automatic rollback is unsafe; previous plist backup preserved at $backup"
+    fi
+  fi
+  if [[ "$previous_plist_reviewed" != yes ]]; then
+    trap - EXIT
+    die "new LaunchAgent was stopped but the unreviewed previous plist will not be executed automatically; backup preserved at $backup"
+  fi
+  if ! install -m 0600 "$backup" "$PLIST_TARGET"; then
+    trap - EXIT
+    die "new LaunchAgent was stopped but the previous plist could not be restored; backup preserved at $backup"
+  fi
+  if [[ "$was_loaded" == yes ]]; then
+    launchctl bootstrap "gui/$(id -u)" "$PLIST_TARGET" ||
+      die "new LaunchAgent did not become ready; restored the previous plist but could not reload it"
+  fi
   rm -f "$backup"
   trap - EXIT
+  [[ "$readiness_status" -eq 1 ]] &&
+    die "new LaunchAgent did not become ready; restored the previous plist and load state"
+  die "new LaunchAgent readiness could not be inventoried; restored the previous plist and load state"
 }
 
 agent_status() {
@@ -408,60 +1303,293 @@ agent_status() {
   launchctl print "gui/$(id -u)/$LAUNCH_LABEL"
 }
 
+container_dns_inventory_schema_valid() {
+  local domain inventory="$1" seen=$'\n'
+  [[ -z "$inventory" ]] && return 0
+  while IFS= read -r domain; do
+    dns_name_valid "$domain" || return 1
+    [[ "$seen" != *$'\n'"$domain"$'\n'* ]] || return 1
+    seen+="$domain"$'\n'
+  done <<< "$inventory"
+}
+
+container_dns_inventory() {
+  local diagnostics diagnostics_file inventory status
+  diagnostics_file="$(mktemp "${TMPDIR:-/tmp}/imessage-proxy-dns.XXXXXX")" || return 2
+  if inventory="$(container system dns list --quiet 2> "${diagnostics_file}")"; then
+    status=0
+  else
+    status=$?
+  fi
+  diagnostics="$(< "${diagnostics_file}")"
+  rm -f -- "${diagnostics_file}"
+  [[ "${status}" -eq 0 && -z "${diagnostics}" ]] || return 2
+  container_dns_inventory_schema_valid "${inventory}" || return 2
+  printf '%s\n' "${inventory}"
+}
+
+resolver_inventory_schema_valid() {
+  local address_count=0 line name_count=0 value
+  [[ -n "$1" ]] || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      "name: "*)
+        value="${line#name: }"
+        hostname_valid "$value" || return 1
+        ((name_count += 1))
+        ;;
+      "ip_address: "*)
+        value="${line#ip_address: }"
+        ipv4_address_valid "$value" || return 1
+        ((address_count += 1))
+        ;;
+      *) return 1 ;;
+    esac
+  done <<< "$1"
+  ((name_count == 1 && address_count >= 1))
+}
+
 host_domain_exists() {
-  container system dns list --quiet | grep -Fxq "$HOST_DOMAIN"
+  local inventory
+  inventory="$(container_dns_inventory)" || return 2
+  grep -Fxq -- "$HOST_DOMAIN" <<< "${inventory}"
 }
 
 host_domain_resolves_to_alias() {
-  local resolution
-  resolution="$(dscacheutil -q host -a name "$HOST_DOMAIN" 2>/dev/null)" || return 1
-  awk -v expected="$HOST_ALIAS_IP" '
-    $1 == "ip_address:" {
-      addresses += 1
-      if ($2 != expected) unexpected = 1
-    }
-    END { exit !(addresses == 1 && unexpected == 0) }
-  ' <<< "$resolution"
+  local address_count=0 diagnostics diagnostics_file line resolution resolved_name="" status unexpected=0
+  diagnostics_file="$(mktemp "${TMPDIR:-/tmp}/imessage-proxy-resolver.XXXXXX")" || return 2
+  if resolution="$(dscacheutil -q host -a name "$HOST_DOMAIN" 2> "${diagnostics_file}")"; then
+    status=0
+  else
+    status=$?
+  fi
+  diagnostics="$(< "${diagnostics_file}")"
+  rm -f -- "${diagnostics_file}"
+  [[ "${status}" -eq 0 && -z "${diagnostics}" ]] || return 2
+  resolver_inventory_schema_valid "$resolution" || return 2
+  while IFS= read -r line; do
+    case "$line" in
+      "name: "*)
+        resolved_name="${line#name: }"
+        ;;
+      "ip_address: "*)
+        ((address_count += 1))
+        [[ "${line#ip_address: }" == "$HOST_ALIAS_IP" ]] || unexpected=1
+        ;;
+    esac
+  done <<< "$resolution"
+  [[ "$resolved_name" == "$HOST_DOMAIN" && "$address_count" -eq 1 && "$unexpected" -eq 0 ]]
 }
 
 host_route_mapping_valid() {
-  host_domain_exists && host_domain_resolves_to_alias
+  local status
+  host_route_settings_valid "$HOST_DOMAIN" "$HOST_ALIAS_IP" || return 2
+  if host_domain_exists; then
+    host_domain_resolves_to_alias
+  else
+    status=$?
+    return "${status}"
+  fi
 }
 
 wait_for_host_route_mapping() {
+  local status=1
   for _ in {1..10}; do
-    host_route_mapping_valid && return 0
+    if host_route_mapping_valid; then
+      return 0
+    else
+      status=$?
+    fi
     sleep 1
   done
-  return 1
+  return "${status}"
 }
 
 host_route_create() {
+  local status
   require_macos
   require_container
+  require_host_route_settings
   if host_domain_exists; then
-    host_domain_resolves_to_alias ||
-      die "$HOST_DOMAIN exists but does not resolve only to $HOST_ALIAS_IP; use the confirmed refresh action"
+    if host_domain_resolves_to_alias; then
+      :
+    else
+      status=$?
+      [[ "${status}" -eq 1 ]] &&
+        die "$HOST_DOMAIN exists but does not resolve only to $HOST_ALIAS_IP; use the confirmed refresh action"
+      die "could not inventory the resolver mapping for $HOST_DOMAIN; refusing host-route create"
+    fi
     printf '%s already resolves to %s. After a Mac restart use the confirmed refresh action.\n' \
       "$HOST_DOMAIN" "$HOST_ALIAS_IP"
     return
+  else
+    status=$?
   fi
+  [[ "${status}" -eq 1 ]] ||
+    die "could not inventory Apple Container host routes; refusing host-route create"
   sudo container system dns create "$HOST_DOMAIN" --localhost "$HOST_ALIAS_IP"
-  wait_for_host_route_mapping ||
-    die "$HOST_DOMAIN was created but did not resolve only to $HOST_ALIAS_IP"
+  if wait_for_host_route_mapping; then
+    :
+  else
+    status=$?
+    [[ "${status}" -eq 1 ]] &&
+      die "$HOST_DOMAIN was created but did not resolve only to $HOST_ALIAS_IP"
+    die "$HOST_DOMAIN was created but its route state could not be inventoried"
+  fi
 }
 
 host_route_refresh() {
-  local confirmation="${1:-}"
+  local confirmation="${1:-}" status
   require_macos
   require_container
   [[ "$confirmation" == "REFRESH IMESSAGE HOST ROUTE" ]] || die "host-route refresh confirmation did not match"
+  require_host_route_settings
   if host_domain_exists; then
     sudo container system dns delete "$HOST_DOMAIN"
+  else
+    status=$?
+    [[ "${status}" -eq 1 ]] ||
+      die "could not inventory Apple Container host routes; refusing host-route refresh"
   fi
   sudo container system dns create "$HOST_DOMAIN" --localhost "$HOST_ALIAS_IP"
-  wait_for_host_route_mapping ||
-    die "$HOST_DOMAIN was refreshed but did not resolve only to $HOST_ALIAS_IP"
+  if wait_for_host_route_mapping; then
+    :
+  else
+    status=$?
+    [[ "${status}" -eq 1 ]] &&
+      die "$HOST_DOMAIN was refreshed but did not resolve only to $HOST_ALIAS_IP"
+    die "$HOST_DOMAIN was refreshed but its route state could not be inventoried"
+  fi
+}
+
+lsof_tcp_listener_inventory() {
+  local diagnostics diagnostics_file inventory output selector="$1" status value="$2"
+  local -a selection
+  case "$selector" in
+    port)
+      port_is_canonical "$value" || return 2
+      selection=("-iTCP:$value")
+      ;;
+    process)
+      [[ "$value" =~ ^[1-9][0-9]*$ ]] || return 2
+      selection=(-p "$value" -iTCP)
+      ;;
+    *) return 2 ;;
+  esac
+  diagnostics_file="$(mktemp "${TMPDIR:-/tmp}/imessage-proxy-lsof.XXXXXX")" || return 2
+  if output="$(LC_ALL=C lsof -nP -a "${selection[@]}" -sTCP:LISTEN -FpftPn 2> "${diagnostics_file}")"; then
+    status=0
+  else
+    status=$?
+  fi
+  diagnostics="$(< "${diagnostics_file}")"
+  rm -f -- "${diagnostics_file}"
+  case "${status}" in
+    0)
+      [[ -z "${diagnostics}" && -n "${output}" ]] || return 2
+      inventory="$(awk '
+        function finish_file() {
+          if (!have_file) return
+          if (pid == "" || descriptor == "" || socket_type == "" || protocol != "TCP" || name == "") {
+            invalid = 1
+          } else {
+            print pid "\t" socket_type "\t" protocol "\t" name
+            count += 1
+            process_files += 1
+          }
+          have_file = 0
+          descriptor = ""
+          socket_type = ""
+          protocol = ""
+          name = ""
+        }
+        /^p[1-9][0-9]*$/ {
+          finish_file()
+          if (have_process && process_files == 0) invalid = 1
+          pid = substr($0, 2)
+          have_process = 1
+          process_files = 0
+          next
+        }
+        /^f[0-9]+$/ {
+          finish_file()
+          if (!have_process) invalid = 1
+          descriptor = substr($0, 2)
+          have_file = 1
+          next
+        }
+        /^t(IPv4|IPv6)$/ {
+          if (!have_file || socket_type != "") invalid = 1
+          socket_type = substr($0, 2)
+          next
+        }
+        /^PTCP$/ {
+          if (!have_file || protocol != "") invalid = 1
+          protocol = "TCP"
+          next
+        }
+        /^n[^[:space:]]+$/ {
+          if (!have_file || name != "") invalid = 1
+          name = substr($0, 2)
+          next
+        }
+        { invalid = 1 }
+        END {
+          finish_file()
+          if (have_process && process_files == 0) invalid = 1
+          if (invalid || count == 0) exit 1
+        }
+      ' <<< "${output}")" || return 2
+      printf '%s\n' "$inventory"
+      ;;
+    1)
+      [[ -z "${diagnostics}" && -z "${output}" ]] || return 2
+      return 1
+      ;;
+    *) return 2 ;;
+  esac
+}
+
+tcp_listener_inventory() {
+  lsof_tcp_listener_inventory port "$1"
+}
+
+process_tcp_listener_inventory() {
+  lsof_tcp_listener_inventory process "$1"
+}
+
+port_listener_pids() {
+  local inventory status
+  if inventory="$(tcp_listener_inventory "$1")"; then
+    awk -F '\t' '
+      !seen[$1]++ { print $1 }
+    ' <<< "$inventory"
+  else
+    status=$?
+    return "$status"
+  fi
+}
+
+port_is_free() {
+  local status
+  if port_listener_pids "$1" >/dev/null; then
+    return 1
+  else
+    status=$?
+  fi
+  [[ "${status}" -eq 1 ]] && return 0
+  return 2
+}
+
+require_port_free() {
+  local status
+  if port_is_free "$1"; then
+    return 0
+  else
+    status=$?
+  fi
+  [[ "${status}" -eq 1 ]] && die "TCP port $1 is already listening"
+  die "could not inventory TCP port $1; refusing container create"
 }
 
 hash_password() {
@@ -479,40 +1607,79 @@ hash_password() {
 }
 
 require_create_inputs() {
-  local bind_ip enable_alpha octet port
-  local -a octets
-  bind_ip="$(resolve_setting IMESSAGE_PROXY_BIND_IP STELLA_BIND_IP)" || return $?
+  local enable_alpha port status
   enable_alpha="$(resolve_setting IMESSAGE_PROXY_ENABLE_ALPHA STELLA_ENABLE_ALPHA no)" || return $?
   port="$(resolve_setting IMESSAGE_PROXY_API_PORT STELLA_API_PORT 9443)" || return $?
   require_api_settings
   require_image
+  require_sources
   [[ "$enable_alpha" == "yes" ]] ||
     die "set IMESSAGE_PROXY_ENABLE_ALPHA=yes only after reviewing the alpha security contract"
-  [[ "$bind_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] ||
-    die "IMESSAGE_PROXY_BIND_IP must be an IPv4 address assigned to this Mac"
-  IFS=. read -r -a octets <<< "$bind_ip"
-  for octet in "${octets[@]}"; do
-    [[ "$octet" =~ ^[0-9]+$ && "$octet" -le 255 ]] ||
-      die "IMESSAGE_PROXY_BIND_IP contains an invalid octet"
-  done
-  if ! ifconfig | grep -F "inet $bind_ip " >/dev/null 2>&1; then
-    die "IMESSAGE_PROXY_BIND_IP $bind_ip is not assigned to this Mac"
-  fi
+  require_private_bind_ip
   require_private_file "$FACADE_ENV"
+  require_private_file "$TOKEN_FILE"
+  require_private_file "$TARGETS_FILE"
   require_private_file "$USERS_FILE"
   grep -Ev '^[[:space:]]*(#|$)' "$USERS_FILE" | grep -Eq "^[^[:space:]]+[[:space:]]+\\\$2" ||
     die "users file needs at least one Caddy bcrypt entry"
-  [[ -f "$CADDYFILE" ]] || die "run prepare first"
-  agent_loaded || die "the iMessage Proxy bridge LaunchAgent is not loaded"
-  host_route_mapping_valid ||
-    die "the container-to-host route is missing or has the wrong alias; run host-route-create or confirmed refresh"
-  if lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sed -n '2p' | grep -q .; then
-    die "TCP port $port is already listening"
+  require_private_file "$CADDYFILE"
+  if prepared_facade_state_matches; then
+    :
+  else
+    status=$?
+    [[ "$status" -eq 1 ]] &&
+      die "prepared facade state does not match the current settings, host token, or reviewed Caddyfile; run prepare and inspect the diff"
+    die "could not validate the prepared facade state"
   fi
+  require_agent_ready
+  if host_route_mapping_valid; then
+    :
+  else
+    status=$?
+    [[ "${status}" -eq 1 ]] &&
+      die "the container-to-host route is missing or has the wrong alias; run host-route-create or confirmed refresh"
+    die "could not inventory the container-to-host route"
+  fi
+  require_port_free "$port"
+}
+
+wait_for_created_container_definition() {
+  local state status
+  for _ in {1..10}; do
+    if state="$(container_state)"; then
+      case "$state" in
+        running)
+          if container_definition_matches; then
+            sleep 1
+            if state="$(container_state)"; then
+              [[ "$state" == running ]] && return 0
+              [[ "$state" == stopped ]] && return 1
+            else
+              status=$?
+              [[ "$status" -eq 1 ]] && return 1
+              return 2
+            fi
+          else
+            status=$?
+            return "$status"
+          fi
+          ;;
+        stopped) return 1 ;;
+        unknown | stopping) ;;
+        *) return 2 ;;
+      esac
+    else
+      status=$?
+      [[ "$status" -eq 1 ]] && return 1
+      return 2
+    fi
+    sleep 1
+  done
+  return 1
 }
 
 create() {
-  local api_host bind_ip image port
+  local api_host bind_ip image port status
   api_host="$(resolve_setting IMESSAGE_PROXY_API_HOST STELLA_API_HOST)" || return $?
   bind_ip="$(resolve_setting IMESSAGE_PROXY_BIND_IP STELLA_BIND_IP)" || return $?
   image="$(resolve_setting IMESSAGE_PROXY_CADDY_IMAGE STELLA_CADDY_IMAGE)" || return $?
@@ -520,7 +1687,13 @@ create() {
   require_macos
   require_container
   require_create_inputs
-  container_exists && die "$CONTAINER_NAME already exists; use start or status"
+  if container_exists; then
+    die "$CONTAINER_NAME already exists; use start or status"
+  else
+    status=$?
+  fi
+  [[ "${status}" -eq 1 ]] ||
+    die "could not prove Apple Container $CONTAINER_NAME is absent; refusing container create"
   container image pull "$image"
   container run --detach \
     --name "$CONTAINER_NAME" \
@@ -537,33 +1710,147 @@ create() {
     --entrypoint caddy \
     "$image" \
     run --config /etc/caddy/Caddyfile --adapter caddyfile
+  if wait_for_created_container_definition; then
+    :
+  else
+    status=$?
+    if container stop "$CONTAINER_NAME"; then
+      [[ "$status" -eq 1 ]] &&
+        die "Apple Container $CONTAINER_NAME did not remain running with the reviewed definition; the exact new container was stopped and left intact for inspection"
+      die "Apple Container $CONTAINER_NAME state or definition could not be inventoried; the exact new container was stopped and left intact for inspection"
+    fi
+    die "Apple Container $CONTAINER_NAME failed post-create validation and automatic containment failed; verify that this exact container is stopped"
+  fi
   printf 'Created https://%s:%s/ for private LAN/VPN use only.\n' "$api_host" "$port"
 }
 
 require_existing() {
+  local status
   require_macos
   require_container
-  container_exists || die "$CONTAINER_NAME does not exist"
+  if container_exists; then
+    return 0
+  else
+    status=$?
+  fi
+  [[ "${status}" -eq 1 ]] && die "$CONTAINER_NAME does not exist"
+  die "could not inventory Apple Container $CONTAINER_NAME"
 }
 
 start_facade() {
-  require_existing
-  agent_loaded || die "the iMessage Proxy bridge LaunchAgent is not loaded"
-  host_route_mapping_valid ||
-    die "the container-to-host route is missing or has the wrong alias; run confirmed host-route-refresh"
-  container start "$CONTAINER_NAME"
+  local state status
+  require_macos
+  require_container
+  if state="$(container_state)"; then
+    :
+  else
+    status=$?
+    [[ "${status}" -eq 1 ]] && die "$CONTAINER_NAME does not exist"
+    die "could not inventory Apple Container $CONTAINER_NAME"
+  fi
+  case "${state}" in
+    stopped | running) ;;
+    unknown | stopping)
+      die "Apple Container $CONTAINER_NAME is ${state}; refusing container start"
+      ;;
+    *) die "could not inventory Apple Container $CONTAINER_NAME" ;;
+  esac
+  require_private_bind_ip
+  require_sources
+  require_private_file "$FACADE_ENV"
+  require_private_file "$TOKEN_FILE"
+  require_private_file "$TARGETS_FILE"
+  require_private_file "$CADDYFILE"
+  require_private_file "$USERS_FILE"
+  if container_definition_matches; then
+    :
+  else
+    status=$?
+    [[ "$status" -eq 1 ]] &&
+      die "Apple Container $CONTAINER_NAME definition does not match the reviewed image, environment, mounts, resources, and private publication"
+    die "could not inventory Apple Container $CONTAINER_NAME definition"
+  fi
+  require_host_route_settings
+  require_agent_ready
+  if host_route_mapping_valid; then
+    :
+  else
+    status=$?
+    [[ "${status}" -eq 1 ]] &&
+      die "the container-to-host route is missing or has the wrong alias; run confirmed host-route-refresh"
+    die "could not inventory the container-to-host route"
+  fi
+  if [[ "${state}" == running ]]; then
+    printf '%s is already running.\n' "$CONTAINER_NAME"
+  else
+    container start "$CONTAINER_NAME"
+  fi
+}
+
+stop_facade() {
+  local state status
+  require_macos
+  require_container
+  if state="$(container_state)"; then
+    :
+  else
+    status=$?
+    [[ "${status}" -eq 1 ]] && die "$CONTAINER_NAME does not exist"
+    die "could not inventory Apple Container $CONTAINER_NAME"
+  fi
+  case "${state}" in
+    running) container stop "$CONTAINER_NAME" ;;
+    stopped) printf '%s is already stopped.\n' "$CONTAINER_NAME" ;;
+    unknown | stopping)
+      die "Apple Container $CONTAINER_NAME is ${state}; refusing container stop"
+      ;;
+    *) die "could not inventory Apple Container $CONTAINER_NAME" ;;
+  esac
+}
+
+container_status() {
+  local inventory
+  require_macos
+  require_container
+  inventory="$(container_inventory_json)" ||
+    die "could not inventory Apple Container $CONTAINER_NAME"
+  jq --arg name "$CONTAINER_NAME" '
+    [
+      .[] |
+      select(.configuration.id == $name) |
+      {
+        name: .configuration.id,
+        state: .status.state,
+        publishedPorts: (
+          if (.configuration.publishedPorts | type) == "array" then
+            [
+              .configuration.publishedPorts[] |
+              {
+                hostAddress: .hostAddress,
+                hostPort: .hostPort,
+                containerPort: .containerPort,
+                proto: .proto
+              }
+            ]
+          else
+            []
+          end
+        )
+      }
+    ]
+  ' <<< "${inventory}"
 }
 
 doctor() {
-  local command failed=0
+  local command enable_alpha failed=0
   require_macos
   printf 'iMessage Proxy %s\n' "$VERSION"
-  if require_sources; then
+  if (require_sources); then
     printf 'OK   source assets: %s\n' "$SOURCE_DIR"
   else
     failed=1
   fi
-  for command in cmp codesign curl dscacheutil ifconfig jq launchctl lsof openssl plutil sed xcrun; do
+  for command in cmp codesign curl dd dscacheutil ifconfig jq launchctl lsof od openssl plutil sed tr xcrun; do
     if command -v "$command" >/dev/null 2>&1; then
       printf 'OK   command: %s\n' "$command"
     else
@@ -582,6 +1869,39 @@ doctor() {
   else
     printf 'WARN Apple Container is unavailable; bridge-only commands still work\n' >&2
   fi
+  if (require_api_settings); then
+    printf 'OK   API and route settings\n'
+  else
+    printf 'FAIL API or route settings are invalid\n' >&2
+    failed=1
+  fi
+  if (require_image); then
+    printf 'OK   pinned Caddy image setting\n'
+  else
+    printf 'FAIL pinned Caddy image setting is invalid\n' >&2
+    failed=1
+  fi
+  if (require_private_bind_ip); then
+    printf 'OK   private bind setting and interface assignment\n'
+  else
+    printf 'FAIL private bind setting or interface assignment is invalid\n' >&2
+    failed=1
+  fi
+  if enable_alpha="$(resolve_setting IMESSAGE_PROXY_ENABLE_ALPHA STELLA_ENABLE_ALPHA no)"; then
+    :
+  else
+    printf 'FAIL Alpha deployment gate setting is invalid\n' >&2
+    failed=1
+    enable_alpha=invalid
+  fi
+  case "$enable_alpha" in
+    yes) printf 'OK   Alpha deployment gate is enabled\n' ;;
+    no) printf 'WARN Alpha deployment gate remains disabled\n' >&2 ;;
+    *)
+      printf 'FAIL IMESSAGE_PROXY_ENABLE_ALPHA must be yes or no\n' >&2
+      failed=1
+      ;;
+  esac
   printf 'INFO state: %s\n' "$ROOT"
   return "$failed"
 }
@@ -607,8 +1927,8 @@ main() {
     hash-password) [[ $# -eq 1 ]] || die "hash-password takes no arguments"; hash_password ;;
     create) [[ $# -eq 1 ]] || die "create takes no arguments"; create ;;
     start) [[ $# -eq 1 ]] || die "start takes no arguments"; start_facade ;;
-    stop) [[ $# -eq 1 ]] || die "stop takes no arguments"; require_existing; container stop "$CONTAINER_NAME" ;;
-    status) [[ $# -eq 1 ]] || die "status takes no arguments"; require_macos; require_container; container list --all --format json | jq --arg name "$CONTAINER_NAME" '[.[] | select(.configuration.id == $name)]' ;;
+    stop) [[ $# -eq 1 ]] || die "stop takes no arguments"; stop_facade ;;
+    status) [[ $# -eq 1 ]] || die "status takes no arguments"; container_status ;;
     logs) [[ $# -eq 1 ]] || die "logs takes no arguments"; require_existing; container logs "$CONTAINER_NAME" ;;
     ca-path) [[ $# -eq 1 ]] || die "ca-path takes no arguments"; printf '%s\n' "$CADDY_DATA/caddy/pki/authorities/local/root.crt" ;;
     version) [[ $# -eq 1 ]] || die "version takes no arguments"; printf '%s\n' "$VERSION" ;;

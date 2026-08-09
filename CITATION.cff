@@ -7,7 +7,7 @@ authors:
     website: "https://github.com/mglaeser"
 repository-code: "https://github.com/mglaeser/imessage-proxy"
 url: "https://github.com/mglaeser/imessage-proxy"
-version: 0.2.0
+version: 0.3.0
 date-released: 2026-08-09
 license: Apache-2.0
 keywords:

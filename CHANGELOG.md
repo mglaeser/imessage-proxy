@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-09
+
+### Changed
+
+- Reframed the immediate-send route as a provider-neutral, SMS-style endpoint
+  and highlighted its one-request workflow. The HTTP path and JSON fields are
+  unchanged; generated OpenAPI names, diagnostic text, and audit labels use the
+  new terminology.
+- Aligned native string-limit checks with OpenAPI's Unicode code-point semantics
+  and added an emoji boundary regression test.
+- Made container, LaunchAgent, host-route, resolver, and listener inventory
+  tri-state so command or schema failures block lifecycle mutations instead of
+  being mistaken for absence. DNS and IPv4 inputs now use strict schemas; facade
+  create/start accepts only the complete reviewed image, environment, mounts,
+  runtime, DNS, process, resource bounds, and configured assigned RFC 1918 or
+  RFC 6598 publication, with matching source filtering. The loaded LaunchAgent
+  must retain its exact plist/program identity, stable running PID, sole
+  ownership of one IPv4-loopback bridge listener, and an authenticated live
+  configuration fingerprint matching the exact token/allowlist file bytes,
+  and reviewed runtime settings. Reload never executes an unreviewed rollback
+  plist. Token files now reject unexpected bytes or multiple trailing newlines.
+  `status` emits only allowlisted state and publication fields so container
+  environment secrets cannot leak into captured diagnostics.
+- Documented the topology tradeoffs, independently verified release promotion,
+  migration locking and durable state, observed-state recovery, credential
+  rotation preference, and receiver-side sender-identity acceptance gate.
+- Required release tags to resolve to `main` and pass the full tagged-source
+  validation suite, and added exact pinned-arm64-image Caddy facade validation
+  to CI.
+
 ## [0.2.0] - 2026-08-09
 
 ### Changed
@@ -42,12 +72,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Bearer-token authentication using constant-time comparison.
 - Allowlisted JSON-RPC methods for chat listing, message history, cursor polling, sending, and send-status checks.
 - Exact-target allowlist with deny-by-default outbound sending.
-- Sipgate-shaped compatibility endpoint for immediate text sends.
+- SMS-style endpoint for immediate iMessage sends.
 - Caddy facade with internal TLS, per-client Basic Auth, private-range filtering, and bounded request bodies.
 - LaunchAgent and Apple Container lifecycle management.
 - Integration tests using a fake `imsg` RPC backend.
 
-[Unreleased]: https://github.com/mglaeser/imessage-proxy/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/mglaeser/imessage-proxy/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/mglaeser/imessage-proxy/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mglaeser/imessage-proxy/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/mglaeser/imessage-proxy/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/mglaeser/imessage-proxy/releases/tag/v0.1.0

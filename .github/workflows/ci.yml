@@ -55,6 +55,57 @@ jobs:
           "$RUNNER_TEMP/actionlint"
       - name: Validate OpenAPI contract
         run: npx --yes @redocly/cli@2.46.0 lint openapi.yaml
+      - name: Validate the exact pinned Caddy image
+        shell: bash
+        run: |
+          caddy_image="$(sed -n \
+            's/^IMESSAGE_PROXY_CADDY_IMAGE=//p' \
+            config/imessage-proxy.env.example)"
+          [[ "$caddy_image" =~ ^docker\.io/library/caddy@sha256:[0-9a-f]{64}$ ]]
+          bridge_token="$(printf '%063d%s' 0 a)"
+          [[ "$bridge_token" =~ ^[0-9a-f]{64}$ ]]
+          temporary="$(mktemp -d)"
+          trap 'rm -rf -- "$temporary"' EXIT
+          docker pull "$caddy_image"
+          docker run --rm \
+            --entrypoint caddy \
+            "$caddy_image" \
+            hash-password --plaintext imessage-proxy-ci-validation \
+            > "$temporary/password.hash"
+          printf 'imessage-proxy-ci %s\n' \
+            "$(< "$temporary/password.hash")" \
+            > "$temporary/users.caddy"
+          docker run --rm \
+            --entrypoint caddy \
+            --env STELLA_API_HOST=imessage-proxy.invalid \
+            --env STELLA_API_PORT=9443 \
+            --env STELLA_BRIDGE_HOST=127.0.0.1 \
+            --env STELLA_BRIDGE_PORT=8765 \
+            --env "STELLA_BRIDGE_TOKEN=$bridge_token" \
+            --env STELLA_USERS_FILE=/etc/caddy/users.caddy \
+            --mount "type=bind,source=$PWD/config/Caddyfile,target=/etc/caddy/Caddyfile,readonly" \
+            --mount "type=bind,source=$temporary/users.caddy,target=/etc/caddy/users.caddy,readonly" \
+            --tmpfs /config \
+            --tmpfs /data \
+            "$caddy_image" \
+            adapt --config /etc/caddy/Caddyfile --adapter caddyfile --validate
+
+  caddy-facade:
+    name: Caddy facade integration (ARM64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        with:
+          egress-policy: audit
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test the pinned Caddy facade
+        shell: bash
+        run: bash tests/test-caddy-facade.sh
 
   check:
     name: Build, lint, and test
@@ -108,6 +159,7 @@ jobs:
         run: |
           test -x bin/imessage-proxy
           test -x bin/stella
+          test -x tests/test-caddy-facade.sh
           test -x tests/test-imessage-proxy-bridge.sh
           test -x tests/test-imessage-proxy-cli.sh
       - name: Stage install and uninstall

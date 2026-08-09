@@ -2,17 +2,17 @@
 
 iMessage Proxy's roadmap prioritizes a small, understandable security boundary over feature count. Milestones describe intent, not delivery commitments.
 
-## Now — Alpha hardening (`0.2.x`)
+## Now — Alpha hardening (`0.3.x`)
 
 - [x] Adopt descriptive public naming while preserving 0.1.x runtime identities through a documented transition release.
 - [ ] Validate installation and lifecycle on a documented macOS compatibility matrix.
 - [ ] Add parser and policy regression coverage for every accepted and rejected request shape.
 - [ ] Exercise install, upgrade, restart, credential rotation, and recovery paths on clean hosts.
 - [ ] Document pinned dependency review and update procedures.
-- [ ] Publish checksummed, reproducible source releases.
+- [x] Publish checksummed, provenance-attested source releases.
 - [ ] Gather operator feedback without expanding the public-network threat boundary.
 
-## Next — Beta readiness (`0.3.x`)
+## Next — Beta readiness (`0.4.x`)
 
 - [ ] Stabilize management commands, state paths, and configuration names.
 - [ ] Add configuration schema/version detection and preflight diagnostics.

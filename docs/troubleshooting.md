@@ -23,7 +23,7 @@ bin/imessage-proxy agent-status
 
 Record iMessage Proxy, macOS, Apple Container, Caddy, and `imsg` versions. Sanitize all output before sharing it.
 
-Version 0.2.0 intentionally retains the runtime home `~/Library/Application Support/Stella`, runtime binary and LaunchAgent identity `stella-bridge` / `io.github.mglaeser.stella.bridge`, container `stella`, and route `stella-host.container.internal`. Seeing those names is not by itself stale state. The deprecated `bin/stella` and `STELLA_*` forms are compatibility interfaces; use `bin/imessage-proxy` and `IMESSAGE_PROXY_*` for new diagnostics. See the [operations transition note](operations.md#rename-transition-in-020) before changing any runtime identity.
+Version 0.3.0 retains the 0.2 transition identities: runtime home `~/Library/Application Support/Stella`, runtime binary and LaunchAgent identity `stella-bridge` / `io.github.mglaeser.stella.bridge`, container `stella`, and route `stella-host.container.internal`. Seeing those names is not by itself stale state. The deprecated `bin/stella` and `STELLA_*` forms are compatibility interfaces; use `bin/imessage-proxy` and `IMESSAGE_PROXY_*` for new diagnostics. See the [operations transition note](operations.md#rename-transition-in-020) before changing any runtime identity.
 
 ## Symptom map
 
@@ -35,11 +35,13 @@ Version 0.2.0 intentionally retains the runtime home `~/Library/Application Supp
 | `401` | Client credential or internal bridge token | Retype caller credential; inspect Caddy and bridge state |
 | `403` | RPC/parameter/target policy | Method, forbidden flags, exact allowlist form |
 | `404` | Wrong route or HTTP method | Compare with the API route table |
+| `408` | Bounded request timeout | Client upload, facade timing, bridge socket log |
 | `413` or `431` | Request-size policy | Reduce body or headers; do not raise limits casually |
-| `415` | Compatibility endpoint content type | Send `Content-Type: application/json` |
-| `502` | `imsg` process or response | `check-host`, dependency version, bridge log |
+| `415` | SMS-style endpoint content type | Send `Content-Type: application/json` |
+| `500` | Internal bridge or facade error | Bridge and facade logs, exact version, recent changes |
+| `502` | `imsg` response or facade-to-bridge upstream | `check-host`, dependency version, bridge/facade logs |
 | `503` from health | Messages read path | Full Disk Access, database, `imsg` |
-| `504` | `imsg` timeout | Host load, hung process, dependency health |
+| `504` | `imsg` or facade-to-bridge timeout | Host load, hung process, dependency/upstream health |
 | Read works but send fails | Target policy or Automation permission | Allowlist, Messages sign-in, TCC Automation |
 | Duplicate outbound message | Client retry logic | Stop retries; reconcile by GUID/history |
 
@@ -122,6 +124,16 @@ tail -n 100 "$runtime_root/state/logs/bridge.err.log"
 
 Common causes are an absent runtime binary, invalid secret path or mode, missing `imsg`, a port collision, or permission denial. Audit lines should not contain message content; still sanitize user IDs, host paths, and times before sharing.
 
+If `create` or `start` says the LaunchAgent is not ready, compare the prepared
+and installed plist, then inspect the loaded path, program, state, PID, and the
+listener shown by `lsof`. The facade deliberately refuses a same-label job that
+is stopped, crash-looping, points elsewhere, has no unique PID, or does not
+own exactly one IPv4 listener at `127.0.0.1:<bridge-port>`. It also refuses when
+the running bridge's authenticated configuration digest differs from fresh
+evaluations of the exact token/allowlist bytes or reviewed runtime
+settings. After intentional configuration changes, use the confirmed
+`agent-reload`; do not bypass the readiness gate.
+
 ### Bridge is not loopback-only
 
 The expected listener is `127.0.0.1` on the configured bridge port:
@@ -160,7 +172,7 @@ Rebuilding or moving `stella-bridge` may change how macOS associates TCC permiss
 
 ### Container already exists
 
-Use `bin/imessage-proxy status` to inspect it. Use `start` for a stopped, compatible container. Alpha releases do not automatically reconcile a changed image, environment, publish address, or container definition; see the recreation limitation in [Operations](operations.md).
+Use `bin/imessage-proxy status` to inspect its sanitized state and publication. `start` accepts a stopped container only when its complete reviewed definition matches the current image, prepared environment, mounts, limits, and private publication. Alpha releases do not automatically reconcile a changed container definition; see the recreation limitation in [Operations](operations.md).
 
 ### Host route fails after restart
 
