@@ -16,6 +16,45 @@ reading conversations and sending iMessages. It keeps Messages access in the
 normal macOS user session, exposes only explicit REST resources, and authenticates
 every API request with a scoped, revocable key.
 
+## Get started
+
+Run this on the Mac that is signed in to Messages:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mglaeser/imessage-proxy/main/scripts/install.sh | bash
+```
+
+That one command checks the Mac, fetches a checksum-verified release, builds and
+installs the CLI, pins the Caddy edge, writes one private configuration file,
+starts the service, and prints your first API key. It asks only for the things it
+cannot know: a hostname, an operator email, and the path to your reviewed
+[`imsg`](https://github.com/openclaw/imsg) executable. macOS prompts once for
+Full Disk Access.
+
+Add one recipient to the allowlist it prints, then send a message straight over
+the private socket:
+
+```bash
+curl --fail-with-body \
+  --unix-socket "$HOME/Library/Application Support/iMessage Proxy/run/server.sock" \
+  --header "Authorization: Bearer $IMESSAGE_PROXY_API_KEY" \
+  --header "Idempotency-Key: $(uuidgen)" \
+  --header 'Content-Type: application/json' \
+  --data '{"recipient":"person@example.net","text":"Hello from iMessage Proxy"}' \
+  http://localhost/api/messages
+```
+
+The installer leaves the service on that private Unix socket with no network
+listener, so nothing is reachable from outside the Mac until you deliberately
+enable public HTTPS. Prefer to read the script before running it? Download it
+first:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/mglaeser/imessage-proxy/main/scripts/install.sh
+less install.sh
+bash install.sh
+```
+
 > [!IMPORTANT]
 > The repository can prepare an Internet-facing service, but it cannot safely
 > expose a real Mac without a real hostname, reviewed IPv4 DNS and port mapping,
@@ -156,7 +195,14 @@ The built-in edge is IPv4-only. Do not publish an `AAAA` record for it. A direct
 public IPv6 path or a different upstream proxy is a separate architecture and
 requires its own threat model.
 
-## Install and run
+## Install and run manually
+
+The [Get started](#get-started) one-liner automates everything in this section
+by wrapping [`scripts/install.sh`](scripts/install.sh). Follow the manual path
+when you want to review each step, install from a specific checkout, or recover
+an existing deployment. The installer accepts `--source DIR`, `--tag`,
+`--archive`, `--sha256`, `--imsg`, `--caddy`, `--host`, `--email`, `--prefix`,
+and `--no-tests`; run it with `--help` for the full list.
 
 Build and test a reviewed source checkout:
 
@@ -321,6 +367,7 @@ data, which does not fit the minimum permission boundary.
 ├── config/io.github.mglaeser.imessage-proxy.edge.plist.in
 ├── src/api-key-store.{h,m}                    # SQLite keys, audit, idempotency
 ├── src/imessage-proxy-server.m                # Unix-socket REST server
+├── scripts/install.sh                         # one-command install and first run
 ├── web/                                       # dependency-free management console
 ├── openapi.yaml                               # public API contract
 ├── REVISION                                   # immutable commit embedded in release archives

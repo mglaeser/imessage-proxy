@@ -64,6 +64,8 @@ jobs:
         run: npm run lint:openapi
       - name: Test the management console
         run: make test-ui
+      - name: Test the one-command installer
+        run: make test-installer
       - name: Validate Caddy configuration with a pinned disposable image
         shell: bash
         run: |
@@ -241,9 +243,11 @@ jobs:
       - name: Check executable modes
         run: |
           test -x bin/imessage-proxy
+          test -x scripts/install.sh
           test -x tests/test-caddy-edge.sh
           test -x tests/test-imessage-proxy-server.sh
           test -x tests/test-imessage-proxy-cli.sh
+          test -x tests/test-install-script.sh
       - name: Stage install and uninstall
         run: |
           stage="$(mktemp -d)"
