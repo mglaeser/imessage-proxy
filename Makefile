@@ -23,9 +23,11 @@ RELEASE_BINARY := $(BUILD_DIR)/imessage-proxy-server
 DEBUG_BINARY := $(BUILD_DIR)/imessage-proxy-server-debug
 SHELL_SOURCES := \
 	bin/imessage-proxy \
+	scripts/install.sh \
 	tests/test-caddy-edge.sh \
 	tests/test-imessage-proxy-server.sh \
 	tests/test-imessage-proxy-cli.sh \
+	tests/test-install-script.sh \
 	tests/fixtures/fake-imsg.sh
 CONFIG_FILES := \
 	config/Caddyfile \
@@ -55,7 +57,7 @@ SDKFLAGS := $(if $(MACOS_SDK_PATH),-isysroot "$(MACOS_SDK_PATH)",)
 FRAMEWORKS := -framework Foundation -framework Security
 LIBRARIES := -lsqlite3
 
-.PHONY: all analyze build check clean debug help install lint test test-ui uninstall version
+.PHONY: all analyze build check clean debug help install lint test test-installer test-ui uninstall version
 
 all: build
 
@@ -82,10 +84,13 @@ analyze: ## Run Clang's static analyzer.
 			-Xanalyzer -analyzer-output=text -Xanalyzer -analyzer-werror "$$source"; \
 	done
 
-test: test-ui ## Run UI behavior plus native-server and lifecycle tests (macOS only).
+test: test-ui test-installer ## Run UI, installer, native-server, and lifecycle tests (macOS only).
 	@$(MAKE) --no-print-directory _require-macos
 	bash tests/test-imessage-proxy-server.sh
 	bash tests/test-imessage-proxy-cli.sh
+
+test-installer: ## Run portable one-command installer behavior tests.
+	bash tests/test-install-script.sh
 
 test-ui: _require-node ## Run dependency-free management-console behavior tests.
 	node --test tests/test-web-ui.mjs

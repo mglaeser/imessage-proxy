@@ -23,6 +23,12 @@ and operational model described below.
 - Public ACME HTTPS through a pinned host-native Caddy 2.11.4 executable.
 - Direct Caddy-to-server forwarding through one private host Unix socket.
 - Exact `imsg 0.13.4` enforcement and fixed, shell-free command adapters.
+- A single-command installer, `scripts/install.sh`, that verifies the Mac,
+  obtains a checksum-verified release, builds and installs the CLI, pins Caddy
+  2.11.4 by SHA-512, records both native dependency digests, writes one private
+  `0600` configuration with the public-exposure gate closed, and hands off to the
+  guarded product bootstrap. It never enables public exposure and keeps the first
+  administrator key on standard output only.
 
 ### Changed
 

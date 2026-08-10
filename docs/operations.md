@@ -5,6 +5,41 @@ renames, adopts, or deletes another installation. Do not expose or cut over a re
 Mac until the hostname, IPv4 network path, maintenance window, and real-Mac
 acceptance tests in this guide are complete.
 
+## 0. Choose an installation path
+
+`scripts/install.sh` performs sections 2–9 as one guarded command. It verifies
+the Mac, obtains a checksum-verified release, builds and installs the CLI, pins
+Caddy by SHA-512 and both native dependencies by SHA-256, writes one private
+`0600` configuration file with the exposure gate closed, and then runs the
+product's own `bootstrap`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mglaeser/imessage-proxy/main/scripts/install.sh | bash
+```
+
+It never enables public HTTPS, never accepts `--public`, and never writes the
+administrator key anywhere but standard output. Reviewed deployments should pass
+explicit inputs instead of answering prompts:
+
+```bash
+bash install.sh \
+  --tag v1.0.0 \
+  --sha256 REPLACE_WITH_REVIEWED_64_HEX_SHA256 \
+  --imsg /REPLACE/WITH/REVIEWED/PATH/imsg \
+  --caddy /REPLACE/WITH/REVIEWED/PATH/caddy \
+  --host messages.your-domain.example \
+  --email operator@your-domain.example \
+  --attest
+```
+
+Use `--source DIR` or `--archive FILE` to install from an already reviewed
+checkout or artifact. `--attest` additionally verifies GitHub build provenance
+with `gh`.
+
+The numbered sections below remain the authoritative manual, audit, and recovery
+path. Follow them when an operator must review each step, or when the installer
+reports a failure.
+
 ## 1. Fix the deployment inputs
 
 Record and review these values outside the repository:

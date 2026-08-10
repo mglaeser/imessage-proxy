@@ -22,6 +22,30 @@ therefore remains stopped across logout/login and reboot while its plist,
 certificate data, and other state remain intact. `edge-start` explicitly
 re-enables the label.
 
+## The one-command installer stops early
+
+`scripts/install.sh` fails closed and changes nothing after the failing step. The
+common causes are specific:
+
+- **"release … is unavailable"** means that tag has no published archive. Install
+  a published release with `--tag vMAJOR.MINOR.PATCH`, or a reviewed checkout with
+  `--source /path/to/imessage-proxy`.
+- **"the release archive does not match …"** means the download did not match the
+  published `SHA256SUMS` or your `--sha256` value. Do not retry blindly; verify
+  the release first.
+- **"install the Xcode Command Line Tools first"** means the compiler is missing.
+  Run `xcode-select --install` and start over.
+- **"That executable reports …"** means the supplied `imsg` is not exactly
+  `0.13.4`. The pinned version is mandatory.
+- **"run the installer in an interactive terminal"** means it had no TTY. Full
+  Disk Access must be granted interactively, so run it from a real terminal.
+- **"finish editing the existing configuration first"** means a previous run left
+  placeholders in `~/.config/imessage-proxy/service.env`. Complete or remove that
+  file.
+
+Re-running the installer is safe. It reuses an already valid configuration,
+reuses the pinned Caddy, and leaves an already loaded service untouched.
+
 ## `doctor` rejects `imsg`
 
 iMessage Proxy 1.0 supports exactly `imsg 0.13.4`. A newer or older command can
