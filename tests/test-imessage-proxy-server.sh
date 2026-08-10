@@ -447,12 +447,14 @@ sqlite3 "$database_path" \
           'imp_sentinel',zeroblob(32),'messages:read',2000000);"
 closed_pipe="$temporary/bootstrap-delivery.pipe"
 mkfifo "$closed_pipe"
-(
-  exec 6< "$closed_pipe"
-) &
-closed_reader_pid="$!"
+# Open the FIFO read-write first: that never blocks and makes fd 8 a reader, so
+# the write-only open below completes immediately. Closing fd 8 then leaves fd 9
+# as a writer with no readers. A backgrounded reader that opens and exits
+# instead races the blocking write-only open, which either waits forever or
+# fails with EINTR when the child's SIGCHLD interrupts it.
+exec 8<> "$closed_pipe"
 exec 9> "$closed_pipe"
-wait "$closed_reader_pid"
+exec 8>&-
 closed_pipe_status=0
 if run_native bootstrap-admin undelivered-admin 30 >&9 2> "$temporary/bootstrap-delivery.err"; then
   exec 9>&-
