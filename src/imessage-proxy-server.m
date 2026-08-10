@@ -1544,6 +1544,31 @@ static NSArray<NSDictionary *> *ParseJSONLines(NSData *data, NSUInteger maximumI
     return items;
 }
 
+static IMPProcessResult *RunConfiguredIMSGArguments(IMPConfiguration *configuration, NSArray<NSString *> *arguments,
+                                                    NSTimeInterval timeout, NSError **error) {
+    NSMutableArray<NSString *> *complete = [arguments mutableCopy];
+    [complete addObjectsFromArray:@[@"--db", configuration.messagesDatabasePath, @"--json"]];
+    return RunProcess(configuration.imsgPath, configuration.imsgSHA256, complete, NSHomeDirectory(), timeout, error);
+}
+
+static NSArray<NSDictionary *> *RunConfiguredJSONLines(IMPConfiguration *configuration, NSArray<NSString *> *arguments,
+                                                       NSUInteger maximumItems, NSTimeInterval timeout,
+                                                       NSError **error) {
+    IMPProcessResult *result = RunConfiguredIMSGArguments(configuration, arguments, timeout, error);
+    if (result == nil) {
+        return nil;
+    }
+    if (result.terminationStatus != 0) {
+        if (error != NULL) {
+            *error = IsPinnedChatNotFoundResult(result, arguments)
+                         ? ServerError(IMPServerErrorNotFound, @"chat not found")
+                         : ServerError(IMPServerErrorUpstream, @"dependency command failed");
+        }
+        return nil;
+    }
+    return ParseJSONLines(result.standardOutput, maximumItems, error);
+}
+
 static BOOL IsIntegerNumber(id value) {
     if (![value isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) {
         return NO;
@@ -1649,7 +1674,7 @@ static NSDictionary *AttachmentDTO(NSDictionary *source) {
     }
     if (safeFilename != nil) {
         result[@"filename"] = safeFilename;
-    } else if (rawFilename == NSNull.null) {
+    } else {
         result[@"filename"] = NSNull.null;
     }
     id byteSize = source[@"byte_size"] != nil ? source[@"byte_size"] : source[@"total_bytes"];
@@ -1915,6 +1940,26 @@ static NSArray<NSDictionary *> *ProjectItems(NSArray<NSDictionary *> *items,
     return result;
 }
 
+static BOOL CheckMessagesReadPath(IMPConfiguration *configuration, NSError **error) {
+    NSArray<NSDictionary *> *items =
+        RunConfiguredJSONLines(configuration, @[@"chats", @"--limit", @"1"], 1, configuration.readTimeout, error);
+    if (items == nil) {
+        if (error != NULL && (*error == nil || (*error).code != IMPServerErrorTimeout)) {
+            *error = ServerError(IMPServerErrorUpstream, @"Messages read-path preflight failed");
+        }
+        return NO;
+    }
+    if (ProjectItems(items, ^NSDictionary *(NSDictionary *item) {
+            return ChatDTO(item);
+        }) == nil) {
+        if (error != NULL) {
+            *error = ServerError(IMPServerErrorUpstream, @"Messages read-path preflight returned invalid data");
+        }
+        return NO;
+    }
+    return YES;
+}
+
 static NSArray<NSDictionary *> *MessagesInChronologicalOrder(NSArray<NSDictionary *> *messages) {
     return [messages sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *left, NSDictionary *right) {
         NSDate *leftDate = nil;
@@ -2039,10 +2084,7 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
 - (IMPProcessResult *)runIMSGArguments:(NSArray<NSString *> *)arguments
                                timeout:(NSTimeInterval)timeout
                                  error:(NSError **)error {
-    NSMutableArray *complete = [arguments mutableCopy];
-    [complete addObjectsFromArray:@[@"--db", self.configuration.messagesDatabasePath, @"--json"]];
-    return RunProcess(self.configuration.imsgPath, self.configuration.imsgSHA256, complete, NSHomeDirectory(), timeout,
-                      error);
+    return RunConfiguredIMSGArguments(self.configuration, arguments, timeout, error);
 }
 
 - (NSArray<NSDictionary *> *)runJSONLines:(NSArray<NSString *> *)arguments
@@ -2055,18 +2097,7 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
                              maximumItems:(NSUInteger)maximumItems
                                   timeout:(NSTimeInterval)timeout
                                     error:(NSError **)error {
-    IMPProcessResult *result = [self runIMSGArguments:arguments timeout:timeout error:error];
-    if (result == nil)
-        return nil;
-    if (result.terminationStatus != 0) {
-        if (error != NULL) {
-            *error = IsPinnedChatNotFoundResult(result, arguments)
-                         ? ServerError(IMPServerErrorNotFound, @"chat not found")
-                         : ServerError(IMPServerErrorUpstream, @"dependency command failed");
-        }
-        return nil;
-    }
-    return ParseJSONLines(result.standardOutput, maximumItems, error);
+    return RunConfiguredJSONLines(self.configuration, arguments, maximumItems, timeout, error);
 }
 
 - (IMPHTTPResponse *)upstreamProblem:(NSError *)error {
@@ -2222,14 +2253,7 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
             NSError *versionError = nil;
             NSString *dependencyVersion = DependencyVersion(self.configuration, &versionError);
             NSError *readinessError = nil;
-            NSArray *readiness = dependencyVersion == nil ? nil
-                                                          : [self runJSONLines:@[@"chats", @"--limit", @"1"]
-                                                                  maximumItems:1
-                                                                         error:&readinessError];
-            NSArray *readyChats = readiness == nil ? nil : ProjectItems(readiness, ^NSDictionary *(NSDictionary *item) {
-                return ChatDTO(item);
-            });
-            if (readyChats == nil) {
+            if (dependencyVersion == nil || !CheckMessagesReadPath(self.configuration, &readinessError)) {
                 response = Problem(503, @"messages-unavailable", @"The Messages read path is unavailable.");
             } else {
                 response = JSONResponse(200, @{
@@ -2908,6 +2932,35 @@ static BOOL WriteAll(int fileDescriptor, const void *bytes, NSUInteger length) {
     return YES;
 }
 
+static BOOL WriteBootstrapToken(NSString *token) {
+    NSData *output = [[token stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
+    if (output == nil) {
+        errno = EINVAL;
+        return NO;
+    }
+    struct sigaction ignore = {0};
+    ignore.sa_handler = SIG_IGN;
+    sigemptyset(&ignore.sa_mask);
+    if (sigaction(SIGPIPE, &ignore, NULL) != 0 || sigaction(SIGXFSZ, &ignore, NULL) != 0) {
+        return NO;
+    }
+
+    const uint8_t *cursor = output.bytes;
+    NSUInteger remaining = output.length;
+    while (remaining > 0) {
+        ssize_t count = write(STDOUT_FILENO, cursor, remaining);
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count <= 0) {
+            return NO;
+        }
+        cursor += count;
+        remaining -= (NSUInteger)count;
+    }
+    return YES;
+}
+
 static void SendResponse(int fileDescriptor, IMPHTTPResponse *response) {
     NSMutableString *headers = [NSMutableString
         stringWithFormat:@"HTTP/1.1 %ld %@\r\nContent-Length: %lu\r\nContent-Type: %@\r\nConnection: close\r\n"
@@ -2938,6 +2991,14 @@ static BOOL RunServer(IMPConfiguration *configuration, NSError **error) {
     signal(SIGPIPE, SIG_IGN);
     signal(SIGINT, HandleSignal);
     signal(SIGTERM, HandleSignal);
+    NSError *messagesError = nil;
+    if (!CheckMessagesReadPath(configuration, &messagesError)) {
+        if (error != NULL) {
+            *error = messagesError ?: ServerError(IMPServerErrorUpstream, @"Messages read-path preflight failed");
+        }
+        LogOperationalFailure("server.start", "messages_read_preflight_failed", messagesError);
+        return NO;
+    }
     struct stat existing;
     if (lstat(configuration.socketPath.fileSystemRepresentation, &existing) == 0) {
         return ServerStartupFailure(error, @"socket path already exists", "socket_path_exists");
@@ -3097,12 +3158,16 @@ static BOOL RunServer(IMPConfiguration *configuration, NSError **error) {
 }
 
 static void PrintUsage(void) {
-    fprintf(stderr, "Usage: imessage-proxy-server <serve|check-config|config-fingerprint|bootstrap-admin|version>\n");
+    fprintf(stderr,
+            "Usage: imessage-proxy-server "
+            "<serve|check-config|check-messages|config-fingerprint|check-bootstrap-admin|bootstrap-admin|version>\n");
 }
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
-        if (argc != 2 && !(argc == 4 && strcmp(argv[1], "bootstrap-admin") == 0)) {
+        BOOL bootstrapArguments =
+            argc == 4 && (strcmp(argv[1], "check-bootstrap-admin") == 0 || strcmp(argv[1], "bootstrap-admin") == 0);
+        if (argc != 2 && !bootstrapArguments) {
             PrintUsage();
             return 64;
         }
@@ -3126,28 +3191,55 @@ int main(int argc, const char *argv[]) {
             printf("ok\n");
             return 0;
         }
+        if ([command isEqualToString:@"check-messages"]) {
+            if (!CheckMessagesReadPath(configuration, &error)) {
+                fprintf(stderr, "ERROR: %s\n", error.localizedDescription.UTF8String);
+                return 1;
+            }
+            printf("ok\n");
+            return 0;
+        }
         if ([command isEqualToString:@"config-fingerprint"]) {
             printf("%s\n", configuration.fingerprint.UTF8String);
             return 0;
         }
-        if ([command isEqualToString:@"bootstrap-admin"]) {
+        BOOL checkBootstrap = [command isEqualToString:@"check-bootstrap-admin"];
+        if (checkBootstrap || [command isEqualToString:@"bootstrap-admin"]) {
+            if (argc != 4) {
+                PrintUsage();
+                return 64;
+            }
             NSString *rawName = [NSString stringWithUTF8String:argv[2]];
-            NSString *name = nil;
             NSString *daysText = [NSString stringWithUTF8String:argv[3]];
             NSUInteger days = 0;
-            if (!IsValidAPIKeyName(rawName, &name) || !ParsePositiveInteger(daysText, 365, &days)) {
+            if (!ParsePositiveInteger(daysText, NSUIntegerMax, &days)) {
                 fprintf(stderr, "ERROR: bootstrap arguments are invalid\n");
                 return 1;
             }
             IMPAPIKeyStore *store = [[IMPAPIKeyStore alloc] initWithPath:configuration.databasePath error:&error];
-            NSDictionary *created = [store bootstrapAdminNamed:name expiresDays:days error:&error];
-            if (created == nil) {
+            if (store == nil) {
                 fprintf(stderr, "ERROR: %s\n", error.localizedDescription.UTF8String);
                 return 1;
             }
-            NSString *token = created[IMPAPIKeyCreationTokenKey];
-            printf("%s\n", token.UTF8String);
-            IMPAPIKeyRecord *record = created[IMPAPIKeyCreationRecordKey];
+            if (checkBootstrap) {
+                if (![store checkBootstrapAdminNamed:rawName expiresDays:days error:&error]) {
+                    fprintf(stderr, "ERROR: %s\n", error.localizedDescription.UTF8String);
+                    return 1;
+                }
+                printf("ok\n");
+                return 0;
+            }
+
+            IMPAPIKeyRecord *record = [store bootstrapAdminNamed:rawName
+                                                     expiresDays:days
+                                                    deliverToken:^BOOL(NSString *token) {
+                                                        return WriteBootstrapToken(token);
+                                                    }
+                                                           error:&error];
+            if (record == nil) {
+                fprintf(stderr, "ERROR: %s\n", error.localizedDescription.UTF8String);
+                return 1;
+            }
             os_log_with_type(ServerOperationalLog(), OS_LOG_TYPE_INFO,
                              "caller=bootstrap action=keys.bootstrap status=201 key_id=%{public}s",
                              record.uuid.UTF8String);

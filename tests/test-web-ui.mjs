@@ -75,6 +75,21 @@ class FakeElement {
     return event;
   }
 
+  async emitKey(key) {
+    const event = {
+      currentTarget: this,
+      defaultPrevented: false,
+      key,
+      preventDefault() {
+        this.defaultPrevented = true;
+      },
+    };
+    for (const listener of this.listeners.get("keydown") || []) {
+      await listener.call(this, event);
+    }
+    return event;
+  }
+
   focus() {
     this.ownerDocument.activeElement = this;
   }
@@ -84,8 +99,8 @@ class FakeElement {
   }
 
   querySelectorAll(selector) {
-    assert.equal(selector, 'input[name="scope"]:checked');
-    return this.controls.filter((control) => control.name === "scope" && control.checked);
+    assert.equal(selector, 'input[name="scope[]"]:checked');
+    return this.controls.filter((control) => control.name === "scope[]" && control.checked);
   }
 
   replaceChildren(...children) {
@@ -196,8 +211,8 @@ class FetchMock {
     this.responses = [];
   }
 
-  enqueue(status, payload = null, contentType = "application/json") {
-    this.responses.push({ contentType, payload, status });
+  enqueue(status, payload = null, contentType = "application/json", headers = {}) {
+    this.responses.push({ contentType, headers, payload, status });
   }
 
   enqueueFailure(message = "network unavailable") {
@@ -212,7 +227,10 @@ class FetchMock {
       throw response;
     }
     return {
-      headers: new Headers(response.contentType ? { "content-type": response.contentType } : {}),
+      headers: new Headers({
+        ...(response.contentType ? { "content-type": response.contentType } : {}),
+        ...response.headers,
+      }),
       json: async () => response.payload,
       ok: response.status >= 200 && response.status < 300,
       status: response.status,
@@ -235,7 +253,17 @@ function elementFromMarkup(document, id) {
   element.disabled = /(?:^|\s)disabled(?:\s|$)/i.test(attributes);
   element.checked = /(?:^|\s)checked(?:\s|$)/i.test(attributes);
   element.defaultChecked = element.checked;
-  for (const name of ["aria-pressed", "aria-live", "aria-labelledby", "role"]) {
+  for (const name of [
+    "aria-busy",
+    "aria-controls",
+    "aria-describedby",
+    "aria-live",
+    "aria-labelledby",
+    "aria-pressed",
+    "aria-selected",
+    "role",
+    "tabindex",
+  ]) {
     const value = attribute(attributes, name);
     if (value !== null) {
       element.setAttribute(name, value);
@@ -262,10 +290,10 @@ function elementFromMarkup(document, id) {
 }
 
 function anonymousScopeControls(document) {
-  return Array.from(markup.matchAll(/<input\b([^>]*\bname="scope"[^>]*)>/gi), (match) => {
+  return Array.from(markup.matchAll(/<input\b([^>]*\bname="scope\[\]"[^>]*)>/gi), (match) => {
     const control = new FakeElement(document, "input");
     control.type = "checkbox";
-    control.name = "scope";
+    control.name = "scope[]";
     control.value = attribute(match[1], "value") || "";
     return control;
   });
@@ -307,10 +335,33 @@ function createHarness({ initialResponses = [], storedKey = "" } = {}) {
   createForm.controls = [keyName, ...scopes, keyExpiry];
   createForm.elements = { expires_in_days: keyExpiry, name: keyName };
 
+  const playgroundForm = document.elements.get("playground-form");
+  const playgroundControls = [
+    "playground-operation",
+    "chats-limit",
+    "chats-unread",
+    "playground-chat-id",
+    "messages-limit",
+    "messages-participant",
+    "messages-start",
+    "messages-end",
+    "scheduled-limit",
+    "statistics-chat-id",
+    "statistics-time-zone",
+    "statistics-media",
+    "audit-limit",
+    "playground-key-id",
+    "send-target-kind",
+    "send-target",
+    "send-text",
+  ].map((id) => document.elements.get(id));
+  playgroundForm.controls = playgroundControls;
+
   const sessionStorage = new StorageSpy(storedKey ? { [storageKey]: storedKey } : {});
   const clipboardWrites = [];
   let clipboardError = null;
   let nextTimerID = 1;
+  let nextUUID = 1;
   const timers = new Map();
   const window = {
     clearTimeout(timerID) {
@@ -337,6 +388,13 @@ function createHarness({ initialResponses = [], storedKey = "" } = {}) {
       },
     },
   };
+  const crypto = {
+    randomUUID() {
+      const suffix = String(nextUUID).padStart(12, "0");
+      nextUUID += 1;
+      return `00000000-0000-4000-8000-${suffix}`;
+    },
+  };
   const context = vm.createContext({
     AbortController,
     Date,
@@ -345,6 +403,8 @@ function createHarness({ initialResponses = [], storedKey = "" } = {}) {
     Headers,
     Intl,
     TextEncoder,
+    URLSearchParams,
+    crypto,
     document,
     fetch: fetchMock.fetch.bind(fetchMock),
     localStorage: new ForbiddenStorage(),
@@ -367,19 +427,20 @@ function createHarness({ initialResponses = [], storedKey = "" } = {}) {
       clipboardError = error;
     },
     timers,
+    crypto,
     element(id) {
       return document.elements.get(id);
     },
   };
 }
 
-function json(status, payload) {
-  return [status, payload, "application/json"];
+function json(status, payload, headers = {}) {
+  return [status, payload, "application/json", headers];
 }
 
 function enqueue(fetchMock, ...responses) {
-  for (const [status, payload, contentType] of responses) {
-    fetchMock.enqueue(status, payload, contentType);
+  for (const response of responses) {
+    fetchMock.enqueue(...response);
   }
 }
 
@@ -409,6 +470,18 @@ function bearerValue(key) {
   return `${"Bear"}${"er"} ${key}`;
 }
 
+async function runPlayground(harness, operation, setup, response = json(200, { ok: true })) {
+  harness.element("playground-operation").value = operation;
+  await harness.element("playground-operation").emit("change");
+  setup?.();
+  enqueue(harness.fetchMock, response);
+  const before = harness.fetchMock.requests.length;
+  await harness.element("playground-form").emit("submit");
+  await settle();
+  assert.equal(harness.fetchMock.requests.length, before + 1, `${operation} should make one request`);
+  return harness.fetchMock.requests.at(-1);
+}
+
 test("markup and interactive controls retain their accessibility contracts", async () => {
   const queriedIDs = Array.from(appSource.matchAll(/document\.querySelector\("#([a-z0-9-]+)"\)/g), (match) => match[1]);
   assert.ok(queriedIDs.length > 0);
@@ -422,6 +495,14 @@ test("markup and interactive controls retain their accessibility contracts", asy
   assert.match(markup, /id="toast" role="status" aria-live="polite" hidden/);
   assert.match(markup, /<dialog[^>]*id="created-key-dialog"[^>]*aria-labelledby="created-key-title"/);
   assert.match(markup, /<dialog[^>]*id="revoke-dialog"[^>]*aria-labelledby="revoke-title"/);
+  assert.match(markup, /role="tablist" aria-label="Management console"/);
+  assert.match(markup, /id="overview-tab"[\s\S]*role="tab"[\s\S]*aria-controls="overview-panel"/);
+  assert.match(markup, /id="playground-panel"[\s\S]*role="tabpanel"[\s\S]*aria-labelledby="playground-tab"/);
+  assert.match(markup, /<label for="playground-operation">Endpoint<\/label>/);
+  assert.match(markup, /id="playground-error" role="alert" hidden/);
+  assert.match(markup, /id="playground-status" role="status" aria-live="polite"/);
+  assert.match(markup, /id="playground-output" tabindex="0"/);
+  assert.match(markup, /<dialog[\s\S]*id="send-dialog"[\s\S]*aria-describedby="send-dialog-description"/);
 
   const harness = createHarness();
   const signinKey = harness.element("signin-key");
@@ -504,6 +585,183 @@ test("a tab-scoped session key restores authenticated state without another sign
   assert.equal(harness.element("signin-view").hidden, true);
   assert.equal(harness.element("console-view").hidden, false);
   assert.equal(harness.element("connection-label").textContent, "Healthy");
+});
+
+test("tabs expose every read endpoint through exact same-origin requests", async () => {
+  const keyID = "123e4567-e89b-42d3-a456-426614174000";
+  const harness = createHarness();
+  await authenticate(harness, "admin-playground-key", [{
+    created_at: "2026-08-01T10:00:00Z",
+    expires_at: "2026-09-01T10:00:00Z",
+    id: keyID,
+    key_prefix: "imp_test",
+    last_used_at: null,
+    name: "Playground key",
+    revoked_at: null,
+    scopes: ["admin"],
+  }]);
+
+  harness.element("playground-tab").emitSync("click");
+  assert.equal(harness.element("playground-panel").hidden, false);
+  assert.equal(harness.element("overview-panel").hidden, true);
+  assert.equal(harness.element("playground-tab").getAttribute("aria-selected"), "true");
+  const keyboardEvent = await harness.element("playground-tab").emitKey("ArrowRight");
+  assert.equal(keyboardEvent.defaultPrevented, true);
+  assert.equal(harness.element("keys-panel").hidden, false);
+  assert.equal(harness.document.activeElement, harness.element("keys-tab"));
+  await harness.element("keys-tab").emitKey("Home");
+  assert.equal(harness.element("overview-panel").hidden, false);
+  assert.equal(harness.document.activeElement, harness.element("overview-tab"));
+  harness.element("playground-tab").emitSync("click");
+
+  const cases = [
+    ["status", () => {}, "/api/status"],
+    ["chats", () => {
+      harness.element("chats-limit").value = "25";
+      harness.element("chats-unread").checked = true;
+    }, "/api/chats?limit=25&unread_only=true"],
+    ["chat", () => {
+      harness.element("playground-chat-id").value = "42";
+    }, "/api/chats/42"],
+    ["chat-messages", () => {
+      harness.element("playground-chat-id").value = "42";
+      harness.element("messages-limit").value = "10";
+      harness.element("messages-participant").value = "+14155551212";
+      harness.element("messages-start").value = "2026-08-01T00:00:00Z";
+      harness.element("messages-end").value = "2026-08-10T00:00:00Z";
+    }, "/api/chats/42/messages?limit=10&participant=%2B14155551212&start=2026-08-01T00%3A00%3A00Z&end=2026-08-10T00%3A00%3A00Z"],
+    ["chat-background", () => {
+      harness.element("playground-chat-id").value = "43";
+    }, "/api/chats/43/background"],
+    ["scheduled-messages", () => {
+      harness.element("scheduled-limit").value = "12";
+    }, "/api/scheduled-messages?limit=12"],
+    ["message-statistics", () => {
+      harness.element("statistics-chat-id").value = "44";
+      harness.element("statistics-time-zone").value = "Europe/Vienna";
+      harness.element("statistics-media").checked = true;
+    }, "/api/statistics/messages?chat_id=44&time_zone=Europe%2FVienna&include_media=true"],
+    ["audit-events", () => {
+      harness.element("audit-limit").value = "150";
+    }, "/api/audit-events?limit=150"],
+    ["keys", () => {}, "/api/keys"],
+    ["key", () => {
+      harness.element("playground-key-id").value = keyID;
+    }, `/api/keys/${keyID}`],
+  ];
+
+  for (const [operation, setup, expectedPath] of cases) {
+    const request = await runPlayground(
+      harness,
+      operation,
+      setup,
+      json(200, { endpoint: operation }, { "x-request-id": `request-${operation}` }),
+    );
+    assert.equal(request.path, expectedPath);
+    assert.equal(request.options.method, "GET");
+    assert.equal(request.options.body, undefined);
+    assert.equal(request.options.headers.get("Authorization"), bearerValue("admin-playground-key"));
+    assert.equal(request.options.headers.get("Accept"), "application/json, application/problem+json");
+    assert.equal(request.options.headers.get("Idempotency-Key"), null);
+    assert.equal(request.options.cache, "no-store");
+    assert.equal(request.options.credentials, "omit");
+    assert.equal(request.options.referrerPolicy, "no-referrer");
+    assert.equal(request.options.signal.aborted, false);
+  }
+  assert.equal(harness.element("playground-request-id").textContent, "request-key");
+  assert.equal(harness.element("playground-status").textContent, "Completed: HTTP 200");
+  assert.doesNotMatch(harness.element("playground-panel").textContent, /admin-playground-key/);
+});
+
+test("the playground rejects tampered operations and renders response text literally", async () => {
+  const harness = createHarness();
+  await authenticate(harness);
+  const requestCount = harness.fetchMock.requests.length;
+
+  for (const operation of ["https://evil.invalid/api", "//evil.invalid", "../api/status", "__proto__", "toString"]) {
+    harness.element("playground-operation").value = operation;
+    await harness.element("playground-operation").emit("change");
+    await harness.element("playground-form").emit("submit");
+    assert.equal(harness.fetchMock.requests.length, requestCount);
+    assert.equal(harness.element("playground-error").hidden, false);
+  }
+
+  harness.element("playground-operation").value = "chat";
+  await harness.element("playground-operation").emit("change");
+  harness.element("playground-chat-id").value = "0";
+  await harness.element("playground-form").emit("submit");
+  assert.equal(harness.fetchMock.requests.length, requestCount);
+  assert.equal(harness.document.activeElement, harness.element("playground-chat-id"));
+  assert.equal(harness.element("playground-chat-id").getAttribute("aria-invalid"), "true");
+
+  harness.element("playground-operation").value = "chat-messages";
+  await harness.element("playground-operation").emit("change");
+  assert.equal(harness.element("playground-chat-id").getAttribute("aria-invalid"), "false");
+  harness.element("playground-chat-id").value = "42";
+  harness.element("messages-limit").value = "20";
+  harness.element("messages-start").value = "2026-02-31T00:00:00Z";
+  await harness.element("playground-form").emit("submit");
+  assert.equal(harness.fetchMock.requests.length, requestCount);
+  assert.match(harness.element("playground-error").textContent, /Gregorian calendar date/);
+  assert.equal(harness.document.activeElement, harness.element("messages-start"));
+
+  const hostile = "<img src=x onerror=alert(1)><script>not code</script>";
+  await runPlayground(harness, "status", null, json(200, { detail: hostile }));
+  assert.match(harness.element("playground-output").textContent, /<script>not code<\/script>/);
+  assert.equal(harness.element("playground-output").children.length, 0);
+  assert.doesNotMatch(harness.element("playground-preview").textContent, /Bearer|admin-test-key/);
+});
+
+test("message sending requires confirmation and safely reuses one idempotency key per logical attempt", async () => {
+  const harness = createHarness();
+  await authenticate(harness);
+  harness.element("playground-operation").value = "send-message";
+  await harness.element("playground-operation").emit("change");
+  harness.element("send-target-kind").value = "recipient";
+  harness.element("send-target").value = "first-last@example.net";
+  harness.element("send-text").value = "Hello from the playground";
+
+  const before = harness.fetchMock.requests.length;
+  await harness.element("playground-form").emit("submit");
+  assert.equal(harness.fetchMock.requests.length, before, "confirmation must precede the send");
+  assert.equal(harness.element("send-dialog").open, true);
+  assert.equal(harness.element("send-dialog-target").textContent, "first-last@example.net");
+
+  harness.fetchMock.enqueueFailure();
+  await harness.element("send-confirm-form").emit("submit");
+  await settle();
+  const first = harness.fetchMock.requests.at(-1);
+  const firstIdempotencyKey = first.options.headers.get("Idempotency-Key");
+  assert.equal(first.path, "/api/messages");
+  assert.equal(first.options.method, "POST");
+  assert.deepEqual(JSON.parse(first.options.body), {
+    recipient: "first-last@example.net",
+    text: "Hello from the playground",
+  });
+  assert.match(firstIdempotencyKey, /^[0-9a-f-]{36}$/);
+  assert.equal(harness.element("playground-status").textContent, "Failed: HTTP 0");
+  assert.match(harness.element("playground-output").textContent, /could not be reached/i);
+
+  await harness.element("playground-form").emit("submit");
+  assert.equal(harness.element("confirm-send").textContent, "Retry same attempt");
+  enqueue(harness.fetchMock, json(202, { operation_id: "accepted-one", state: "accepted" }));
+  await harness.element("send-confirm-form").emit("submit");
+  harness.element("send-text").value = "A draft typed while the first request finishes";
+  await settle();
+  const retry = harness.fetchMock.requests.at(-1);
+  assert.equal(retry.options.headers.get("Idempotency-Key"), firstIdempotencyKey);
+  assert.equal(harness.element("send-text").value, "A draft typed while the first request finishes");
+
+  harness.element("send-text").value = "A separate message";
+  await harness.element("playground-form").emit("submit");
+  assert.equal(harness.element("confirm-send").textContent, "Send iMessage");
+  enqueue(harness.fetchMock, json(202, { operation_id: "accepted-two", state: "accepted" }));
+  await harness.element("send-confirm-form").emit("submit");
+  await settle();
+  const separate = harness.fetchMock.requests.at(-1);
+  assert.notEqual(separate.options.headers.get("Idempotency-Key"), firstIdempotencyKey);
+  assert.equal(separate.options.headers.get("Authorization"), bearerValue("admin-test-key"));
+  assert.doesNotMatch(harness.element("playground-preview").textContent, /admin-test-key|Idempotency-Key/);
 });
 
 test("key creation sends the simple API payload and clears the one-time secret after copying", async () => {
@@ -610,6 +868,10 @@ test("sign-out removes credentials, aborts the session, and clears sensitive UI 
   harness.element("created-key").value = "ephemeral-secret";
   harness.element("created-key-dialog").showModal();
   harness.element("revoke-dialog").showModal();
+  harness.element("send-dialog").showModal();
+  harness.element("send-target").value = "private@example.net";
+  harness.element("send-text").value = "sensitive draft";
+  harness.element("playground-output").textContent = '{"private":"response"}';
 
   await harness.element("logout-button").emit("click");
 
@@ -619,6 +881,10 @@ test("sign-out removes credentials, aborts the session, and clears sensitive UI 
   assert.equal(harness.element("created-key").value, "");
   assert.equal(harness.element("created-key-dialog").open, false);
   assert.equal(harness.element("revoke-dialog").open, false);
+  assert.equal(harness.element("send-dialog").open, false);
+  assert.equal(harness.element("send-target").value, "");
+  assert.equal(harness.element("send-text").value, "");
+  assert.doesNotMatch(harness.element("playground-output").textContent, /private|sensitive/);
   assert.equal(harness.element("signin-view").hidden, false);
   assert.equal(harness.element("console-view").hidden, true);
   assert.equal(harness.element("connection-label").textContent, "Signed out");

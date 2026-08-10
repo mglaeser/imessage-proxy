@@ -100,8 +100,11 @@ visible Messages conversations.
 
 2. In System Settings → Privacy & Security → Full Disk Access, grant that exact
    server binary access.
-3. Keep the edge stopped, restart the server with its exact confirmation, prove
-   the socket, and start the edge again.
+3. Keep the edge stopped and restart the server with its exact confirmation. The
+   server now runs a bounded `imsg chats --limit 1` read before creating its
+   socket; a missing socket plus a `Messages read-path preflight failed` log means
+   the installed LaunchAgent identity still cannot read Messages.
+4. Prove the socket and authenticated status before starting the edge again.
 
 Do not grant a shell application or Caddy broad access as a substitute, reset the
 TCC database, or copy another machine's permission database.
@@ -243,6 +246,13 @@ path needs operator attention.
 
 If the content-security policy blocks a new third-party dependency, remove the
 dependency. The console is designed to be entirely self-contained.
+
+The API playground never accepts arbitrary URLs or headers. A validation message
+before any network request means one of its typed inputs is outside the published
+contract. HTTP problem responses are shown as literal bounded JSON. For a send,
+closing the confirmation makes no request; retrying an unchanged attempt after a
+transport failure intentionally reuses its in-tab idempotency key. Sign out to
+abort pending playground work and clear every rendered request and response.
 
 ## Rate limiting (`429`)
 
