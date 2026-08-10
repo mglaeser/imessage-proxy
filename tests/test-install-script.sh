@@ -126,9 +126,22 @@ for pin in \
     fail "installer dependency pin disagrees with the CLI: $pin"
 done
 
-# The advertised default release must track VERSION.
-grep -Fq "readonly DEFAULT_RELEASE_TAG='v$(< "$REPOSITORY/VERSION")'" "$INSTALLER" ||
-  fail 'installer default release tag does not match VERSION'
+# Without an explicit --tag the installer must resolve the repository's own
+# latest published release rather than a hard-coded, possibly unreleased tag.
+resolved_endpoint="$(bash -c "source '$INSTALLER'; printf '%s' \"\$LATEST_RELEASE_API\"")"
+[[ "$resolved_endpoint" == 'https://api.github.com/repos/mglaeser/imessage-proxy/releases/latest' ]] ||
+  fail "installer resolves an unexpected release endpoint: $resolved_endpoint"
+if grep -q 'DEFAULT_RELEASE_TAG' "$INSTALLER"; then
+  fail 'installer must not hard-code a default release tag'
+fi
+
+# The release-tag parser must accept real GitHub metadata and invent nothing.
+parsed_tag="$(printf '%s' '{"name":"x","tag_name":"v0.3.0","draft":false}' |
+  bash -c "source '$INSTALLER'; parse_latest_release_tag")"
+[[ "$parsed_tag" == v0.3.0 ]] || fail "release-tag parser returned: $parsed_tag"
+parsed_tag="$(printf '%s' '{"name":"no tag"}' |
+  bash -c "source '$INSTALLER'; parse_latest_release_tag")"
+[[ -z "$parsed_tag" ]] || fail 'release-tag parser invented a tag'
 
 # README must advertise the one-liner before any manual instructions.
 readme_oneliner="$(grep -n 'scripts/install.sh | bash' "$REPOSITORY/README.md" | head -1 | cut -d: -f1)"

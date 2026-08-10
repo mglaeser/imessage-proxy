@@ -17,6 +17,10 @@ product's own `bootstrap`:
 curl -fsSL https://raw.githubusercontent.com/mglaeser/imessage-proxy/main/scripts/install.sh | bash
 ```
 
+Without `--tag` it resolves this repository's latest published release and
+verifies the archive against the `SHA256SUMS` asset published beside it. A
+reviewed deployment should always pin the tag and digest explicitly.
+
 It never enables public HTTPS, never accepts `--public`, and never writes the
 administrator key anywhere but standard output. Reviewed deployments should pass
 explicit inputs instead of answering prompts:

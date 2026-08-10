@@ -19,7 +19,7 @@ umask 077
 readonly PROJECT_REPOSITORY='mglaeser/imessage-proxy'
 readonly PROJECT_URL="https://github.com/${PROJECT_REPOSITORY}"
 readonly RELEASE_BASE_URL="${PROJECT_URL}/releases/download"
-readonly DEFAULT_RELEASE_TAG='v1.0.0'
+readonly LATEST_RELEASE_API="https://api.github.com/repos/${PROJECT_REPOSITORY}/releases/latest"
 readonly SERVER_LABEL='io.github.mglaeser.imessage-proxy'
 readonly EXPECTED_IMSG_VERSION='0.13.4'
 readonly IMSG_PROJECT_URL='https://github.com/openclaw/imsg'
@@ -390,6 +390,29 @@ verify_release_archive() {
   fi
 }
 
+parse_latest_release_tag() {
+  awk '{
+    if (match($0, /"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
+      field = substr($0, RSTART, RLENGTH)
+      sub(/^.*:[[:space:]]*"/, "", field)
+      sub(/"$/, "", field)
+      print field
+      exit
+    }
+  }'
+}
+
+resolve_latest_release_tag() {
+  local metadata tag
+  metadata="$temporary_root/latest-release.json"
+  require_download "$LATEST_RELEASE_API" "$metadata"
+  tag="$(parse_latest_release_tag < "$metadata")"
+  release_tag_valid "$tag" ||
+    die 'could not determine the latest published release; pass --tag vMAJOR.MINOR.PATCH'
+  note "Latest published release: $tag"
+  printf '%s\n' "$tag"
+}
+
 resolve_source_tree() {
   local archive candidate tag version
 
@@ -411,7 +434,10 @@ resolve_source_tree() {
     return
   fi
 
-  tag="${release_tag:-$DEFAULT_RELEASE_TAG}"
+  tag="$release_tag"
+  if [[ -z "$tag" ]]; then
+    tag="$(resolve_latest_release_tag)"
+  fi
   release_tag_valid "$tag" || die 'the release tag must have the form vMAJOR.MINOR.PATCH'
   version="${tag#v}"
   archive="$temporary_root/imessage-proxy-${version}.tar.gz"
@@ -707,7 +733,8 @@ self_test() {
     ! release_tag_valid "$candidate" ||
       die "self-test accepted an invalid release tag: ${candidate:-<empty>}"
   done
-  release_tag_valid "$DEFAULT_RELEASE_TAG" || die 'the pinned default release tag is invalid'
+  [[ "$LATEST_RELEASE_API" == "https://api.github.com/repos/$PROJECT_REPOSITORY/releases/latest" ]] ||
+    die 'the latest-release endpoint does not target the project repository'
   node_version_supported v22.12.0 || die 'self-test rejected the minimum Node.js version'
   node_version_supported v22.23.2 || die 'self-test rejected a supported Node.js version'
   for candidate in v22.11.9 v23.0.0 22.12.0 v21.9.9; do
@@ -719,10 +746,12 @@ self_test() {
     ! config_value_valid "$candidate" ||
       die 'self-test accepted an unsafe configuration value'
   done
-  if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/../VERSION" ]]; then
-    [[ "$DEFAULT_RELEASE_TAG" == "v$(< "$SCRIPT_DIR/../VERSION")" ]] ||
-      die 'the pinned default release tag does not match VERSION'
-  fi
+  parse_latest_release_tag <<< '{"name":"x","tag_name":"v1.2.3","draft":false}' |
+    grep -Fqx v1.2.3 || die 'self-test could not parse a release tag'
+  parse_latest_release_tag <<< '{"tag_name": "v10.20.30" , "x":1}' |
+    grep -Fqx v10.20.30 || die 'self-test could not parse a spaced release tag'
+  [[ -z "$(parse_latest_release_tag <<< '{"name":"no tag here"}')" ]] ||
+    die 'self-test invented a release tag'
   printf 'installer self-test passed\n' >&2
 }
 
