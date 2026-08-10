@@ -7,7 +7,7 @@ REPO_DIR="$(cd "$TEST_DIR/.." && pwd -P)"
 readonly REPO_DIR
 readonly FIXTURES="$TEST_DIR/fixtures"
 
-for dependency in curl lsof openssl sqlite3 xcrun; do
+for dependency in curl lsof mkfifo openssl sqlite3 xcrun; do
   command -v "$dependency" >/dev/null 2>&1 || {
     printf 'ERROR: required test dependency is missing: %s\n' "$dependency" >&2
     exit 127
@@ -445,8 +445,13 @@ sqlite3 "$database_path" \
   "INSERT INTO api_keys(uuid,name,key_prefix,key_hash,scopes,created_at)
    VALUES('11111111-1111-4111-8111-111111111111','cleanup-sentinel',
           'imp_sentinel',zeroblob(32),'messages:read',2000000);"
-exec 9> >(:)
+closed_pipe="$temporary/bootstrap-delivery.pipe"
+mkfifo "$closed_pipe"
+(
+  exec 6< "$closed_pipe"
+) &
 closed_reader_pid="$!"
+exec 9> "$closed_pipe"
 wait "$closed_reader_pid"
 closed_pipe_status=0
 if run_native bootstrap-admin undelivered-admin 30 >&9 2> "$temporary/bootstrap-delivery.err"; then
@@ -470,24 +475,19 @@ grep -Fqi 'could not be delivered' "$temporary/bootstrap-delivery.err"
 dd if=/dev/zero of="$temporary/bootstrap-file-limit.out" bs=1 count=1 seek=134217727 2> /dev/null
 file_limit_size="$(stat -f '%z' "$temporary/bootstrap-file-limit.out")"
 exec 7>> "$temporary/bootstrap-file-limit.out"
-exec 8> >(/bin/cat > "$temporary/bootstrap-file-limit.err")
-file_limit_reader_pid="$!"
 file_limit_status=0
 if (
   ulimit -f 65536
-  run_native bootstrap-admin file-limit-admin 30 >&7 2>&8
+  run_native bootstrap-admin file-limit-admin 30 >&7 \
+    2> "$temporary/bootstrap-file-limit.err"
 ); then
   exec 7>&-
-  exec 8>&-
-  wait "$file_limit_reader_pid"
   printf 'ERROR: bootstrap accepted a token beyond RLIMIT_FSIZE\n' >&2
   exit 1
 else
   file_limit_status="$?"
 fi
 exec 7>&-
-exec 8>&-
-wait "$file_limit_reader_pid"
 [[ "$file_limit_status" == 1 ]]
 grep -Fqi 'could not be delivered' "$temporary/bootstrap-file-limit.err"
 [[ "$(stat -f '%z' "$temporary/bootstrap-file-limit.out")" == "$file_limit_size" ]]
