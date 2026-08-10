@@ -68,6 +68,16 @@ fi
 
 case "$command_name" in
   chats)
+    if [[ "$malformed_kind" == chats-failure ]]; then
+      printf '%s\n' 'private Messages read failure detail' >&2
+      exit 1
+    fi
+    if [[ "$malformed_kind" == chats-delay ]]; then
+      sleep 1
+    fi
+    if [[ "$malformed_kind" == chats-timeout ]]; then
+      sleep 10
+    fi
     if [[ "$malformed_kind" == chat ]]; then
       printf '%s\n' \
         '{"id":42,"name":"Test Chat","display_name":42,"identifier":"iMessage;-;+15551234567","service":"iMessage","is_group":false,"participants":["+15551234567"]}'
@@ -118,6 +128,11 @@ case "$command_name" in
     if [[ "$malformed_kind" == attachment ]]; then
       printf '%s\n' \
         '{"id":100,"chat_id":42,"guid":"message-guid-100","sender":"+15551234567","is_from_me":false,"text":"hello","created_at":"2026-08-09T12:00:00.000Z","attachments":[{"filename":42}],"reactions":[]}'
+      exit 0
+    fi
+    if [[ "$malformed_kind" == missing-attachment-filenames ]]; then
+      printf '%s\n' \
+        '{"id":100,"chat_id":42,"guid":"message-guid-100","sender":"+15551234567","is_from_me":false,"text":"hello","created_at":"2026-08-09T12:00:00.000Z","attachments":[{"filename":"","transfer_name":"","uti":"","mime_type":"","total_bytes":0,"is_sticker":false,"original_path":"","missing":true},{"filename":null,"transfer_name":null,"uti":"","mime_type":"","total_bytes":0,"is_sticker":false,"original_path":"","missing":true},{"transfer_name":"","uti":"","mime_type":"","total_bytes":0,"is_sticker":false,"original_path":"","missing":true}],"reactions":[]}'
       exit 0
     fi
     if [[ "$malformed_kind" == message ]]; then

@@ -43,7 +43,9 @@ body {
 }
 
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
 }
 
@@ -316,9 +318,10 @@ legend {
 
 input[type="text"],
 input[type="password"],
-input[type="number"] {
+input[type="number"],
+select,
+textarea {
   width: 100%;
-  min-height: 48px;
   border: 1px solid var(--line-strong);
   border-radius: 11px;
   outline: none;
@@ -328,19 +331,41 @@ input[type="number"] {
 }
 
 input[type="text"],
-input[type="password"] {
+input[type="password"],
+input[type="number"],
+select {
+  min-height: 48px;
+}
+
+input[type="text"],
+input[type="password"],
+select {
   padding: 0 14px;
+}
+
+select {
+  color-scheme: dark;
+}
+
+textarea {
+  min-height: 132px;
+  padding: 13px 14px;
+  resize: vertical;
+  line-height: 1.55;
 }
 
 input[type="number"] {
   padding: 0 54px 0 14px;
 }
 
-input::placeholder {
+input::placeholder,
+textarea::placeholder {
   color: #5e747e;
 }
 
-input:focus {
+input:focus,
+select:focus,
+textarea:focus {
   border-color: rgba(94, 234, 212, 0.78);
   background: rgba(3, 10, 16, 0.78);
   box-shadow: 0 0 0 3px rgba(94, 234, 212, 0.11);
@@ -408,6 +433,8 @@ input:focus {
 .button:focus-visible,
 .field-action:focus-visible,
 .revoke-button:focus-visible,
+.console-tab:focus-visible,
+#playground-output:focus-visible,
 a:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
@@ -469,11 +496,256 @@ a:focus-visible {
   gap: 8px;
 }
 
+.console-tabs {
+  margin-top: 34px;
+  border-bottom: 1px solid var(--line);
+}
+
+.console-tabs [role="tablist"] {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+}
+
+.console-tab {
+  position: relative;
+  flex: 0 0 auto;
+  padding: 13px 16px 15px;
+  color: var(--quiet);
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 720;
+}
+
+.console-tab::after {
+  position: absolute;
+  right: 16px;
+  bottom: -1px;
+  left: 16px;
+  height: 2px;
+  border-radius: 999px 999px 0 0;
+  background: transparent;
+  content: "";
+}
+
+.console-tab[aria-selected="true"] {
+  color: var(--text);
+}
+
+.console-tab[aria-selected="true"]::after {
+  background: var(--accent);
+  box-shadow: 0 0 16px rgba(94, 234, 212, 0.45);
+}
+
+[role="tabpanel"] {
+  outline: none;
+}
+
+[role="tabpanel"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 5px;
+}
+
 .metrics {
   display: grid;
   margin: 38px 0 22px;
   gap: 12px;
   grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.overview-guide {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 28px;
+  padding: 28px 30px;
+}
+
+.overview-guide h2 {
+  margin: 0;
+  font-size: clamp(1.25rem, 2.4vw, 1.7rem);
+  letter-spacing: -0.03em;
+}
+
+.overview-guide p:not(.eyebrow) {
+  max-width: 660px;
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.55;
+}
+
+.playground-grid {
+  display: grid;
+  align-items: start;
+  margin-top: 22px;
+  gap: 22px;
+  grid-template-columns: minmax(340px, 0.86fr) minmax(0, 1.14fr);
+}
+
+.playground-request,
+.playground-response {
+  min-width: 0;
+  padding: clamp(24px, 3vw, 32px);
+}
+
+.playground-request form > label:not(:first-child),
+.playground-fields,
+.request-preview {
+  margin-top: 20px;
+}
+
+.playground-fields > div + div,
+.send-fields > label {
+  margin-top: 16px;
+}
+
+.playground-fields label span {
+  color: var(--quiet);
+  font-size: 0.68rem;
+  font-weight: 500;
+}
+
+.field-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.field-grid > div + div {
+  margin-top: 0;
+}
+
+.inline-option {
+  display: flex;
+  width: fit-content;
+  margin: 15px 0 0;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+}
+
+.inline-option input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent-strong);
+}
+
+.inline-option span {
+  color: #c9d8de;
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.request-preview {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(3, 10, 16, 0.38);
+}
+
+.request-preview span,
+.request-preview code {
+  display: block;
+}
+
+.request-preview span {
+  margin-bottom: 5px;
+  color: var(--quiet);
+  font-size: 0.64rem;
+  font-weight: 720;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.request-preview code {
+  overflow-wrap: anywhere;
+  font-size: 0.75rem;
+}
+
+.playground-request .button-wide {
+  margin-top: 20px;
+}
+
+.playground-response {
+  min-height: 540px;
+}
+
+.response-state {
+  flex: 0 0 auto;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: rgba(3, 10, 16, 0.34);
+  font-size: 0.68rem;
+}
+
+.response-state[data-state="success"] {
+  border-color: rgba(74, 222, 128, 0.3);
+  color: #bbf7d0;
+}
+
+.response-state[data-state="error"] {
+  border-color: rgba(251, 113, 133, 0.34);
+  color: #fecdd3;
+}
+
+.response-state[data-state="pending"] {
+  border-color: rgba(251, 191, 36, 0.3);
+  color: #fde68a;
+}
+
+.response-meta {
+  display: grid;
+  margin: 0 0 18px;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.response-meta div {
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(3, 10, 16, 0.24);
+}
+
+.response-meta dt {
+  color: var(--quiet);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.response-meta dd {
+  margin: 5px 0 0;
+  overflow: hidden;
+  color: #d9e5e9;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#playground-output {
+  min-height: 380px;
+  max-height: 660px;
+  margin: 0;
+  padding: 18px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  outline: none;
+  color: #cce0e5;
+  background: rgba(2, 8, 13, 0.72);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.72rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .metric-card {
@@ -816,7 +1088,8 @@ dialog::backdrop {
 
 @media (max-width: 920px) {
   .signin-layout,
-  .workspace-grid {
+  .workspace-grid,
+  .playground-grid {
     grid-template-columns: 1fr;
   }
 
@@ -891,6 +1164,20 @@ dialog::backdrop {
   .console-heading {
     align-items: start;
     flex-direction: column;
+  }
+
+  .overview-guide {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .overview-guide .button {
+    width: 100%;
+  }
+
+  .field-grid,
+  .response-meta {
+    grid-template-columns: 1fr;
   }
 
   .metrics {

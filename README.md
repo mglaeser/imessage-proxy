@@ -119,10 +119,18 @@ machine-readable [OpenAPI 3.1 contract](openapi.yaml).
 ## Management console
 
 Open the service origin in a browser and enter an administrator key. The
-same-origin console shows readiness and API-key metadata, creates scoped keys,
-reveals each new credential once, and revokes old keys. The entered key lives
-only in that tab's `sessionStorage`; the console uses no cookies, analytics,
-third-party assets, external fonts, or service worker.
+same-origin console has three focused spaces:
+
+- **Overview** shows service, Messages, version, and uptime health;
+- **API playground** runs every read endpoint and intentional text sends with
+  typed inputs, automatic bearer authentication, bounded literal JSON output,
+  send confirmation, and safe idempotency handling; and
+- **API keys** lists metadata, creates scoped keys, reveals each new credential
+  once, and confirms revocation.
+
+The entered key lives only in that tab's `sessionStorage`. Requests stay on the
+service origin, and the console uses no cookies, analytics, third-party assets,
+external fonts, or service worker.
 
 ## Requirements
 
@@ -131,8 +139,9 @@ third-party assets, external fonts, or service worker.
 - Messages Automation permission for intentional sends;
 - an independently reviewed [`imsg`](https://github.com/openclaw/imsg)
   **0.13.4** executable pinned by SHA-256;
-- Xcode Command Line Tools, Git, Make, `curl`, and the standard macOS tools used
-  by the lifecycle CLI;
+- Xcode Command Line Tools, Git, Make, `curl`, Node.js **22.12 or newer within
+  major 22** for the dependency-free console tests, and the standard macOS tools
+  used by the lifecycle CLI;
 - a reviewed host-native Caddy **2.11.4** executable pinned by SHA-256; and
 - for public mode, a dedicated hostname with an IPv4 `A` record and an external
   router/firewall that maps TCP 80 to the configured host HTTP port and TCP 443
@@ -147,7 +156,7 @@ The built-in edge is IPv4-only. Do not publish an `AAAA` record for it. A direct
 public IPv6 path or a different upstream proxy is a separate architecture and
 requires its own threat model.
 
-## Install and prepare
+## Install and run
 
 Build and test a reviewed source checkout:
 
@@ -171,6 +180,63 @@ mkdir -p "$HOME/.config/imessage-proxy"
 install -m 600 config/imessage-proxy.env.example \
   "$HOME/.config/imessage-proxy/service.env"
 ${EDITOR:-vi} "$HOME/.config/imessage-proxy/service.env"
+```
+
+Do not source this file for the one-command path. `bootstrap --config` parses it
+as a closed data format and never executes its contents.
+
+### One-command first run
+
+After the reviewed dependencies and private configuration file exist, one
+command validates, prepares, builds, starts the native service, and creates the
+first administrator as its final operation:
+
+```bash
+imessage-proxy bootstrap \
+  --config "$HOME/.config/imessage-proxy/service.env" \
+  --admin-name local-bootstrap \
+  --expires-in-days 30
+```
+
+The bootstrap-only administrator label must contain 1–80 printable ASCII bytes
+without leading or trailing spaces. Additional keys created through the API keep
+the full Unicode naming contract documented in [API reference](docs/api.md).
+
+The command pauses once so macOS can grant Full Disk Access to the exact binary
+it just built. It then runs a bounded, read-only `imsg chats --limit 1` smoke
+test and repeats that same check inside the actual LaunchAgent before accepting
+socket readiness. Returned chat data is discarded. A read failure leaves no key
+and no running service. All progress goes to standard error; successful standard
+output is exactly the one-time `imp_…` administrator key, ready to move directly
+into a password manager or secret store. No key is written to a file, argument,
+environment variable, or log. Accept the printed key only when the command exits
+with status zero; if the final database commit fails after output, that candidate
+is deliberately unusable and a retry remains possible.
+
+For an already reviewed public hostname, DNS, IPv4 port mapping, firewall, and
+acceptance plan, set `IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=yes` in the private
+configuration and make the same one command start the HTTPS console and API:
+
+```bash
+imessage-proxy bootstrap \
+  --config "$HOME/.config/imessage-proxy/service.env" \
+  --admin-name local-bootstrap \
+  --expires-in-days 30 \
+  --public \
+  --confirm 'EXPOSE IMESSAGE PROXY PUBLICLY'
+```
+
+Without `--public`, bootstrap requires the gate to be `no` and leaves Caddy and
+all host TCP listeners stopped. With `--public`, both the gate and the exact
+confirmation are mandatory. The command never changes DNS, NAT, firewall, SIP,
+or TCC settings for you.
+
+### Manual lifecycle
+
+The individual lifecycle actions use environment variables. For this manual
+path only, load the already reviewed private file without printing it:
+
+```bash
 set -a
 . "$HOME/.config/imessage-proxy/service.env"
 set +a

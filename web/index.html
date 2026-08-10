@@ -1,4 +1,4 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="dark">
     <meta name="referrer" content="no-referrer">
     <meta name="robots" content="noindex, nofollow, noarchive">
-    <meta name="description" content="Secure status and API-key management for iMessage Proxy.">
+    <meta name="description" content="Secure status, API access, and key management for iMessage Proxy.">
     <title>iMessage Proxy Console</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
@@ -33,10 +33,10 @@
           <p class="eyebrow">Private by default</p>
           <h1 id="signin-title">One key.<br>A clear view.</h1>
           <p class="hero-lede">
-            Check service health and manage scoped access without exposing account
-            credentials or storing your key beyond this browser tab.
+            Check service health, try every API capability, and manage scoped access
+            without storing your key beyond this browser tab.
           </p>
-          <ul class="trust-list" aria-label="Security properties">
+          <ul class="trust-list">
             <li><span aria-hidden="true">01</span>Keys stay in this tab</li>
             <li><span aria-hidden="true">02</span>Every data request is authenticated</li>
             <li><span aria-hidden="true">03</span>Secrets are shown once</li>
@@ -80,7 +80,7 @@
         <div class="console-heading">
           <div>
             <p class="eyebrow">Operations</p>
-            <h1 id="console-title">Service overview</h1>
+            <h1 id="console-title">Management console</h1>
             <p id="status-updated">Waiting for the first status check.</p>
           </div>
           <div class="heading-actions">
@@ -89,30 +89,237 @@
           </div>
         </div>
 
-        <section class="metrics" aria-label="Service status">
-          <article class="metric-card metric-primary">
-            <p>Service</p>
-            <strong id="service-status">Checking</strong>
-            <span id="service-detail">Secure endpoint</span>
-          </article>
-          <article class="metric-card">
-            <p>Messages</p>
-            <strong id="messages-status">Checking</strong>
-            <span>Native service</span>
-          </article>
-          <article class="metric-card">
-            <p>Version</p>
-            <strong id="service-version">—</strong>
-            <span>Running release</span>
-          </article>
-          <article class="metric-card">
-            <p>Uptime</p>
-            <strong id="service-uptime">—</strong>
-            <span>Current process</span>
-          </article>
+        <nav class="console-tabs" aria-label="Console sections">
+          <div role="tablist" aria-label="Management console">
+            <button
+              class="console-tab"
+              id="overview-tab"
+              type="button"
+              role="tab"
+              aria-controls="overview-panel"
+              aria-selected="true"
+              tabindex="0"
+            >Overview</button>
+            <button
+              class="console-tab"
+              id="playground-tab"
+              type="button"
+              role="tab"
+              aria-controls="playground-panel"
+              aria-selected="false"
+              tabindex="-1"
+            >API playground</button>
+            <button
+              class="console-tab"
+              id="keys-tab"
+              type="button"
+              role="tab"
+              aria-controls="keys-panel"
+              aria-selected="false"
+              tabindex="-1"
+            >API keys</button>
+          </div>
+        </nav>
+
+        <section id="overview-panel" role="tabpanel" aria-labelledby="overview-tab" tabindex="0">
+          <section class="metrics" aria-label="Service status">
+            <article class="metric-card metric-primary">
+              <p>Service</p>
+              <strong id="service-status">Checking</strong>
+              <span id="service-detail">Secure endpoint</span>
+            </article>
+            <article class="metric-card">
+              <p>Messages</p>
+              <strong id="messages-status">Checking</strong>
+              <span>Native service</span>
+            </article>
+            <article class="metric-card">
+              <p>Version</p>
+              <strong id="service-version">—</strong>
+              <span>Running release</span>
+            </article>
+            <article class="metric-card">
+              <p>Uptime</p>
+              <strong id="service-uptime">—</strong>
+              <span>Current process</span>
+            </article>
+          </section>
+
+          <section class="panel overview-guide" aria-labelledby="overview-guide-title">
+            <div>
+              <p class="eyebrow">Ready to use</p>
+              <h2 id="overview-guide-title">Every capability, one key away.</h2>
+              <p>
+                Open the API playground to inspect chats, view statistics, or send an
+                allowlisted iMessage. Authentication is added automatically.
+              </p>
+            </div>
+            <button class="button button-primary" id="open-playground" type="button">Try an endpoint</button>
+          </section>
         </section>
 
-        <div class="workspace-grid">
+        <section
+          id="playground-panel"
+          role="tabpanel"
+          aria-labelledby="playground-tab"
+          tabindex="0"
+          hidden
+        >
+          <div class="playground-grid">
+            <section class="panel playground-request" aria-labelledby="playground-title">
+              <div class="panel-heading">
+                <p class="eyebrow">Same-origin API client</p>
+                <h2 id="playground-title">Try an endpoint</h2>
+                <p>The active key is applied automatically and is never shown in the request preview.</p>
+              </div>
+
+              <form id="playground-form" novalidate>
+                <label for="playground-operation">Endpoint</label>
+                <select id="playground-operation" name="operation" required>
+                  <optgroup label="Service">
+                    <option value="status">GET /api/status</option>
+                  </optgroup>
+                  <optgroup label="Chats and messages">
+                    <option value="chats">GET /api/chats</option>
+                    <option value="chat">GET /api/chats/{chat_id}</option>
+                    <option value="chat-messages">GET /api/chats/{chat_id}/messages</option>
+                    <option value="chat-background">GET /api/chats/{chat_id}/background</option>
+                    <option value="scheduled-messages">GET /api/scheduled-messages</option>
+                    <option value="message-statistics">GET /api/statistics/messages</option>
+                    <option value="send-message">POST /api/messages</option>
+                  </optgroup>
+                  <optgroup label="Administration">
+                    <option value="audit-events">GET /api/audit-events</option>
+                    <option value="keys">GET /api/keys</option>
+                    <option value="key">GET /api/keys/{key_id}</option>
+                  </optgroup>
+                </select>
+
+                <div class="playground-fields" id="chats-fields" hidden>
+                  <div>
+                    <label for="chats-limit">Limit</label>
+                    <input id="chats-limit" type="number" min="1" max="100" value="20" required>
+                  </div>
+                  <label class="inline-option">
+                    <input id="chats-unread" type="checkbox">
+                    <span>Unread chats only</span>
+                  </label>
+                </div>
+
+                <div class="playground-fields" id="chat-fields" hidden>
+                  <div>
+                    <label for="playground-chat-id">Chat ID</label>
+                    <input id="playground-chat-id" type="number" min="1" step="1" placeholder="42">
+                  </div>
+                </div>
+
+                <div class="playground-fields field-grid" id="chat-messages-fields" hidden>
+                  <div>
+                    <label for="messages-limit">Limit</label>
+                    <input id="messages-limit" type="number" min="1" max="200" value="50">
+                  </div>
+                  <div>
+                    <label for="messages-participant">Participant <span>optional</span></label>
+                    <input id="messages-participant" type="text" placeholder="person@example.net">
+                  </div>
+                  <div>
+                    <label for="messages-start">Start <span>optional</span></label>
+                    <input id="messages-start" type="text" maxlength="35" placeholder="2026-08-01T00:00:00Z">
+                  </div>
+                  <div>
+                    <label for="messages-end">End <span>optional</span></label>
+                    <input id="messages-end" type="text" maxlength="35" placeholder="2026-08-10T00:00:00Z">
+                  </div>
+                </div>
+
+                <div class="playground-fields" id="scheduled-fields" hidden>
+                  <div>
+                    <label for="scheduled-limit">Limit</label>
+                    <input id="scheduled-limit" type="number" min="1" max="100" value="50">
+                  </div>
+                </div>
+
+                <div class="playground-fields field-grid" id="statistics-fields" hidden>
+                  <div>
+                    <label for="statistics-chat-id">Chat ID <span>optional</span></label>
+                    <input id="statistics-chat-id" type="number" min="1" step="1" placeholder="42">
+                  </div>
+                  <div>
+                    <label for="statistics-time-zone">Time zone</label>
+                    <input id="statistics-time-zone" type="text" maxlength="64" value="UTC">
+                  </div>
+                  <label class="inline-option">
+                    <input id="statistics-media" type="checkbox">
+                    <span>Include media statistics</span>
+                  </label>
+                </div>
+
+                <div class="playground-fields" id="audit-fields" hidden>
+                  <div>
+                    <label for="audit-limit">Limit</label>
+                    <input id="audit-limit" type="number" min="1" max="1000" value="100">
+                  </div>
+                </div>
+
+                <div class="playground-fields" id="key-fields" hidden>
+                  <div>
+                    <label for="playground-key-id">API key</label>
+                    <select id="playground-key-id">
+                      <option value="">Select a key</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="playground-fields send-fields" id="send-fields" hidden>
+                  <div class="field-grid">
+                    <div>
+                      <label for="send-target-kind">Destination type</label>
+                      <select id="send-target-kind">
+                        <option value="recipient">Recipient</option>
+                        <option value="chat_id">Chat ID</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label for="send-target">Destination</label>
+                      <input id="send-target" type="text" placeholder="person@example.net">
+                    </div>
+                  </div>
+                  <label for="send-text">Message</label>
+                  <textarea id="send-text" rows="6" placeholder="Hello from iMessage Proxy"></textarea>
+                  <p class="field-help">Messages.app acceptance is not delivery confirmation. Carrier SMS fallback is disabled.</p>
+                </div>
+
+                <div class="request-preview" role="group" aria-label="Request preview">
+                  <span>Request</span>
+                  <code id="playground-preview">GET /api/status</code>
+                </div>
+                <p class="form-error" id="playground-error" role="alert" hidden></p>
+                <button class="button button-primary button-wide" id="playground-run" type="submit">
+                  Run request
+                </button>
+              </form>
+            </section>
+
+            <section class="panel playground-response" aria-labelledby="playground-response-title">
+              <div class="panel-heading panel-heading-row">
+                <div>
+                  <p class="eyebrow">Response</p>
+                  <h2 id="playground-response-title">Result</h2>
+                </div>
+                <span class="response-state" id="playground-status" role="status" aria-live="polite">Not run yet</span>
+              </div>
+              <dl class="response-meta" id="playground-meta" hidden>
+                <div><dt>Status</dt><dd id="playground-http-status">—</dd></div>
+                <div><dt>Duration</dt><dd id="playground-duration">—</dd></div>
+                <div><dt>Request ID</dt><dd id="playground-request-id">—</dd></div>
+              </dl>
+              <pre id="playground-output" tabindex="0">Select an endpoint and run it to see bounded JSON here.</pre>
+            </section>
+          </div>
+        </section>
+
+        <section id="keys-panel" role="tabpanel" aria-labelledby="keys-tab" tabindex="0" hidden>
+          <div class="workspace-grid">
           <section class="panel keys-panel" aria-labelledby="keys-title">
             <div class="panel-heading panel-heading-row">
               <div>
@@ -168,15 +375,15 @@
               <fieldset>
                 <legend>Scopes</legend>
                 <label class="scope-option">
-                  <input type="checkbox" name="scope" value="messages:read">
+                  <input type="checkbox" name="scope[]" value="messages:read">
                   <span><strong>Read messages</strong><small>Chats, backgrounds, schedules, and statistics</small></span>
                 </label>
                 <label class="scope-option">
-                  <input type="checkbox" name="scope" value="messages:send">
+                  <input type="checkbox" name="scope[]" value="messages:send">
                   <span><strong>Send messages</strong><small>Allowlisted recipients only</small></span>
                 </label>
                 <label class="scope-option">
-                  <input type="checkbox" name="scope" value="admin">
+                  <input type="checkbox" name="scope[]" value="admin">
                   <span><strong>Administration</strong><small>All API access and key management</small></span>
                 </label>
               </fieldset>
@@ -193,7 +400,8 @@
               </button>
             </form>
           </aside>
-        </div>
+          </div>
+        </section>
       </section>
     </main>
 
@@ -222,6 +430,26 @@
         <div class="dialog-actions">
           <button class="button button-danger" id="confirm-revoke" type="submit">Revoke key</button>
           <button class="button button-secondary" id="cancel-revoke" type="button">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog
+      class="confirm-dialog"
+      id="send-dialog"
+      aria-labelledby="send-dialog-title"
+      aria-describedby="send-dialog-description"
+    >
+      <p class="eyebrow">Confirm intentional send</p>
+      <h2 id="send-dialog-title">Send this iMessage?</h2>
+      <p id="send-dialog-description">
+        The request will be sent to <strong id="send-dialog-target">the selected destination</strong>.
+        Accepted means Messages.app accepted the command, not that it was delivered.
+      </p>
+      <form id="send-confirm-form">
+        <div class="dialog-actions">
+          <button class="button button-primary" id="confirm-send" type="submit">Send iMessage</button>
+          <button class="button button-secondary" id="cancel-send" type="button">Cancel</button>
         </div>
       </form>
     </dialog>

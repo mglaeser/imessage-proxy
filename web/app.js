@@ -1,11 +1,21 @@
 const STORAGE_KEY = "imessage-proxy.admin-key";
+const MAX_RENDERED_RESPONSE_CHARACTERS = 100000;
 
 const elements = {
+  auditFields: document.querySelector("#audit-fields"),
+  auditLimit: document.querySelector("#audit-limit"),
+  cancelSend: document.querySelector("#cancel-send"),
   cancelRevoke: document.querySelector("#cancel-revoke"),
+  chatFields: document.querySelector("#chat-fields"),
+  chatMessagesFields: document.querySelector("#chat-messages-fields"),
+  chatsFields: document.querySelector("#chats-fields"),
+  chatsLimit: document.querySelector("#chats-limit"),
+  chatsUnread: document.querySelector("#chats-unread"),
   closeKeyDialog: document.querySelector("#close-key-dialog"),
   connectionChip: document.querySelector("#connection-chip"),
   connectionLabel: document.querySelector("#connection-label"),
   confirmRevoke: document.querySelector("#confirm-revoke"),
+  confirmSend: document.querySelector("#confirm-send"),
   consoleView: document.querySelector("#console-view"),
   copyKeyButton: document.querySelector("#copy-key-button"),
   copyStatus: document.querySelector("#copy-status"),
@@ -15,14 +25,48 @@ const elements = {
   createdKey: document.querySelector("#created-key"),
   createdKeyDialog: document.querySelector("#created-key-dialog"),
   keyCount: document.querySelector("#key-count"),
+  keyFields: document.querySelector("#key-fields"),
+  keysPanel: document.querySelector("#keys-panel"),
+  keysTab: document.querySelector("#keys-tab"),
   keysBody: document.querySelector("#keys-body"),
   keysEmpty: document.querySelector("#keys-empty"),
   logoutButton: document.querySelector("#logout-button"),
+  messagesEnd: document.querySelector("#messages-end"),
+  messagesLimit: document.querySelector("#messages-limit"),
+  messagesParticipant: document.querySelector("#messages-participant"),
+  messagesStart: document.querySelector("#messages-start"),
   messagesStatus: document.querySelector("#messages-status"),
+  openPlayground: document.querySelector("#open-playground"),
+  overviewPanel: document.querySelector("#overview-panel"),
+  overviewTab: document.querySelector("#overview-tab"),
+  playgroundChatID: document.querySelector("#playground-chat-id"),
+  playgroundDuration: document.querySelector("#playground-duration"),
+  playgroundError: document.querySelector("#playground-error"),
+  playgroundForm: document.querySelector("#playground-form"),
+  playgroundHTTPStatus: document.querySelector("#playground-http-status"),
+  playgroundKeyID: document.querySelector("#playground-key-id"),
+  playgroundMeta: document.querySelector("#playground-meta"),
+  playgroundOperation: document.querySelector("#playground-operation"),
+  playgroundOutput: document.querySelector("#playground-output"),
+  playgroundPanel: document.querySelector("#playground-panel"),
+  playgroundPreview: document.querySelector("#playground-preview"),
+  playgroundRequestID: document.querySelector("#playground-request-id"),
+  playgroundRun: document.querySelector("#playground-run"),
+  playgroundStatus: document.querySelector("#playground-status"),
+  playgroundTab: document.querySelector("#playground-tab"),
   refreshButton: document.querySelector("#refresh-button"),
   revokeDialog: document.querySelector("#revoke-dialog"),
   revokeForm: document.querySelector("#revoke-form"),
   revokeKeyName: document.querySelector("#revoke-key-name"),
+  scheduledFields: document.querySelector("#scheduled-fields"),
+  scheduledLimit: document.querySelector("#scheduled-limit"),
+  sendConfirmForm: document.querySelector("#send-confirm-form"),
+  sendDialog: document.querySelector("#send-dialog"),
+  sendDialogTarget: document.querySelector("#send-dialog-target"),
+  sendFields: document.querySelector("#send-fields"),
+  sendTarget: document.querySelector("#send-target"),
+  sendTargetKind: document.querySelector("#send-target-kind"),
+  sendText: document.querySelector("#send-text"),
   serviceDetail: document.querySelector("#service-detail"),
   serviceStatus: document.querySelector("#service-status"),
   serviceUptime: document.querySelector("#service-uptime"),
@@ -32,6 +76,10 @@ const elements = {
   signinForm: document.querySelector("#signin-form"),
   signinKey: document.querySelector("#signin-key"),
   signinView: document.querySelector("#signin-view"),
+  statisticsChatID: document.querySelector("#statistics-chat-id"),
+  statisticsFields: document.querySelector("#statistics-fields"),
+  statisticsMedia: document.querySelector("#statistics-media"),
+  statisticsTimeZone: document.querySelector("#statistics-time-zone"),
   statusUpdated: document.querySelector("#status-updated"),
   toast: document.querySelector("#toast"),
   toggleKey: document.querySelector("#toggle-key"),
@@ -39,15 +87,21 @@ const elements = {
 
 let activeKey = "";
 let copyTimer = null;
+let pendingPlaygroundRequest = null;
 let pendingRevocation = null;
+let playgroundController = new AbortController();
+let playgroundGeneration = 0;
+let sendAttempt = null;
 let sessionController = new AbortController();
 let sessionGeneration = 0;
 let toastTimer = null;
 
 class RequestError extends Error {
-  constructor(message, status) {
+  constructor(message, status, payload = null, requestID = "") {
     super(message);
     this.name = "RequestError";
+    this.payload = payload;
+    this.requestID = requestID;
     this.status = status;
   }
 }
@@ -61,7 +115,10 @@ class SessionEndedError extends Error {
 
 function beginSession(key) {
   sessionController.abort();
+  playgroundController.abort();
   sessionController = new AbortController();
+  playgroundController = new AbortController();
+  playgroundGeneration += 1;
   sessionGeneration += 1;
   activeKey = key;
   return sessionGeneration;
@@ -69,7 +126,10 @@ function beginSession(key) {
 
 function invalidateSession() {
   sessionController.abort();
+  playgroundController.abort();
   sessionController = new AbortController();
+  playgroundController = new AbortController();
+  playgroundGeneration += 1;
   sessionGeneration += 1;
   activeKey = "";
 }
@@ -127,6 +187,45 @@ function setConnection(state, label) {
   elements.connectionLabel.textContent = label;
 }
 
+const consoleSections = [
+  { panel: elements.overviewPanel, tab: elements.overviewTab },
+  { panel: elements.playgroundPanel, tab: elements.playgroundTab },
+  { panel: elements.keysPanel, tab: elements.keysTab },
+];
+
+function activateConsoleSection(tab, focus = false) {
+  for (const section of consoleSections) {
+    const selected = section.tab === tab;
+    section.tab.setAttribute("aria-selected", String(selected));
+    section.tab.setAttribute("tabindex", selected ? "0" : "-1");
+    section.panel.hidden = !selected;
+  }
+  if (focus) {
+    tab.focus();
+  }
+}
+
+function handleTabKeydown(event) {
+  const current = consoleSections.findIndex((section) => section.tab === event.currentTarget);
+  if (current < 0) {
+    return;
+  }
+  let next = current;
+  if (event.key === "ArrowRight") {
+    next = (current + 1) % consoleSections.length;
+  } else if (event.key === "ArrowLeft") {
+    next = (current + consoleSections.length - 1) % consoleSections.length;
+  } else if (event.key === "Home") {
+    next = 0;
+  } else if (event.key === "End") {
+    next = consoleSections.length - 1;
+  } else {
+    return;
+  }
+  event.preventDefault();
+  activateConsoleSection(consoleSections[next].tab, true);
+}
+
 function showSignin(message = "") {
   elements.consoleView.hidden = true;
   elements.signinView.hidden = false;
@@ -145,6 +244,38 @@ function clearCreatedKey() {
   elements.copyStatus.textContent = "";
 }
 
+function resetPlaygroundResponse() {
+  playgroundController.abort();
+  playgroundController = new AbortController();
+  playgroundGeneration += 1;
+  pendingPlaygroundRequest = null;
+  elements.playgroundForm.setAttribute("aria-busy", "false");
+  elements.playgroundRun.disabled = false;
+  elements.playgroundMeta.hidden = true;
+  elements.playgroundHTTPStatus.textContent = "—";
+  elements.playgroundDuration.textContent = "—";
+  elements.playgroundRequestID.textContent = "—";
+  elements.playgroundStatus.textContent = "Not run yet";
+  elements.playgroundStatus.dataset.state = "idle";
+  elements.playgroundOutput.textContent = "Select an endpoint and run it to see bounded JSON here.";
+  setFormError(elements.playgroundError);
+}
+
+function clearPlayground() {
+  resetPlaygroundResponse();
+  sendAttempt = null;
+  elements.playgroundForm.reset();
+  elements.playgroundOperation.value = "status";
+  elements.chatsLimit.value = "20";
+  elements.messagesLimit.value = "50";
+  elements.scheduledLimit.value = "50";
+  elements.statisticsTimeZone.value = "UTC";
+  elements.auditLimit.value = "100";
+  elements.playgroundKeyID.value = "";
+  elements.sendTargetKind.value = "recipient";
+  updatePlaygroundOperation();
+}
+
 function clearConsoleData() {
   elements.keysBody.replaceChildren();
   elements.keyCount.textContent = "0 keys";
@@ -161,6 +292,9 @@ function clearConsoleData() {
   elements.createButton.disabled = false;
   elements.refreshButton.disabled = false;
   elements.confirmRevoke.disabled = false;
+  elements.confirmSend.disabled = false;
+  activateConsoleSection(elements.overviewTab);
+  clearPlayground();
   if (toastTimer !== null) {
     window.clearTimeout(toastTimer);
     toastTimer = null;
@@ -171,7 +305,9 @@ function clearConsoleData() {
 
 function signOut(message = "") {
   invalidateSession();
+  pendingPlaygroundRequest = null;
   pendingRevocation = null;
+  sendAttempt = null;
   persistSessionKey("");
   elements.signinKey.value = "";
   clearCreatedKey();
@@ -180,6 +316,9 @@ function signOut(message = "") {
   }
   if (elements.revokeDialog.open) {
     elements.revokeDialog.close();
+  }
+  if (elements.sendDialog.open) {
+    elements.sendDialog.close();
   }
   clearConsoleData();
   showSignin(message);
@@ -192,10 +331,9 @@ function responseMessage(payload, fallback) {
   return fallback;
 }
 
-async function apiRequest(path, options = {}, generation = sessionGeneration) {
+async function apiExchange(path, options = {}, generation = sessionGeneration, signal = sessionController.signal) {
   requireCurrentSession(generation);
   const key = activeKey;
-  const signal = sessionController.signal;
   const headers = new Headers(options.headers || {});
   headers.set("Accept", "application/json, application/problem+json");
   headers.set("Authorization", `Bearer ${key}`);
@@ -215,7 +353,7 @@ async function apiRequest(path, options = {}, generation = sessionGeneration) {
       signal,
     });
   } catch (error) {
-    if (error?.name === "AbortError" || generation !== sessionGeneration) {
+    if (error?.name === "AbortError" || generation !== sessionGeneration || signal.aborted) {
       throw new SessionEndedError();
     }
     throw new RequestError("The service could not be reached.", 0);
@@ -228,25 +366,46 @@ async function apiRequest(path, options = {}, generation = sessionGeneration) {
     .trim()
     .toLowerCase();
   const hasJsonBody = contentType === "application/json" || contentType.endsWith("+json");
+  if (response.status !== 204 && !hasJsonBody) {
+    throw new RequestError("The service returned an unexpected response type.", response.status);
+  }
   if (response.status !== 204 && hasJsonBody) {
     try {
       payload = await response.json();
     } catch {
-      throw new RequestError("The service returned an invalid response.", response.status);
+      throw new RequestError("The service returned an invalid JSON response.", response.status);
     }
   }
   requireCurrentSession(generation);
+
+  const requestID = response.headers.get("x-request-id") ||
+    (payload && typeof payload.request_id === "string" ? payload.request_id : "");
 
   if (response.status === 401) {
     if (generation === sessionGeneration) {
       signOut("The API key is invalid, expired, or revoked.");
     }
-    throw new RequestError("Authentication is required.", 401);
+    throw new RequestError("Authentication is required.", 401, payload, requestID);
   }
-  if (!response.ok) {
-    throw new RequestError(responseMessage(payload, `Request failed with status ${response.status}.`), response.status);
+  return {
+    ok: response.ok,
+    payload,
+    requestID,
+    status: response.status,
+  };
+}
+
+async function apiRequest(path, options = {}, generation = sessionGeneration) {
+  const exchange = await apiExchange(path, options, generation);
+  if (!exchange.ok) {
+    throw new RequestError(
+      responseMessage(exchange.payload, `Request failed with status ${exchange.status}.`),
+      exchange.status,
+      exchange.payload,
+      exchange.requestID,
+    );
   }
-  return payload;
+  return exchange.payload;
 }
 
 function titleCaseStatus(value) {
@@ -335,11 +494,33 @@ function appendText(parent, className, value) {
   return element;
 }
 
+function renderPlaygroundKeyChoices(keys) {
+  const current = elements.playgroundKeyID.value;
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = keys.length === 0 ? "No API keys available" : "Select a key";
+  elements.playgroundKeyID.replaceChildren(placeholder);
+  for (const key of keys) {
+    const id = String(key?.id || "");
+    if (!id) {
+      continue;
+    }
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = `${String(key?.name || "Unnamed key")} · ${String(key?.key_prefix || id)}`;
+    elements.playgroundKeyID.append(option);
+  }
+  if (keys.some((key) => String(key?.id || "") === current)) {
+    elements.playgroundKeyID.value = current;
+  }
+}
+
 function renderKeys(payload) {
   const keys = normalizedKeys(payload);
   elements.keysBody.replaceChildren();
   elements.keyCount.textContent = `${keys.length} ${keys.length === 1 ? "key" : "keys"}`;
   elements.keysEmpty.hidden = keys.length !== 0;
+  renderPlaygroundKeyChoices(keys);
 
   for (const key of keys) {
     const row = document.createElement("tr");
@@ -386,6 +567,451 @@ function renderKeys(payload) {
     row.append(nameCell, scopesCell, expiryCell, lastUsedCell, actionCell);
     elements.keysBody.append(row);
   }
+}
+
+class PlaygroundValidationError extends Error {
+  constructor(message, field = null) {
+    super(message);
+    this.name = "PlaygroundValidationError";
+    this.field = field;
+  }
+}
+
+function codePointLength(value) {
+  return Array.from(value).length;
+}
+
+function requiredInteger(field, label, minimum, maximum = Number.MAX_SAFE_INTEGER, optional = false) {
+  field.setAttribute("aria-invalid", "false");
+  const raw = String(field.value || "").trim();
+  if (optional && !raw) {
+    return null;
+  }
+  const value = Number(raw);
+  if (!raw || !Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    field.setAttribute("aria-invalid", "true");
+    const range = maximum === Number.MAX_SAFE_INTEGER
+      ? `${minimum} or greater`
+      : `between ${minimum} and ${maximum}`;
+    throw new PlaygroundValidationError(`${label} must be a whole number ${range}.`, field);
+  }
+  return value;
+}
+
+function addQuery(path, values) {
+  const query = new URLSearchParams();
+  for (const [name, value] of values) {
+    if (value !== null && value !== undefined && value !== "") {
+      query.append(name, String(value));
+    }
+  }
+  const serialized = query.toString();
+  return serialized ? `${path}?${serialized}` : path;
+}
+
+function chatID() {
+  return requiredInteger(elements.playgroundChatID, "Chat ID", 1);
+}
+
+function buildStatusRequest() {
+  return { method: "GET", path: "/api/status" };
+}
+
+function buildChatsRequest() {
+  const limit = requiredInteger(elements.chatsLimit, "Chat limit", 1, 100);
+  return {
+    method: "GET",
+    path: addQuery("/api/chats", [
+      ["limit", limit],
+      ["unread_only", elements.chatsUnread.checked ? "true" : null],
+    ]),
+  };
+}
+
+function buildChatRequest() {
+  return { method: "GET", path: `/api/chats/${chatID()}` };
+}
+
+function validateOptionalDate(field, label) {
+  field.setAttribute("aria-invalid", "false");
+  const value = String(field.value || "").trim();
+  if (!value) {
+    return "";
+  }
+  const pattern = /^([0-9]{4})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,9})?(?:Z|[+-](?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00))$/;
+  const match = pattern.exec(value);
+  if (!match) {
+    field.setAttribute("aria-invalid", "true");
+    throw new PlaygroundValidationError(`${label} must use strict RFC 3339 format.`, field);
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysByMonth = [0, 31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (year < 1 || day > daysByMonth[month]) {
+    field.setAttribute("aria-invalid", "true");
+    throw new PlaygroundValidationError(`${label} must contain a valid Gregorian calendar date.`, field);
+  }
+  return value;
+}
+
+function buildChatMessagesRequest() {
+  const id = chatID();
+  const limit = requiredInteger(elements.messagesLimit, "Message limit", 1, 200);
+  const participant = String(elements.messagesParticipant.value || "");
+  elements.messagesParticipant.setAttribute("aria-invalid", "false");
+  if (participant && (
+    codePointLength(participant) > 256 ||
+    participant.startsWith("-") ||
+    participant.includes(",") ||
+    /[\u0000-\u001F\u007F-\u009F]/u.test(participant)
+  )) {
+    elements.messagesParticipant.setAttribute("aria-invalid", "true");
+    throw new PlaygroundValidationError("Participant must be one exact handle without commas or control characters.", elements.messagesParticipant);
+  }
+  const start = validateOptionalDate(elements.messagesStart, "Start");
+  const end = validateOptionalDate(elements.messagesEnd, "End");
+  if (start && end && Date.parse(end) <= Date.parse(start)) {
+    elements.messagesEnd.setAttribute("aria-invalid", "true");
+    throw new PlaygroundValidationError("End must be later than start.", elements.messagesEnd);
+  }
+  return {
+    method: "GET",
+    path: addQuery(`/api/chats/${id}/messages`, [
+      ["limit", limit],
+      ["participant", participant],
+      ["start", start],
+      ["end", end],
+    ]),
+  };
+}
+
+function buildChatBackgroundRequest() {
+  return { method: "GET", path: `/api/chats/${chatID()}/background` };
+}
+
+function buildScheduledRequest() {
+  const limit = requiredInteger(elements.scheduledLimit, "Scheduled-message limit", 1, 100);
+  return { method: "GET", path: addQuery("/api/scheduled-messages", [["limit", limit]]) };
+}
+
+function buildStatisticsRequest() {
+  const id = requiredInteger(elements.statisticsChatID, "Statistics chat ID", 1, Number.MAX_SAFE_INTEGER, true);
+  const timeZone = String(elements.statisticsTimeZone.value || "").trim();
+  elements.statisticsTimeZone.setAttribute("aria-invalid", "false");
+  if (!timeZone || new TextEncoder().encode(timeZone).length > 64 || /[\u0000-\u001F\u007F-\u009F]/u.test(timeZone)) {
+    elements.statisticsTimeZone.setAttribute("aria-invalid", "true");
+    throw new PlaygroundValidationError("Time zone must contain 1–64 UTF-8 bytes without control characters.", elements.statisticsTimeZone);
+  }
+  return {
+    method: "GET",
+    path: addQuery("/api/statistics/messages", [
+      ["chat_id", id],
+      ["time_zone", timeZone],
+      ["include_media", elements.statisticsMedia.checked ? "true" : null],
+    ]),
+  };
+}
+
+function buildAuditRequest() {
+  const limit = requiredInteger(elements.auditLimit, "Audit-event limit", 1, 1000);
+  return { method: "GET", path: addQuery("/api/audit-events", [["limit", limit]]) };
+}
+
+function buildKeysRequest() {
+  return { method: "GET", path: "/api/keys" };
+}
+
+function buildKeyRequest() {
+  const id = String(elements.playgroundKeyID.value || "");
+  elements.playgroundKeyID.setAttribute("aria-invalid", "false");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+    elements.playgroundKeyID.setAttribute("aria-invalid", "true");
+    throw new PlaygroundValidationError("Select an API key from the loaded list.", elements.playgroundKeyID);
+  }
+  return { method: "GET", path: `/api/keys/${id.toLowerCase()}` };
+}
+
+function buildSendRequest() {
+  const kind = elements.sendTargetKind.value;
+  const rawTarget = String(elements.sendTarget.value || "").trim();
+  const message = String(elements.sendText.value || "");
+  elements.sendTarget.setAttribute("aria-invalid", "false");
+  elements.sendText.setAttribute("aria-invalid", "false");
+  let target;
+  if (kind === "chat_id") {
+    const value = Number(rawTarget);
+    if (!rawTarget || !Number.isSafeInteger(value) || value < 1) {
+      elements.sendTarget.setAttribute("aria-invalid", "true");
+      throw new PlaygroundValidationError("Destination must be a positive whole chat ID.", elements.sendTarget);
+    }
+    target = { chat_id: value };
+  } else if (kind === "recipient") {
+    const phone = /^\+[1-9][0-9]{6,14}$/;
+    const emailLike = /^[^-\s@\u0000-\u001F\u007F-\u009F][^\s@\u0000-\u001F\u007F-\u009F]*@[^\s@\u0000-\u001F\u007F-\u009F]+$/u;
+    if (codePointLength(rawTarget) > 256 || (!phone.test(rawTarget) && !emailLike.test(rawTarget))) {
+      elements.sendTarget.setAttribute("aria-invalid", "true");
+      throw new PlaygroundValidationError("Destination must be an exact +phone number or email-like handle.", elements.sendTarget);
+    }
+    target = { recipient: rawTarget };
+  } else {
+    throw new PlaygroundValidationError("Select a supported destination type.", elements.sendTargetKind);
+  }
+  if (
+    codePointLength(message) < 1 ||
+    codePointLength(message) > 4000 ||
+    message.startsWith("-") ||
+    /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/u.test(message)
+  ) {
+    elements.sendText.setAttribute("aria-invalid", "true");
+    throw new PlaygroundValidationError("Message must contain 1–4000 characters, may not start with a hyphen, and may not contain control characters.", elements.sendText);
+  }
+  const body = { ...target, text: message };
+  return {
+    body,
+    method: "POST",
+    path: "/api/messages",
+    signature: JSON.stringify(body),
+    target: rawTarget,
+  };
+}
+
+const playgroundFieldGroups = [
+  elements.chatsFields,
+  elements.chatFields,
+  elements.chatMessagesFields,
+  elements.scheduledFields,
+  elements.statisticsFields,
+  elements.auditFields,
+  elements.keyFields,
+  elements.sendFields,
+];
+
+const playgroundValidationFields = [
+  elements.auditLimit,
+  elements.chatsLimit,
+  elements.messagesEnd,
+  elements.messagesLimit,
+  elements.messagesParticipant,
+  elements.messagesStart,
+  elements.playgroundChatID,
+  elements.playgroundKeyID,
+  elements.scheduledLimit,
+  elements.sendTarget,
+  elements.sendTargetKind,
+  elements.sendText,
+  elements.statisticsChatID,
+  elements.statisticsTimeZone,
+];
+
+const PLAYGROUND_OPERATIONS = new Map([
+  ["status", { build: buildStatusRequest, groups: [], preview: "GET /api/status" }],
+  ["chats", { build: buildChatsRequest, groups: [elements.chatsFields], preview: "GET /api/chats" }],
+  ["chat", { build: buildChatRequest, groups: [elements.chatFields], preview: "GET /api/chats/{chat_id}" }],
+  ["chat-messages", { build: buildChatMessagesRequest, groups: [elements.chatFields, elements.chatMessagesFields], preview: "GET /api/chats/{chat_id}/messages" }],
+  ["chat-background", { build: buildChatBackgroundRequest, groups: [elements.chatFields], preview: "GET /api/chats/{chat_id}/background" }],
+  ["scheduled-messages", { build: buildScheduledRequest, groups: [elements.scheduledFields], preview: "GET /api/scheduled-messages" }],
+  ["message-statistics", { build: buildStatisticsRequest, groups: [elements.statisticsFields], preview: "GET /api/statistics/messages" }],
+  ["send-message", { build: buildSendRequest, groups: [elements.sendFields], preview: "POST /api/messages" }],
+  ["audit-events", { build: buildAuditRequest, groups: [elements.auditFields], preview: "GET /api/audit-events" }],
+  ["keys", { build: buildKeysRequest, groups: [], preview: "GET /api/keys" }],
+  ["key", { build: buildKeyRequest, groups: [elements.keyFields], preview: "GET /api/keys/{key_id}" }],
+]);
+
+function selectedPlaygroundOperation() {
+  return PLAYGROUND_OPERATIONS.get(elements.playgroundOperation.value) || null;
+}
+
+function updatePlaygroundOperation() {
+  resetPlaygroundResponse();
+  for (const field of playgroundValidationFields) {
+    field.setAttribute("aria-invalid", "false");
+  }
+  for (const group of playgroundFieldGroups) {
+    group.hidden = true;
+  }
+  const operation = selectedPlaygroundOperation();
+  if (!operation) {
+    elements.playgroundPreview.textContent = "Unsupported endpoint";
+    setFormError(elements.playgroundError, "Select one of the reviewed API endpoints.");
+    return;
+  }
+  for (const group of operation.groups) {
+    group.hidden = false;
+  }
+  elements.playgroundPreview.textContent = operation.preview;
+  if (elements.playgroundOperation.value === "send-message") {
+    updateSendTargetHint();
+  }
+}
+
+function updateSendTargetHint() {
+  const chat = elements.sendTargetKind.value === "chat_id";
+  elements.sendTarget.type = chat ? "number" : "text";
+  elements.sendTarget.setAttribute("placeholder", chat ? "42" : "person@example.net");
+}
+
+function renderPlaygroundBody(payload) {
+  let rendered;
+  if (payload === null || payload === undefined) {
+    rendered = "No response body.";
+  } else {
+    try {
+      rendered = JSON.stringify(payload, null, 2);
+    } catch {
+      rendered = "The response could not be displayed.";
+    }
+  }
+  if (rendered.length > MAX_RENDERED_RESPONSE_CHARACTERS) {
+    return `${rendered.slice(0, MAX_RENDERED_RESPONSE_CHARACTERS)}\n\n… response display truncated`;
+  }
+  return rendered;
+}
+
+function renderPlaygroundResult({ duration, ok, payload, requestID, status }) {
+  elements.playgroundMeta.hidden = false;
+  elements.playgroundHTTPStatus.textContent = String(status);
+  elements.playgroundDuration.textContent = `${duration} ms`;
+  elements.playgroundRequestID.textContent = requestID || "Not provided";
+  elements.playgroundOutput.textContent = renderPlaygroundBody(payload);
+  elements.playgroundStatus.textContent = `${ok ? "Completed" : "Failed"}: HTTP ${status}`;
+  elements.playgroundStatus.dataset.state = ok ? "success" : "error";
+}
+
+async function executePlaygroundRequest(request) {
+  playgroundController.abort();
+  playgroundController = new AbortController();
+  playgroundGeneration += 1;
+  const requestGeneration = playgroundGeneration;
+  const generation = sessionGeneration;
+  const started = Date.now();
+  setFormError(elements.playgroundError);
+  elements.playgroundForm.setAttribute("aria-busy", "true");
+  elements.playgroundRun.disabled = true;
+  elements.playgroundStatus.textContent = "Request in progress";
+  elements.playgroundStatus.dataset.state = "pending";
+  try {
+    const exchange = await apiExchange(
+      request.path,
+      {
+        body: request.body,
+        headers: request.headers,
+        method: request.method,
+      },
+      generation,
+      playgroundController.signal,
+    );
+    requireCurrentSession(generation);
+    if (requestGeneration !== playgroundGeneration) {
+      return;
+    }
+    renderPlaygroundResult({
+      duration: Math.max(0, Date.now() - started),
+      ok: exchange.ok,
+      payload: exchange.payload,
+      requestID: exchange.requestID,
+      status: exchange.status,
+    });
+    if (request.method === "POST" && request.path === "/api/messages" && exchange.status === 202) {
+      sendAttempt = null;
+      if (currentSendDraftSignature() === request.signature) {
+        elements.sendText.value = "";
+      }
+    }
+  } catch (error) {
+    if (sessionEnded(error) || error.status === 401 || requestGeneration !== playgroundGeneration) {
+      return;
+    }
+    const status = Number.isInteger(error.status) ? error.status : 0;
+    renderPlaygroundResult({
+      duration: Math.max(0, Date.now() - started),
+      ok: false,
+      payload: error.payload || { detail: error.message },
+      requestID: error.requestID || "",
+      status,
+    });
+  } finally {
+    if (requestGeneration === playgroundGeneration && generation === sessionGeneration) {
+      elements.playgroundForm.setAttribute("aria-busy", "false");
+      elements.playgroundRun.disabled = false;
+    }
+  }
+}
+
+function currentSendDraftSignature() {
+  const kind = elements.sendTargetKind.value;
+  const rawTarget = String(elements.sendTarget.value || "").trim();
+  const text = String(elements.sendText.value || "");
+  if (kind === "chat_id") {
+    const chatIDValue = Number(rawTarget);
+    return Number.isSafeInteger(chatIDValue) && chatIDValue > 0
+      ? JSON.stringify({ chat_id: chatIDValue, text })
+      : "";
+  }
+  if (kind === "recipient") {
+    return JSON.stringify({ recipient: rawTarget, text });
+  }
+  return "";
+}
+
+function handlePlaygroundSubmit(event) {
+  event.preventDefault();
+  setFormError(elements.playgroundError);
+  const operation = selectedPlaygroundOperation();
+  if (!operation) {
+    setFormError(elements.playgroundError, "Select one of the reviewed API endpoints.");
+    return;
+  }
+  let request;
+  try {
+    request = operation.build();
+  } catch (error) {
+    if (error instanceof PlaygroundValidationError) {
+      setFormError(elements.playgroundError, error.message);
+      error.field?.focus();
+      return;
+    }
+    throw error;
+  }
+  elements.playgroundPreview.textContent = `${request.method} ${request.path}`;
+  if (request.method !== "POST") {
+    void executePlaygroundRequest(request);
+    return;
+  }
+  pendingPlaygroundRequest = request;
+  elements.sendDialogTarget.textContent = request.target;
+  elements.confirmSend.textContent = sendAttempt?.signature === request.signature
+    ? "Retry same attempt"
+    : "Send iMessage";
+  elements.sendDialog.showModal();
+  window.setTimeout(() => elements.confirmSend.focus(), 0);
+}
+
+function closeSendDialog() {
+  pendingPlaygroundRequest = null;
+  elements.sendDialogTarget.textContent = "the selected destination";
+  elements.sendDialog.close();
+}
+
+function handleSendConfirmation(event) {
+  event.preventDefault();
+  if (!pendingPlaygroundRequest) {
+    return;
+  }
+  const request = pendingPlaygroundRequest;
+  if (!sendAttempt || sendAttempt.signature !== request.signature) {
+    if (typeof crypto.randomUUID !== "function") {
+      closeSendDialog();
+      setFormError(elements.playgroundError, "This browser cannot generate a secure idempotency key.");
+      return;
+    }
+    sendAttempt = { key: crypto.randomUUID(), signature: request.signature };
+  }
+  request.headers = { "Idempotency-Key": sendAttempt.key };
+  pendingPlaygroundRequest = null;
+  elements.sendDialog.close();
+  void executePlaygroundRequest(request);
 }
 
 async function loadConsole(generation = sessionGeneration) {
@@ -458,7 +1084,7 @@ async function handleRefresh() {
 }
 
 function selectedScopes() {
-  return Array.from(elements.createForm.querySelectorAll('input[name="scope"]:checked'))
+  return Array.from(elements.createForm.querySelectorAll('input[name="scope[]"]:checked'))
     .map((input) => input.value);
 }
 
@@ -629,6 +1255,20 @@ elements.signinForm.addEventListener("submit", handleSignin);
 elements.toggleKey.addEventListener("click", toggleKeyVisibility);
 elements.logoutButton.addEventListener("click", () => signOut());
 elements.refreshButton.addEventListener("click", handleRefresh);
+for (const section of consoleSections) {
+  section.tab.addEventListener("click", () => activateConsoleSection(section.tab));
+  section.tab.addEventListener("keydown", handleTabKeydown);
+}
+elements.openPlayground.addEventListener("click", () => activateConsoleSection(elements.playgroundTab, true));
+elements.playgroundOperation.addEventListener("change", updatePlaygroundOperation);
+elements.playgroundForm.addEventListener("submit", handlePlaygroundSubmit);
+elements.sendTargetKind.addEventListener("change", updateSendTargetHint);
+elements.cancelSend.addEventListener("click", closeSendDialog);
+elements.sendConfirmForm.addEventListener("submit", handleSendConfirmation);
+elements.sendDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeSendDialog();
+});
 elements.createForm.addEventListener("submit", handleCreate);
 elements.copyKeyButton.addEventListener("click", copyCreatedKey);
 elements.closeKeyDialog.addEventListener("click", () => void closeCreatedKeyDialog());

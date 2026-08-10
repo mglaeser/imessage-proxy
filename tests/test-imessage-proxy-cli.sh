@@ -57,6 +57,7 @@ assert_rollback() {
   fail 'version action disagrees with VERSION'
 help_text="$($CLI --help)"
 for expected in \
+  'bootstrap --config FILE' \
   'api-key bootstrap-admin' \
   'server-install' \
   'RESTART IMESSAGE PROXY SERVER' \
@@ -91,7 +92,7 @@ assert_runtime_root_rejected "$temporary/home/linked-runtime/imessage-proxy"
 assert_runtime_root_rejected "$temporary/home/not-the-product"
 
 # Test doubles below are intentionally invoked through functions sourced from the CLI.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2030,SC2031,SC2329
 (
   export HOME="$temporary/home"
   export TMPDIR="$temporary/tmp"
@@ -137,6 +138,9 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
   # shellcheck source=../bin/imessage-proxy
   source "$CLI"
 
+  ((SERVER_START_TIMEOUT_SECONDS >= SERVER_READ_TIMEOUT_SECONDS + 10)) ||
+    fail 'native startup readiness budget does not cover its Messages read preflight'
+
   hostname_valid 'messages.integration.dev' || fail 'valid public hostname was rejected'
   ! hostname_valid 'Messages.example.net' || fail 'mixed-case hostname was accepted'
   ! hostname_valid 'messages.local' || fail 'local hostname was accepted'
@@ -174,6 +178,45 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
         *) fail "unexpected macOS stat fixture invocation: $*" ;;
       esac
     }
+
+    require_macos() { :; }
+    service_config="$security_dir/service.env"
+    {
+      printf '%s\n' \
+        'IMESSAGE_PROXY_API_HOST=messages.integration.dev' \
+        'IMESSAGE_PROXY_ACME_EMAIL=operator@integration.dev' \
+        'IMESSAGE_PROXY_PUBLIC_BIND=0.0.0.0' \
+        'IMESSAGE_PROXY_HTTP_PORT=8080' \
+        'IMESSAGE_PROXY_HTTPS_PORT=8443' \
+        'IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no' \
+        "IMESSAGE_PROXY_IMSG_BIN=$fake_imsg" \
+        "IMESSAGE_PROXY_IMSG_SHA256=$IMESSAGE_PROXY_IMSG_SHA256" \
+        "IMESSAGE_PROXY_CADDY_BIN=$fake_caddy" \
+        "IMESSAGE_PROXY_CADDY_SHA256=$IMESSAGE_PROXY_CADDY_SHA256"
+    } > "$service_config"
+    chmod 600 "$service_config"
+    load_service_config "$service_config"
+    [[ "$IMESSAGE_PROXY_API_HOST" == messages.integration.dev &&
+      "$IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS" == no &&
+      "$IMESSAGE_PROXY_IMSG_BIN" == "$fake_imsg" ]] ||
+      fail 'closed service config did not load exact values'
+
+    duplicate_config="$security_dir/service-duplicate.env"
+    cp "$service_config" "$duplicate_config"
+    printf '%s\n' 'IMESSAGE_PROXY_API_HOST=duplicate.integration.dev' >> "$duplicate_config"
+    expect_failure 'defines IMESSAGE_PROXY_API_HOST more than once' \
+      load_service_config "$duplicate_config"
+    unknown_config="$security_dir/service-unknown.env"
+    cp "$service_config" "$unknown_config"
+    printf '%s\n' 'IMESSAGE_PROXY_API_KEY=must-not-load' >> "$unknown_config"
+    expect_failure 'uses an unknown key' load_service_config "$unknown_config"
+    missing_config="$security_dir/service-missing.env"
+    sed '/^IMESSAGE_PROXY_CADDY_SHA256=/d' "$service_config" > "$missing_config"
+    expect_failure 'is missing IMESSAGE_PROXY_CADDY_SHA256' \
+      load_service_config "$missing_config"
+    ln -s "$service_config" "$security_dir/service-link.env"
+    expect_failure 'private file must be a regular non-symlink' \
+      load_service_config "$security_dir/service-link.env"
 
     expect_failure 'private file must be a regular non-symlink' \
       require_private_file "$security_dir/private-file-symlink"
@@ -318,6 +361,24 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
   assert_contains 'IMESSAGE_PROXY_UI_DIR' "$CADDYFILE"
   assert_contains 'IMESSAGE_PROXY_EDGE_LOG_PATH' "$CADDYFILE"
 
+  server_environment_capture="$temporary/server-environment.capture"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    # shellcheck disable=SC2016
+    printf '%s\n' 'printf "%s\n" "$IMESSAGE_PROXY_MESSAGES_DATABASE_PATH" "$IMESSAGE_PROXY_MAX_CONCURRENCY" "$IMESSAGE_PROXY_READ_TIMEOUT_SECONDS" "$IMESSAGE_PROXY_SEND_TIMEOUT_SECONDS" "$IMESSAGE_PROXY_SOCKET_TIMEOUT_SECONDS" > "$IMESSAGE_PROXY_TEST_CAPTURE"'
+  } > "$SERVER_BIN"
+  chmod 700 "$SERVER_BIN"
+  IMESSAGE_PROXY_TEST_CAPTURE="$server_environment_capture" \
+    IMESSAGE_PROXY_MESSAGES_DATABASE_PATH=/tmp/poisoned-chat.db \
+    IMESSAGE_PROXY_MAX_CONCURRENCY=64 \
+    IMESSAGE_PROXY_READ_TIMEOUT_SECONDS=300 \
+    IMESSAGE_PROXY_SEND_TIMEOUT_SECONDS=1 \
+    IMESSAGE_PROXY_SOCKET_TIMEOUT_SECONDS=60 \
+    run_server check-config
+  [[ "$(< "$server_environment_capture")" == \
+    "${HOME}/Library/Messages/chat.db"$'\n8\n30\n180\n10' ]] ||
+    fail 'run_server accepted ambient native configuration drift'
+
   printf '#!/usr/bin/env bash\nexit 0\n' > "$SERVER_BIN"
   chmod 700 "$SERVER_BIN"
   bootstrap_capture="$temporary/bootstrap.args"
@@ -328,6 +389,223 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
   assert_contains '<45>' "$bootstrap_capture"
   : > "$DATABASE_PATH"
   chmod 600 "$DATABASE_PATH"
+
+  bootstrap_token="imp_$(printf 'a%.0s' {1..43})"
+  (
+    bootstrap_log="$temporary/bootstrap-sequence.log"
+    bootstrap_stderr="$temporary/bootstrap-sequence.stderr"
+    : > "$bootstrap_log"
+    load_service_config() {
+      printf '%s\n' config >> "$bootstrap_log"
+      export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no
+    }
+    require_bootstrap_tty() { :; }
+    doctor() { printf '%s\n' doctor >> "$bootstrap_log"; }
+    prepare() { printf '%s\n' prepare >> "$bootstrap_log"; }
+    build_host() { printf '%s\n' build-host >> "$bootstrap_log"; }
+    acknowledge_full_disk_access() { printf '%s\n' full-disk-access >> "$bootstrap_log"; }
+    initialize_database() { printf '%s\n' initialize-database >> "$bootstrap_log"; }
+    check_messages_read_path() { printf '%s\n' messages-read >> "$bootstrap_log"; }
+    check_bootstrap_eligibility() { printf '%s\n' bootstrap-preflight >> "$bootstrap_log"; }
+    check_host() { printf '%s\n' check-host >> "$bootstrap_log"; }
+    server_install() { printf '%s\n' server-install >> "$bootstrap_log"; }
+    edge_install() { printf '%s\n' edge-install >> "$bootstrap_log"; }
+    api_key_bootstrap() {
+      printf 'key %s\n' "$*" >> "$bootstrap_log"
+      printf '%s\n' "$bootstrap_token"
+    }
+    output="$(bootstrap --config /private/service.env --admin-name first-admin \
+      --expires-in-days 14 2> "$bootstrap_stderr")"
+    [[ "$output" == "$bootstrap_token" ]] || fail 'bootstrap stdout was not exactly the first key'
+    [[ "$(< "$bootstrap_log")" == \
+      $'config\ndoctor\nprepare\nbuild-host\nfull-disk-access\ninitialize-database\nbootstrap-preflight\ncheck-host\nmessages-read\nserver-install\nkey bootstrap-admin --name first-admin --expires-in-days 14' ]] ||
+      fail 'bootstrap lifecycle order or final key operation changed'
+    assert_not_contains 'edge-install' "$bootstrap_log"
+    assert_not_contains "$bootstrap_token" "$bootstrap_stderr"
+    assert_contains 'Progress is sent to stderr; the key is stdout only.' "$bootstrap_stderr"
+  )
+  (
+    bootstrap_log="$temporary/bootstrap-public-sequence.log"
+    : > "$bootstrap_log"
+    load_service_config() { export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=yes; }
+    require_bootstrap_tty() { :; }
+    doctor() { printf '%s\n' doctor >> "$bootstrap_log"; }
+    prepare() { printf '%s\n' prepare >> "$bootstrap_log"; }
+    build_host() { printf '%s\n' build-host >> "$bootstrap_log"; }
+    acknowledge_full_disk_access() { printf '%s\n' full-disk-access >> "$bootstrap_log"; }
+    initialize_database() { printf '%s\n' initialize-database >> "$bootstrap_log"; }
+    check_messages_read_path() { printf '%s\n' messages-read >> "$bootstrap_log"; }
+    check_bootstrap_eligibility() { printf '%s\n' bootstrap-preflight >> "$bootstrap_log"; }
+    check_host() { printf '%s\n' check-host >> "$bootstrap_log"; }
+    server_install() { printf '%s\n' server-install >> "$bootstrap_log"; }
+    edge_install() {
+      [[ "$1" == 'EXPOSE IMESSAGE PROXY PUBLICLY' ]] || fail 'public bootstrap changed confirmation'
+      printf '%s\n' edge-install >> "$bootstrap_log"
+    }
+    api_key_bootstrap() {
+      printf '%s\n' key >> "$bootstrap_log"
+      printf '%s\n' "$bootstrap_token"
+    }
+    output="$(bootstrap --config /private/service.env --admin-name first-admin --public \
+      --confirm 'EXPOSE IMESSAGE PROXY PUBLICLY' 2> "$temporary/bootstrap-public.stderr")"
+    [[ "$output" == "$bootstrap_token" ]] || fail 'public bootstrap did not return exactly the key'
+    [[ "$(< "$bootstrap_log")" == \
+      $'doctor\nprepare\nbuild-host\nfull-disk-access\ninitialize-database\nbootstrap-preflight\ncheck-host\nmessages-read\nserver-install\nedge-install\nkey' ]] ||
+      fail 'public bootstrap lifecycle order or final key operation changed'
+  )
+  (
+    bootstrap_log="$temporary/bootstrap-failure-sequence.log"
+    : > "$bootstrap_log"
+    load_service_config() { export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no; }
+    require_bootstrap_tty() { :; }
+    doctor() { :; }
+    prepare() { :; }
+    build_host() { false; fail 'errexit ignored an internal build failure'; }
+    acknowledge_full_disk_access() { fail 'bootstrap continued after build failure'; }
+    api_key_bootstrap() { fail 'bootstrap created a key after build failure'; }
+    set +e
+    (
+      set -e
+      bootstrap --config /private/service.env --admin-name first-admin
+    ) > "$temporary/bootstrap-failure.stdout" 2> "$temporary/bootstrap-failure.stderr"
+    bootstrap_status=$?
+    set -e
+    [[ "$bootstrap_status" -ne 0 ]] || fail 'bootstrap accepted a pre-key lifecycle failure'
+    [[ ! -s "$temporary/bootstrap-failure.stdout" ]] ||
+      fail 'failed bootstrap wrote secret-like stdout'
+  )
+  (
+    bootstrap_log="$temporary/bootstrap-read-preflight-failure.log"
+    : > "$bootstrap_log"
+    load_service_config() { export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no; }
+    require_bootstrap_tty() { :; }
+    doctor() { :; }
+    prepare() { :; }
+    build_host() { :; }
+    acknowledge_full_disk_access() { :; }
+    initialize_database() { printf '%s\n' initialize-database >> "$bootstrap_log"; }
+    check_bootstrap_eligibility() { printf '%s\n' bootstrap-preflight >> "$bootstrap_log"; }
+    check_host() { printf '%s\n' check-host >> "$bootstrap_log"; }
+    check_messages_read_path() {
+      printf '%s\n' messages-read >> "$bootstrap_log"
+      return 29
+    }
+    server_install() { fail 'bootstrap installed the server after a failed Messages read preflight'; }
+    api_key_bootstrap() { fail 'bootstrap created a key after a failed Messages read preflight'; }
+    set +e
+    (
+      set -e
+      bootstrap --config /private/service.env --admin-name first-admin
+    ) > "$temporary/bootstrap-read-preflight-failure.stdout" \
+      2> "$temporary/bootstrap-read-preflight-failure.stderr"
+    bootstrap_status=$?
+    set -e
+    [[ "$bootstrap_status" -eq 29 ]] ||
+      fail 'bootstrap did not preserve the Messages read-preflight failure status'
+    [[ ! -s "$temporary/bootstrap-read-preflight-failure.stdout" ]] ||
+      fail 'failed Messages read preflight wrote secret-like stdout'
+    [[ "$(< "$bootstrap_log")" == \
+      $'initialize-database\nbootstrap-preflight\ncheck-host\nmessages-read' ]] ||
+      fail 'bootstrap continued after the Messages read preflight failed'
+  )
+  (
+    mutation_log="$temporary/bootstrap-invalid-mutation.log"
+    : > "$mutation_log"
+    load_service_config() { printf '%s\n' mutated >> "$mutation_log"; }
+    for invalid_request in \
+      '--admin-name|   |--expires-in-days|30' \
+      '--admin-name|administrator|--expires-in-days|0' \
+      '--admin-name|administrator|--expires-in-days|366'; do
+      IFS='|' read -r name_flag name expiry_flag expiry <<< "$invalid_request"
+      expect_failure '--' bootstrap --config /private/service.env \
+        "$name_flag" "$name" "$expiry_flag" "$expiry"
+    done
+    long_admin_name="$(printf 'a%.0s' {1..81})"
+    expect_failure '--admin-name must contain' bootstrap --config /private/service.env \
+      --admin-name "$long_admin_name"
+    for invalid_admin_name in \
+      "administrator$(printf '\302\240')" \
+      "administrator$(printf '\302\205')" \
+      "administrator$(printf '\377')"; do
+      expect_failure 'printable ASCII' bootstrap --config /private/service.env \
+        --admin-name "$invalid_admin_name"
+    done
+    [[ ! -s "$mutation_log" ]] || fail 'invalid bootstrap arguments reached config or lifecycle work'
+  )
+  (
+    mutation_log="$temporary/bootstrap-no-tty-mutation.log"
+    : > "$mutation_log"
+    load_service_config() { export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no; }
+    require_bootstrap_tty() {
+      die 'bootstrap needs an interactive controlling terminal before it can change runtime state'
+    }
+    doctor() { printf '%s\n' mutated >> "$mutation_log"; }
+    expect_failure 'interactive controlling terminal' bootstrap \
+      --config /private/service.env --admin-name first-admin
+    [[ ! -s "$mutation_log" ]] || fail 'noninteractive bootstrap reached lifecycle work'
+  )
+  (
+    rollback_log="$temporary/bootstrap-key-failure-rollback.log"
+    : > "$rollback_log"
+    load_service_config() { export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=yes; }
+    require_bootstrap_tty() { :; }
+    doctor() { :; }
+    prepare() { :; }
+    build_host() { :; }
+    acknowledge_full_disk_access() { :; }
+    initialize_database() { :; }
+    check_messages_read_path() { :; }
+    check_bootstrap_eligibility() { :; }
+    check_host() { :; }
+    server_install() { :; }
+    edge_install() { :; }
+    api_key_bootstrap() { return 9; }
+    bootstrap_invoke_self() { printf '%s\n' "$*" >> "$rollback_log"; }
+    set +e
+    (
+      set -e
+      bootstrap --config /private/service.env --admin-name first-admin --public \
+        --confirm 'EXPOSE IMESSAGE PROXY PUBLICLY'
+    ) > "$temporary/bootstrap-key-failure.stdout" 2> "$temporary/bootstrap-key-failure.stderr"
+    bootstrap_status=$?
+    set -e
+    [[ "$bootstrap_status" -eq 9 ]] || fail 'bootstrap did not preserve final key failure status'
+    [[ ! -s "$temporary/bootstrap-key-failure.stdout" ]] ||
+      fail 'failed final key creation wrote stdout'
+    [[ "$(< "$rollback_log")" == $'edge-stop\nserver-stop --confirm STOP IMESSAGE PROXY SERVER' ]] ||
+      fail 'bootstrap did not contain edge then server after final key failure'
+  )
+  (
+    rollback_log="$temporary/bootstrap-server-install-failure-rollback.log"
+    : > "$rollback_log"
+    load_service_config() { export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no; }
+    require_bootstrap_tty() { :; }
+    doctor() { :; }
+    prepare() { :; }
+    build_host() { :; }
+    acknowledge_full_disk_access() { :; }
+    initialize_database() { :; }
+    check_messages_read_path() { :; }
+    check_bootstrap_eligibility() { :; }
+    check_host() { :; }
+    server_install() { return 23; }
+    api_key_bootstrap() { fail 'bootstrap created a key after server-install failure'; }
+    bootstrap_invoke_self() { printf '%s\n' "$*" >> "$rollback_log"; }
+    set +e
+    (
+      set -e
+      bootstrap --config /private/service.env --admin-name first-admin
+    ) > "$temporary/bootstrap-server-install-failure.stdout" \
+      2> "$temporary/bootstrap-server-install-failure.stderr"
+    bootstrap_status=$?
+    set -e
+    [[ "$bootstrap_status" -eq 23 ]] ||
+      fail 'bootstrap did not preserve server-install failure status'
+    [[ "$(< "$rollback_log")" == 'server-stop --confirm STOP IMESSAGE PROXY SERVER' ]] ||
+      fail 'bootstrap did not contain a possibly loaded server after install failure'
+  )
+  expect_failure "public bootstrap requires --confirm 'EXPOSE IMESSAGE PROXY PUBLICLY'" \
+    bootstrap --config /private/service.env --admin-name first-admin --public
 
   (
     render_server_agent_to() { printf '%s\n' 'new server definition' > "$1"; }
@@ -379,6 +657,45 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     fail 'launchctl_snapshot left a diagnostic temporary file behind'
   fi
 
+  (
+    lsof() {
+      printf '%s\n' p123 f7u "n$SOCKET_PATH"
+    }
+    server_socket_owned_by_pid 123 || fail 'the exact server Unix socket was not attributed to its PID'
+    lsof() {
+      printf '%s\n' p123 f7u "n${SOCKET_PATH}.stale"
+    }
+    ! server_socket_owned_by_pid 123 || fail 'a different Unix socket was attributed to the server PID'
+  )
+  (
+    service_pid() { printf '%s\n' 123; }
+    service_running() { :; }
+    server_socket_owned_by_pid() { [[ "$1" == 123 ]]; }
+    socket_ready() { :; }
+    server_ready || fail 'a stable LaunchAgent PID owning the ready socket was rejected'
+  )
+  (
+    service_pid() { return 1; }
+    socket_ready() { :; }
+    ! server_ready || fail 'a ready stale socket without a LaunchAgent PID was accepted'
+  )
+  (
+    pid_state="$temporary/server-ready-pid-state"
+    : > "$pid_state"
+    service_pid() {
+      if [[ -s "$pid_state" ]]; then
+        printf '%s\n' 124
+      else
+        printf '%s\n' changed > "$pid_state"
+        printf '%s\n' 123
+      fi
+    }
+    service_running() { :; }
+    server_socket_owned_by_pid() { :; }
+    socket_ready() { :; }
+    ! server_ready || fail 'a changing LaunchAgent PID was accepted as ready'
+  )
+
   lifecycle_call_log=/dev/null
   mock_bootstrap=ok
   mock_bootout=ok
@@ -407,6 +724,7 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     }
     prepare_edge_log() { :; }
     socket_ready() { return 0; }
+    server_ready() { return 0; }
     wait_for_socket() { return 0; }
     wait_for_socket_absent() { return 0; }
     wait_for_service_absent() { return 0; }
@@ -434,6 +752,15 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     expect_failure 'installed native LaunchAgent is stale' server_start
     [[ ! -s "$lifecycle_call_log" ]] ||
       fail 'server-start called launchctl for an installed plist drift'
+  )
+  (
+    setup_lifecycle_prerequisites
+    reset_lifecycle_case server-stop-absent
+    server_loaded() { return 1; }
+    server_stop 'STOP IMESSAGE PROXY SERVER' > "$temporary/server-stop-absent.out"
+    assert_contains "disable gui/$(id -u)/$SERVER_LABEL" "$lifecycle_call_log"
+    assert_not_contains 'bootout ' "$lifecycle_call_log"
+    assert_contains 'already stopped' "$temporary/server-stop-absent.out"
   )
   (
     setup_lifecycle_prerequisites

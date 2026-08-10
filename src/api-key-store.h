@@ -106,10 +106,18 @@ typedef NS_ENUM(NSInteger, IMPAuditPhase) {
                                 error:(NSError *_Nullable *_Nullable)error NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
 
-/// Returns the plaintext key exactly once under IMPAPIKeyCreationTokenKey.
-- (nullable NSDictionary<NSString *, id> *)bootstrapAdminNamed:(NSString *)name
-                                                   expiresDays:(NSUInteger)expiresDays
-                                                         error:(NSError *_Nullable *_Nullable)error;
+/// Performs a read-only eligibility check for the one-time administrator bootstrap.
+/// The actual bootstrap repeats these checks atomically before creating a credential.
+- (BOOL)checkBootstrapAdminNamed:(NSString *)name
+                     expiresDays:(NSUInteger)expiresDays
+                           error:(NSError *_Nullable *_Nullable)error;
+
+/// Creates the initial administrator inside one write transaction. The plaintext token is
+/// supplied synchronously to deliverToken exactly once; delivery must succeed before commit.
+- (nullable IMPAPIKeyRecord *)bootstrapAdminNamed:(NSString *)name
+                                      expiresDays:(NSUInteger)expiresDays
+                                     deliverToken:(BOOL (^)(NSString *token))deliverToken
+                                            error:(NSError *_Nullable *_Nullable)error;
 
 /// Returns { IMPAPIKeyCreationRecordKey: IMPAPIKeyRecord,
 ///           IMPAPIKeyCreationTokenKey: NSString }. Only the SHA-256 key hash is persisted.

@@ -157,15 +157,81 @@ Both configured ports must be distinct unprivileged host ports in
 `1024-65535`; the standard public ports stay on the external side of the router.
 
 The hostname must already be the deliberate public name even while the exposure
-gate remains `no`. Load values without printing them:
+gate remains `no`. Do not source this file for the one-command path. Bootstrap
+parses it as data and never executes its contents.
+
+### One-command first run
+
+The lifecycle CLI can perform sections 5–9 as one reviewed operation. It parses
+the configuration as a closed `KEY=VALUE` format without executing it; the file
+must be a private, current-user-owned regular file with exactly one hard link.
+Unknown, duplicate, missing, or empty values fail before lifecycle work.
+
+```bash
+imessage-proxy bootstrap \
+  --config "$HOME/.config/imessage-proxy/service.env" \
+  --admin-name local-bootstrap \
+  --expires-in-days 30
+```
+
+The sequence is fixed: `doctor`, `prepare`, `build-host`, the interactive Full
+Disk Access checkpoint, database initialization/validation, read-only bootstrap
+eligibility preflight, `check-host`, a bounded Messages read smoke test,
+`server-install`, and finally first-administrator creation. The native server
+repeats the same read preflight from its actual LaunchAgent context before it
+creates the Unix socket; therefore socket readiness proves the pinned
+`imsg chats --limit 1` path works for the installed service identity. Returned
+chat data is parsed against the public DTO and discarded. Neither read can send
+a message or trigger Automation.
+
+The bootstrap-only administrator label is restricted to 1–80 printable ASCII
+bytes without leading or trailing spaces, allowing exact fail-fast validation
+before any lifecycle work. API-created key names retain the documented Unicode
+contract. The final bootstrap operation is the only one that writes to standard
+output. On success, stdout is exactly one line containing the new `imp_…` key;
+every path, check, warning, and progress message goes to stderr. Put the key
+directly in a password manager. Do not use shell command substitution if the
+terminal or automation system records output. Treat a printed candidate as valid
+only when bootstrap exits with status zero. Token delivery occurs inside the
+database transaction; a delivery failure rolls back without creating an
+administrator, while a later commit failure can leave a printed but deliberately
+unusable candidate and a clean retry path.
+
+The checkpoint cannot grant TCC permission automatically. It prints the exact
+new binary path, waits while an operator grants that binary Full Disk Access in
+System Settings, and continues only after the exact acknowledgement is typed.
+Messages Automation remains an intentional first-send prompt.
+
+To include section 10 and make the console/API reachable at the reviewed public
+origin, first complete the pre-start portion of the
+[public exposure gate](#public-exposure-gate), prepare every immediate acceptance
+test, set `IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=yes` in the private file, and run:
+
+```bash
+imessage-proxy bootstrap \
+  --config "$HOME/.config/imessage-proxy/service.env" \
+  --admin-name local-bootstrap \
+  --expires-in-days 30 \
+  --public \
+  --confirm 'EXPOSE IMESSAGE PROXY PUBLICLY'
+```
+
+The public edge must become ready before the key is created. Without `--public`,
+the config gate must be `no` and the command leaves the edge stopped. Bootstrap
+does not create DNS, router/NAT, firewall, certificate exceptions, SIP changes,
+or TCC database changes. The numbered manual procedure below remains the
+authoritative recovery and verification path.
+
+## 5. Verify host prerequisites
+
+The numbered sections below are the manual lifecycle path. Load the reviewed
+private configuration without printing its values:
 
 ```bash
 set -a
 . "$HOME/.config/imessage-proxy/service.env"
 set +a
 ```
-
-## 5. Verify host prerequisites
 
 Run as the non-root GUI user signed in to Messages:
 
@@ -318,29 +384,39 @@ differs.
 
 ## Public exposure gate
 
-Keep `IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no` until every item is complete and
-recorded:
+Keep `IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no` until every pre-start item is
+complete and recorded:
 
 - [ ] A real dedicated hostname has exactly the intended IPv4 `A` path and no
   `AAAA` record.
 - [ ] External TCP 80 maps exactly to the configured Mac IPv4 HTTP port.
 - [ ] External TCP 443 maps exactly to the configured Mac IPv4 HTTPS port.
 - [ ] Router, host firewall, upstream ISP, and any carrier-grade NAT behavior are
-  understood and tested from outside the local network.
+  understood; the exact external test path is ready.
 - [ ] No unrelated process owns either configured host port.
 - [ ] The exact `imsg 0.13.4` and Caddy 2.11.4 executables and SHA-256 digests
   were reviewed.
-- [ ] Caddy runs as the GUI user without root, Full Disk Access, or Automation.
-- [ ] The native process owns one private Unix socket and no TCP listener.
-- [ ] The bootstrap key is stored and a second administrator can be created.
+- [ ] Caddy will run as the GUI user without root, Full Disk Access, or
+  Automation.
 - [ ] Missing, invalid, expired, revoked, and under-scoped key tests are prepared.
 - [ ] Exact-target rejection and one harmless send are prepared.
 - [ ] Rate, body, header, and timeout tests are prepared.
-- [ ] The operator can run `edge-stop` locally and prove the launchd label stays
-  disabled across login/reboot without deleting state.
-- [ ] Server/edge restarts, login, reboot, sleep/wake, and address changes were
-  exercised on the real target Mac.
+- [ ] The operator has local recovery access and the exact `edge-stop` command
+  ready.
 - [ ] The maintenance window, recovery owner, and stop criteria are active.
+
+Immediately after the edge starts, complete and record every runtime acceptance
+item below. Stop the edge at the first failure:
+
+- [ ] The native process owns one private Unix socket and no TCP listener.
+- [ ] The bootstrap key is stored and a second administrator can be created.
+- [ ] External TLS, static console, authentication, scopes, and every intended
+  network path pass while unintended paths remain closed.
+- [ ] Exact-target rejection and one harmless send pass without SMS fallback.
+- [ ] Rate, body, header, and timeout bounds pass.
+- [ ] `edge-stop` disables the label across login/reboot without deleting state.
+- [ ] Server/edge restarts, login, reboot, sleep/wake, and address changes pass on
+  the real target Mac.
 
 Do not add a CDN, tunnel, upstream proxy, alternate TLS terminator, or public IPv6
 path as a shortcut. Each changes trusted source addresses, certificate ownership,
