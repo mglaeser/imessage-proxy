@@ -43,7 +43,7 @@ without creating a useful security boundary for this service.
 | Native server | Same GUI user LaunchAgent | HTTP parsing, API-key auth/scopes, rate limits, adapters, normalization, audit | Owns the private socket and is the only service process granted Messages permissions |
 | SQLite file | User-owned private state | Key hashes, scopes, expiry/revocation, audit metadata, send idempotency | Contains no plaintext API keys or message content |
 | Staged `imsg 0.13.4` | Child of native server | Reviewed local reads and normal AppleScript text sends | Exact executable is SHA-256-pinned before use; callers cannot choose commands or database paths |
-| Browser console | Static same-origin files | Status and key lifecycle | Keeps a credential only in the current tab's `sessionStorage` |
+| Browser console | Static same-origin files | Status, typed endpoint playground, and key lifecycle | Keeps a credential and pending send idempotency state only in the current tab |
 
 Caddy and the native server share one Unix user and therefore one ordinary
 filesystem/account boundary. The Unix socket prevents the REST server from

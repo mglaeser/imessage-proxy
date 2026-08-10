@@ -14,7 +14,12 @@ and operational model described below.
   expiry, immediate revocation, final-administrator protection, and local bootstrap.
 - Durable send idempotency with explicit accepted, failed, and ambiguous outcomes.
 - Privacy-preserving audit metadata and bounded source/key-aware rate limiting.
-- A dependency-free same-origin status and API-key console.
+- A dependency-free same-origin console with service overview, a typed API
+  playground, intentional-send confirmation/idempotency, and API-key lifecycle.
+- A one-command bootstrap that validates and starts the reviewed native topology,
+  keeps public exposure behind two explicit gates, rolls back newly started
+  services on failure, proves the Messages read path both directly and from the
+  LaunchAgent, and emits only the first administrator key on stdout.
 - Public ACME HTTPS through a pinned host-native Caddy 2.11.4 executable.
 - Direct Caddy-to-server forwarding through one private host Unix socket.
 - Exact `imsg 0.13.4` enforcement and fixed, shell-free command adapters.

@@ -24,6 +24,8 @@
 		<string>__IMSG_SHA256__</string>
 		<key>IMESSAGE_PROXY_MAX_CONCURRENCY</key>
 		<string>8</string>
+		<key>IMESSAGE_PROXY_MESSAGES_DATABASE_PATH</key>
+		<string>__MESSAGES_DATABASE_PATH__</string>
 		<key>IMESSAGE_PROXY_PUBLIC_ORIGIN</key>
 		<string>__PUBLIC_ORIGIN__</string>
 		<key>IMESSAGE_PROXY_READ_TIMEOUT_SECONDS</key>

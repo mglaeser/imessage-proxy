@@ -78,6 +78,13 @@ The plaintext is returned exactly once. The database stores only its 32-byte
 SHA-256 digest, a safe display prefix, metadata, expiry/revocation timestamps, and
 scopes.
 
+For the first local administrator, creation and checked stdout delivery share one
+`BEGIN IMMEDIATE` transaction. The row commits only after the complete token and
+newline reach the output descriptor. Broken pipes, file-size-limit signals, and
+partial writes are handled as errors and roll the row back, so an undisclosed
+active administrator cannot block a retry. A commit failure after successful
+output instead leaves the printed candidate unusable and no active row.
+
 - Create a distinct key for each client and environment.
 - Grant only `messages:read`, `messages:send`, or `admin` as needed.
 - Prefer 30-90 day expiries; remote creation is capped at 365 days.
@@ -162,14 +169,24 @@ unbounded LaunchAgent file. Review and redact all operational logs before sharin
 ## Browser console
 
 The console is public static content with no privileged data embedded. All data
-requests still require the key entered by the operator.
+requests still require the key entered by the operator. Its API playground is a
+curated same-origin client, not a generic URL, header, or command runner.
 
 - The key is kept only in `sessionStorage` and cleared on logout or `401`.
 - Logout invalidates and aborts the current request generation, then clears
-  rendered key/status data so late responses cannot repopulate a signed-out page.
+  rendered key/status/request/response data so late responses cannot repopulate
+  a signed-out page.
 - It is never placed in a cookie, URL, form action, persistent browser storage,
   external service, or automatically copied to the clipboard.
-- User-controlled names are inserted with `textContent`, never HTML parsing.
+- Endpoint selection maps through a fixed operation table. Paths, query strings,
+  bodies, and the send idempotency header are constructed by typed builders;
+  users cannot supply an arbitrary URL, method, authorization value, or header.
+- Intentional sends require a separate confirmation. A transport-failed retry of
+  an unchanged body reuses the same in-memory idempotency value; editing the body
+  creates a new logical attempt, and no retry is automatic.
+- User-controlled names and bounded JSON responses are inserted with
+  `textContent`, never HTML parsing. Full responses are not live-announced to
+  assistive technology; only concise completion state is announced.
 - Newly created keys are cleared from memory and the document when the one-time
   reveal is dismissed.
 - The page loads no third-party scripts, fonts, images, frames, analytics, or
@@ -184,23 +201,31 @@ allowance.
 
 ## Public exposure
 
-Public mode is opt-in and refuses example/private hostnames. Before enabling it:
+Public mode is opt-in and refuses example/private hostnames. Before enabling the
+gate, complete the hostname, routing, firewall, and dependency facts below and
+prepare every runtime acceptance test:
 
 1. dedicate a hostname used only by this service;
 2. prove its IPv4 `A` record resolves to the intended ingress and publish no
    `AAAA` record;
 3. map external TCP 80/443 exactly to the configured Mac IPv4 TCP 8080/8443 (or
    the reviewed replacement high ports);
-4. restrict the router and host firewall to that path and prove the native socket
-   is not a network listener;
-5. verify public ACME issuance without disabling certificate validation;
+4. restrict the router and host firewall to that path and prepare the proof that
+   the native socket is not a network listener;
+5. prepare normal public ACME issuance without any certificate-validation bypass;
 6. verify the exact `imsg 0.13.4` and Caddy 2.11.4 executables and independent
    SHA-256 digests;
-7. bootstrap a short-lived administrator locally and rotate it through the UI;
+7. bootstrap a short-lived administrator locally and rotate it through the UI
+   (the one-command public bootstrap performs the first creation last);
 8. test missing, invalid, expired, revoked, and under-scoped keys from outside;
 9. test target denial and one harmless consented send;
 10. exercise rate limits and body/header caps; and
 11. complete the real-Mac restart and rollback matrix during a maintenance window.
+
+The runtime portions of items 4–5 and all of items 7–11 are immediate post-start
+acceptance for a one-command fresh public bootstrap. Stop the edge at the first
+failure. In the manual lifecycle, complete the local bootstrap and native checks
+before starting Caddy.
 
 `edge-stop` disables the exact launchd label before unloading it, so the edge
 stays stopped across login and reboot even though its plist and certificate state

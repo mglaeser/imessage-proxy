@@ -87,14 +87,17 @@ test: test-ui ## Run UI behavior plus native-server and lifecycle tests (macOS o
 	bash tests/test-imessage-proxy-server.sh
 	bash tests/test-imessage-proxy-cli.sh
 
-test-ui: ## Run dependency-free management-console behavior tests.
-	@command -v node >/dev/null 2>&1 || { printf 'error: Node.js is required\n' >&2; exit 127; }
+test-ui: _require-node ## Run dependency-free management-console behavior tests.
 	node --test tests/test-web-ui.mjs
 
-lint: ## Check Objective-C, shell, Markdown, JavaScript, and configuration files.
+.PHONY: _require-node
+_require-node:
+	@command -v node >/dev/null 2>&1 || { printf 'error: Node.js is required\n' >&2; exit 127; }
+	@node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major !== 22 || minor < 12) { console.error(`error: Node.js >=22.12.0 <23 is required; found $${process.versions.node}`); process.exit(1); }'
+
+lint: _require-node ## Check Objective-C, shell, Markdown, JavaScript, and configuration files.
 	@command -v clang-format >/dev/null 2>&1 || { printf 'error: clang-format is required\n' >&2; exit 127; }
 	@command -v shellcheck >/dev/null 2>&1 || { printf 'error: shellcheck is required\n' >&2; exit 127; }
-	@command -v node >/dev/null 2>&1 || { printf 'error: Node.js is required\n' >&2; exit 127; }
 	@command -v npm >/dev/null 2>&1 || { printf 'error: npm is required\n' >&2; exit 127; }
 	@test -x node_modules/.bin/markdownlint-cli2 && test -x node_modules/.bin/redocly || { \
 		printf 'error: run npm ci --ignore-scripts --no-audit --no-fund to install locked validation tools\n' >&2; exit 127; }

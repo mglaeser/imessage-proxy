@@ -108,6 +108,8 @@ static const NSTimeInterval kIMPLastUsedWriteInterval = 5.0 * 60.0;
 }
 - (BOOL)configureAndValidateDatabase:(NSError **)error;
 - (BOOL)verifySchema:(NSError **)error;
+- (BOOL)validateNoActiveAdminLockedAtDate:(NSDate *)date error:(NSError **)error;
+- (BOOL)ensureKeyCapacityLockedAtDate:(NSDate *)date pruneIfNeeded:(BOOL)pruneIfNeeded error:(NSError **)error;
 - (nullable NSDictionary<NSString *, id> *)createKeyLockedNamed:(NSString *)name
                                                          scopes:(NSArray<IMPAPIKeyScope> *)scopes
                                                       expiresAt:(nullable NSDate *)expiresAt
@@ -395,8 +397,19 @@ static BOOL IMPValidateName(NSString *name, NSString **normalizedName, NSError *
         IMPSetError(error, IMPAPIKeyStoreErrorInvalidArgument, @"The API key name is invalid.");
         return NO;
     }
-    *normalizedName = trimmed;
+    if (normalizedName != NULL) {
+        *normalizedName = trimmed;
+    }
     return YES;
+}
+
+static BOOL IMPValidateBootstrapArguments(NSString *name, NSUInteger expiresDays, NSString **normalizedName,
+                                          NSError **error) {
+    if (expiresDays < 1 || expiresDays > 365) {
+        IMPSetError(error, IMPAPIKeyStoreErrorInvalidArgument, @"The API key expiry is invalid.");
+        return NO;
+    }
+    return IMPValidateName(name, normalizedName, error);
 }
 
 static BOOL IMPValidateUUID(NSString *uuid, NSError **error) {
@@ -1060,25 +1073,7 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
     return YES;
 }
 
-- (NSDictionary<NSString *, id> *)bootstrapAdminNamed:(NSString *)name
-                                          expiresDays:(NSUInteger)expiresDays
-                                                error:(NSError **)error {
-    if (expiresDays < 1 || expiresDays > 365) {
-        IMPSetError(error, IMPAPIKeyStoreErrorInvalidArgument, @"The API key expiry is invalid.");
-        return nil;
-    }
-    NSString *normalizedName = nil;
-    if (!IMPValidateName(name, &normalizedName, error)) {
-        return nil;
-    }
-    NSDate *expiresAt = [NSDate dateWithTimeIntervalSinceNow:(NSTimeInterval)expiresDays * 24.0 * 60.0 * 60.0];
-
-    [_lock lock];
-    NSDictionary<NSString *, id> *creation = nil;
-    if (!IMPBegin(_database, error)) {
-        [_lock unlock];
-        return nil;
-    }
+- (BOOL)validateNoActiveAdminLockedAtDate:(NSDate *)date error:(NSError **)error {
     sqlite3_stmt *statement = NULL;
     BOOL ok = IMPPrepare(_database,
                          "SELECT count(*) FROM api_keys WHERE revoked_at IS NULL "
@@ -1086,16 +1081,16 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
                          "AND instr(','||scopes||',', ',admin,')>0",
                          &statement, error);
     if (ok) {
-        ok = IMPBindInteger(statement, 1, IMPMillisecondsForDate(NSDate.date), error);
-        if (ok) {
-            int result = sqlite3_step(statement);
-            if (result != SQLITE_ROW) {
-                ok = IMPSetSQLiteError(error, result);
-            } else if (sqlite3_column_int64(statement, 0) > 0) {
-                IMPSetError(error, IMPAPIKeyStoreErrorActiveAdminExists,
-                            @"An active administrator API key already exists.");
-                ok = NO;
-            }
+        ok = IMPBindInteger(statement, 1, IMPMillisecondsForDate(date), error);
+    }
+    if (ok) {
+        int result = sqlite3_step(statement);
+        if (result != SQLITE_ROW) {
+            ok = IMPSetSQLiteError(error, result);
+        } else if (sqlite3_column_int64(statement, 0) > 0) {
+            IMPSetError(error, IMPAPIKeyStoreErrorActiveAdminExists,
+                        @"An active administrator API key already exists.");
+            ok = NO;
         }
     }
     if (statement != NULL) {
@@ -1104,35 +1099,136 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
             ok = IMPSetSQLiteError(error, finalResult);
         }
     }
+    return ok;
+}
+
+- (BOOL)ensureKeyCapacityLockedAtDate:(NSDate *)date pruneIfNeeded:(BOOL)pruneIfNeeded error:(NSError **)error {
     sqlite3_int64 keyCount = 0;
-    if (ok)
-        ok = IMPScalarInteger(_database, "SELECT count(*) FROM api_keys", &keyCount, error);
-    if (ok && keyCount >= (sqlite3_int64)kIMPMaximumAPIKeys) {
+    if (!IMPScalarInteger(_database, "SELECT count(*) FROM api_keys", &keyCount, error)) {
+        return NO;
+    }
+    if (keyCount < (sqlite3_int64)kIMPMaximumAPIKeys) {
+        return YES;
+    }
+
+    if (!pruneIfNeeded) {
+        sqlite3_stmt *statement = NULL;
+        BOOL ok = IMPPrepare(_database,
+                             "SELECT count(*) FROM ("
+                             "SELECT k.uuid FROM api_keys k WHERE "
+                             "(k.revoked_at IS NOT NULL OR (k.expires_at IS NOT NULL AND k.expires_at<=?)) "
+                             "AND NOT EXISTS(SELECT 1 FROM idempotency_records i WHERE i.principal_uuid=k.uuid) "
+                             "ORDER BY COALESCE(k.revoked_at,k.expires_at,k.created_at) ASC LIMIT 100)",
+                             &statement, error);
+        if (ok) {
+            ok = IMPBindInteger(statement, 1, IMPMillisecondsForDate(date), error);
+        }
+        sqlite3_int64 removableCount = 0;
+        if (ok) {
+            int result = sqlite3_step(statement);
+            if (result != SQLITE_ROW) {
+                ok = IMPSetSQLiteError(error, result);
+            } else {
+                removableCount = sqlite3_column_int64(statement, 0);
+            }
+        }
+        if (statement != NULL) {
+            int finalResult = sqlite3_finalize(statement);
+            if (ok && finalResult != SQLITE_OK) {
+                ok = IMPSetSQLiteError(error, finalResult);
+            }
+        }
+        if (!ok) {
+            return NO;
+        }
+        sqlite3_int64 requiredCount = keyCount - (sqlite3_int64)kIMPMaximumAPIKeys + 1;
+        if (removableCount >= requiredCount) {
+            return YES;
+        }
+    } else {
         sqlite3_stmt *prune = NULL;
-        ok = IMPPrepare(_database,
-                        "DELETE FROM api_keys WHERE uuid IN ("
-                        "SELECT k.uuid FROM api_keys k WHERE "
-                        "(k.revoked_at IS NOT NULL OR (k.expires_at IS NOT NULL AND k.expires_at<=?)) "
-                        "AND NOT EXISTS(SELECT 1 FROM idempotency_records i WHERE i.principal_uuid=k.uuid) "
-                        "ORDER BY COALESCE(k.revoked_at,k.expires_at,k.created_at) ASC LIMIT 100)",
-                        &prune, error) &&
-             IMPBindInteger(prune, 1, IMPMillisecondsForDate(NSDate.date), error);
+        BOOL ok = IMPPrepare(_database,
+                             "DELETE FROM api_keys WHERE uuid IN ("
+                             "SELECT k.uuid FROM api_keys k WHERE "
+                             "(k.revoked_at IS NOT NULL OR (k.expires_at IS NOT NULL AND k.expires_at<=?)) "
+                             "AND NOT EXISTS(SELECT 1 FROM idempotency_records i WHERE i.principal_uuid=k.uuid) "
+                             "ORDER BY COALESCE(k.revoked_at,k.expires_at,k.created_at) ASC LIMIT 100)",
+                             &prune, error);
+        if (ok) {
+            ok = IMPBindInteger(prune, 1, IMPMillisecondsForDate(date), error);
+        }
         if (ok) {
             int result = sqlite3_step(prune);
-            if (result != SQLITE_DONE)
+            if (result != SQLITE_DONE) {
                 ok = IMPSetSQLiteError(error, result);
+            }
         }
         if (prune != NULL) {
             int finalResult = sqlite3_finalize(prune);
-            if (ok && finalResult != SQLITE_OK)
+            if (ok && finalResult != SQLITE_OK) {
                 ok = IMPSetSQLiteError(error, finalResult);
+            }
         }
-        if (ok)
-            ok = IMPScalarInteger(_database, "SELECT count(*) FROM api_keys", &keyCount, error);
+        if (!ok || !IMPScalarInteger(_database, "SELECT count(*) FROM api_keys", &keyCount, error)) {
+            return NO;
+        }
+        if (keyCount < (sqlite3_int64)kIMPMaximumAPIKeys) {
+            return YES;
+        }
     }
-    if (ok && keyCount >= (sqlite3_int64)kIMPMaximumAPIKeys) {
-        IMPSetError(error, IMPAPIKeyStoreErrorConflict, @"The API key retention limit has been reached.");
-        ok = NO;
+
+    IMPSetError(error, IMPAPIKeyStoreErrorConflict, @"The API key retention limit has been reached.");
+    return NO;
+}
+
+- (BOOL)checkBootstrapAdminNamed:(NSString *)name expiresDays:(NSUInteger)expiresDays error:(NSError **)error {
+    if (!IMPValidateBootstrapArguments(name, expiresDays, NULL, error)) {
+        return NO;
+    }
+
+    [_lock lock];
+    BOOL ok = IMPExecute(_database, "BEGIN", error);
+    NSDate *now = NSDate.date;
+    if (ok) {
+        ok = [self validateNoActiveAdminLockedAtDate:now error:error];
+    }
+    if (ok) {
+        ok = [self ensureKeyCapacityLockedAtDate:now pruneIfNeeded:NO error:error];
+    }
+    if (ok) {
+        ok = IMPCommit(_database, error);
+    }
+    if (!ok) {
+        IMPRollback(_database);
+    }
+    [_lock unlock];
+    return ok;
+}
+
+- (IMPAPIKeyRecord *)bootstrapAdminNamed:(NSString *)name
+                             expiresDays:(NSUInteger)expiresDays
+                            deliverToken:(BOOL (^)(NSString *token))deliverToken
+                                   error:(NSError **)error {
+    NSString *normalizedName = nil;
+    if (!IMPValidateBootstrapArguments(name, expiresDays, &normalizedName, error) || deliverToken == nil) {
+        if (deliverToken == nil && error != NULL && *error == nil) {
+            IMPSetError(error, IMPAPIKeyStoreErrorInvalidArgument, @"The bootstrap token delivery is invalid.");
+        }
+        return nil;
+    }
+    NSDate *now = NSDate.date;
+    NSDate *expiresAt = [now dateByAddingTimeInterval:(NSTimeInterval)expiresDays * 24.0 * 60.0 * 60.0];
+
+    [_lock lock];
+    NSDictionary<NSString *, id> *creation = nil;
+    IMPAPIKeyRecord *record = nil;
+    if (!IMPBegin(_database, error)) {
+        [_lock unlock];
+        return nil;
+    }
+    BOOL ok = [self validateNoActiveAdminLockedAtDate:now error:error];
+    if (ok) {
+        ok = [self ensureKeyCapacityLockedAtDate:now pruneIfNeeded:YES error:error];
     }
     if (ok) {
         creation = [self createKeyLockedNamed:normalizedName
@@ -1142,15 +1238,23 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
         ok = creation != nil;
     }
     if (ok) {
+        record = creation[IMPAPIKeyCreationRecordKey];
+        NSString *token = creation[IMPAPIKeyCreationTokenKey];
+        if (!deliverToken(token)) {
+            IMPSetError(error, IMPAPIKeyStoreErrorInvalidState, @"The bootstrap credential could not be delivered.");
+            ok = NO;
+        }
+    }
+    if (ok) {
         ok = IMPCommit(_database, error);
     }
     if (!ok) {
         IMPRollback(_database);
-        creation = nil;
+        record = nil;
     }
     IMPTightenSidecarModes(_path);
     [_lock unlock];
-    return creation;
+    return record;
 }
 
 - (NSDictionary<NSString *, id> *)createKeyNamed:(NSString *)name
@@ -1195,38 +1299,8 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
             ok = NO;
         }
     }
-    sqlite3_int64 keyCount = 0;
     if (ok) {
-        ok = IMPScalarInteger(_database, "SELECT count(*) FROM api_keys", &keyCount, error);
-    }
-    if (ok && keyCount >= (sqlite3_int64)kIMPMaximumAPIKeys) {
-        sqlite3_stmt *prune = NULL;
-        ok = IMPPrepare(_database,
-                        "DELETE FROM api_keys WHERE uuid IN ("
-                        "SELECT k.uuid FROM api_keys k WHERE "
-                        "(k.revoked_at IS NOT NULL OR (k.expires_at IS NOT NULL AND k.expires_at<=?)) "
-                        "AND NOT EXISTS(SELECT 1 FROM idempotency_records i WHERE i.principal_uuid=k.uuid) "
-                        "ORDER BY COALESCE(k.revoked_at,k.expires_at,k.created_at) ASC LIMIT 100)",
-                        &prune, error);
-        if (ok) {
-            ok = IMPBindInteger(prune, 1, IMPMillisecondsForDate(NSDate.date), error);
-        }
-        if (ok) {
-            int result = sqlite3_step(prune);
-            if (result != SQLITE_DONE)
-                ok = IMPSetSQLiteError(error, result);
-        }
-        if (prune != NULL) {
-            int finalResult = sqlite3_finalize(prune);
-            if (ok && finalResult != SQLITE_OK)
-                ok = IMPSetSQLiteError(error, finalResult);
-        }
-        if (ok)
-            ok = IMPScalarInteger(_database, "SELECT count(*) FROM api_keys", &keyCount, error);
-    }
-    if (ok && keyCount >= (sqlite3_int64)kIMPMaximumAPIKeys) {
-        IMPSetError(error, IMPAPIKeyStoreErrorConflict, @"The API key retention limit has been reached.");
-        ok = NO;
+        ok = [self ensureKeyCapacityLockedAtDate:NSDate.date pruneIfNeeded:YES error:error];
     }
     if (ok) {
         creation = [self createKeyLockedNamed:normalizedName scopes:normalizedScopes expiresAt:expiresAt error:error];

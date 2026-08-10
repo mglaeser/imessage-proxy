@@ -320,10 +320,182 @@ if run_native check-config > "$temporary/version.out" 2> "$temporary/version.err
 fi
 rm -f -- "${fake_imsg}.version"
 
-# Bootstrap reveals one key on stdout, accepts the shared 80-byte name boundary,
-# and refuses a second active administrator.
+# The bootstrap read preflight exercises the exact pinned chats command, fixed
+# Messages database, bounded parser, and public DTO projection without revealing
+# any chat data. Dependency diagnostics remain private on failure.
+[[ "$(run_native check-messages)" == ok ]]
+grep -Fq "imsg chats --limit 1 --db $messages_database_path --json" "$fake_imsg_log"
+[[ "$(sqlite3 "$database_path" 'SELECT count(*) FROM api_keys;')" == 0 ]]
+printf '%s\n' chats-failure > "${fake_imsg}.malformed"
+chmod 0600 "${fake_imsg}.malformed"
+if run_native check-messages \
+  > "$temporary/messages-preflight.out" 2> "$temporary/messages-preflight.err"; then
+  printf 'ERROR: Messages read preflight accepted a failed dependency command\n' >&2
+  exit 1
+fi
+[[ ! -s "$temporary/messages-preflight.out" ]]
+grep -Fqi 'read-path preflight failed' "$temporary/messages-preflight.err"
+if grep -Fq 'private Messages read failure detail' "$temporary/messages-preflight.err"; then
+  printf 'ERROR: Messages read preflight exposed private dependency diagnostics\n' >&2
+  exit 1
+fi
+printf '%s\n' chat > "${fake_imsg}.malformed"
+if run_native check-messages \
+  > "$temporary/messages-preflight-invalid.out" 2> "$temporary/messages-preflight-invalid.err"; then
+  printf 'ERROR: Messages read preflight accepted an invalid chat projection\n' >&2
+  exit 1
+fi
+[[ ! -s "$temporary/messages-preflight-invalid.out" ]]
+grep -Fqi 'returned invalid data' "$temporary/messages-preflight-invalid.err"
+printf '%s\n' chats-failure > "${fake_imsg}.malformed"
+if run_native serve \
+  > "$temporary/messages-startup-preflight.out" 2> "$temporary/messages-startup-preflight.err"; then
+  printf 'ERROR: native server started with an unavailable Messages read path\n' >&2
+  exit 1
+fi
+[[ ! -s "$temporary/messages-startup-preflight.out" ]]
+[[ ! -e "$socket_path" && ! -L "$socket_path" ]]
+grep -Fqi 'read-path preflight failed' "$temporary/messages-startup-preflight.err"
+if grep -Fq 'private Messages read failure detail' "$temporary/messages-startup-preflight.err"; then
+  printf 'ERROR: native-server startup exposed private dependency diagnostics\n' >&2
+  exit 1
+fi
+printf '%s\n' chats-timeout > "${fake_imsg}.malformed"
+if run_native check-messages \
+  > "$temporary/messages-preflight-timeout.out" 2> "$temporary/messages-preflight-timeout.err"; then
+  printf 'ERROR: Messages read preflight ignored its configured timeout\n' >&2
+  exit 1
+fi
+[[ ! -s "$temporary/messages-preflight-timeout.out" ]]
+grep -Fqi 'timed out' "$temporary/messages-preflight-timeout.err"
+printf '%s\n' chats-delay > "${fake_imsg}.malformed"
+start_server
+kill -0 "$server_pid"
+stop_server
+rm -f -- "${fake_imsg}.malformed"
+
+# The read-only bootstrap preflight accepts the shared trimmed 80-byte name
+# boundary and never creates or reveals a credential.
 bootstrap_name="$(printf 'b%.0s' {1..80})"
 readonly bootstrap_name
+[[ "$(run_native check-bootstrap-admin "  $bootstrap_name  " 365)" == ok ]]
+[[ "$(sqlite3 "$database_path" 'SELECT count(*) FROM api_keys;')" == 0 ]]
+
+invalid_bootstrap_name="$(printf 'n%.0s' {1..81})"
+readonly invalid_bootstrap_name
+if run_native check-bootstrap-admin "$invalid_bootstrap_name" 30 \
+  > "$temporary/bootstrap-name.out" 2> "$temporary/bootstrap-name.err"; then
+  printf 'ERROR: bootstrap preflight accepted an 81-byte name\n' >&2
+  exit 1
+fi
+[[ ! -s "$temporary/bootstrap-name.out" ]]
+grep -Fqi 'name is invalid' "$temporary/bootstrap-name.err"
+if grep -Fq "$invalid_bootstrap_name" "$temporary/bootstrap-name.err"; then
+  printf 'ERROR: bootstrap preflight reflected an invalid name\n' >&2
+  exit 1
+fi
+
+if run_native check-bootstrap-admin $'control\001name' 30 \
+  > "$temporary/bootstrap-control.out" 2> "$temporary/bootstrap-control.err"; then
+  printf 'ERROR: bootstrap preflight accepted a control character\n' >&2
+  exit 1
+fi
+[[ ! -s "$temporary/bootstrap-control.out" ]]
+grep -Fqi 'name is invalid' "$temporary/bootstrap-control.err"
+
+if run_native check-bootstrap-admin invalid-expiry 366 \
+  > "$temporary/bootstrap-preflight-expiry.out" 2> "$temporary/bootstrap-preflight-expiry.err"; then
+  printf 'ERROR: bootstrap preflight accepted an expiry beyond 365 days\n' >&2
+  exit 1
+fi
+[[ ! -s "$temporary/bootstrap-preflight-expiry.out" ]]
+grep -Fqi 'expiry is invalid' "$temporary/bootstrap-preflight-expiry.err"
+[[ "$(sqlite3 "$database_path" 'SELECT count(*) FROM api_keys;')" == 0 ]]
+
+# Capacity checks account for the same bounded stale-row cleanup as the final
+# bootstrap, but the preflight itself neither removes nor inserts rows.
+sqlite3 "$database_path" \
+  "WITH RECURSIVE sequence(value) AS (
+     VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<1000
+   )
+   INSERT INTO api_keys(uuid,name,key_prefix,key_hash,scopes,created_at)
+   SELECT printf('00000000-0000-4000-8000-%012d',value),
+          'capacity-fixture',printf('imp_%08d',value),
+          CAST(printf('%032d',value) AS BLOB),'messages:read',1000000+value
+   FROM sequence;"
+if run_native check-bootstrap-admin capacity-admin 30 \
+  > "$temporary/bootstrap-capacity.out" 2> "$temporary/bootstrap-capacity.err"; then
+  printf 'ERROR: bootstrap preflight ignored a full key store\n' >&2
+  exit 1
+fi
+[[ ! -s "$temporary/bootstrap-capacity.out" ]]
+grep -Fqi 'retention limit' "$temporary/bootstrap-capacity.err"
+[[ "$(sqlite3 "$database_path" 'SELECT count(*) FROM api_keys;')" == 1000 ]]
+sqlite3 "$database_path" \
+  "UPDATE api_keys SET revoked_at=created_at
+   WHERE uuid='00000000-0000-4000-8000-000000000001';"
+[[ "$(run_native check-bootstrap-admin capacity-admin 30)" == ok ]]
+[[ "$(sqlite3 "$database_path" 'SELECT count(*) FROM api_keys;')" == 1000 ]]
+sqlite3 "$database_path" "DELETE FROM api_keys WHERE name='capacity-fixture';"
+[[ "$(sqlite3 "$database_path" 'SELECT count(*) FROM api_keys;')" == 0 ]]
+
+# A token that cannot be written completely rolls its transaction back before
+# failure is reported, leaving unrelated keys intact and a clean retry path.
+sqlite3 "$database_path" \
+  "INSERT INTO api_keys(uuid,name,key_prefix,key_hash,scopes,created_at)
+   VALUES('11111111-1111-4111-8111-111111111111','cleanup-sentinel',
+          'imp_sentinel',zeroblob(32),'messages:read',2000000);"
+exec 9> >(:)
+closed_reader_pid="$!"
+wait "$closed_reader_pid"
+closed_pipe_status=0
+if run_native bootstrap-admin undelivered-admin 30 >&9 2> "$temporary/bootstrap-delivery.err"; then
+  exec 9>&-
+  printf 'ERROR: bootstrap accepted an undeliverable stdout token\n' >&2
+  exit 1
+else
+  closed_pipe_status="$?"
+fi
+exec 9>&-
+[[ "$closed_pipe_status" == 1 ]]
+grep -Fqi 'could not be delivered' "$temporary/bootstrap-delivery.err"
+[[ "$(sqlite3 "$database_path" \
+  "SELECT count(*) FROM api_keys WHERE revoked_at IS NULL AND instr(','||scopes||',', ',admin,')>0;")" == 0 ]]
+[[ "$(sqlite3 "$database_path" "SELECT count(*) FROM api_keys WHERE name='cleanup-sentinel';")" == 1 ]]
+[[ "$(sqlite3 "$database_path" 'SELECT count(*) FROM api_keys;')" == 1 ]]
+
+# A regular-file size limit also returns a handled failure instead of dying on
+# SIGXFSZ. The sparse output starts beyond the limit while SQLite remains below
+# it, so this exercises token delivery rather than an earlier database write.
+dd if=/dev/zero of="$temporary/bootstrap-file-limit.out" bs=1 count=1 seek=134217727 2> /dev/null
+file_limit_size="$(stat -f '%z' "$temporary/bootstrap-file-limit.out")"
+exec 7>> "$temporary/bootstrap-file-limit.out"
+exec 8> >(/bin/cat > "$temporary/bootstrap-file-limit.err")
+file_limit_reader_pid="$!"
+file_limit_status=0
+if (
+  ulimit -f 65536
+  run_native bootstrap-admin file-limit-admin 30 >&7 2>&8
+); then
+  exec 7>&-
+  exec 8>&-
+  wait "$file_limit_reader_pid"
+  printf 'ERROR: bootstrap accepted a token beyond RLIMIT_FSIZE\n' >&2
+  exit 1
+else
+  file_limit_status="$?"
+fi
+exec 7>&-
+exec 8>&-
+wait "$file_limit_reader_pid"
+[[ "$file_limit_status" == 1 ]]
+grep -Fqi 'could not be delivered' "$temporary/bootstrap-file-limit.err"
+[[ "$(stat -f '%z' "$temporary/bootstrap-file-limit.out")" == "$file_limit_size" ]]
+[[ "$(sqlite3 "$database_path" 'SELECT count(*) FROM api_keys;')" == 1 ]]
+sqlite3 "$database_path" "DELETE FROM api_keys WHERE name='cleanup-sentinel';"
+[[ "$(run_native check-bootstrap-admin retry-admin 30)" == ok ]]
+
+# Bootstrap reveals one key on stdout and refuses a second active administrator.
 if run_native bootstrap-admin invalid-expiry 366 \
   > "$temporary/bootstrap-expiry.out" 2> "$temporary/bootstrap-expiry.err"; then
   printf 'ERROR: bootstrap accepted an expiry beyond 365 days\n' >&2
@@ -337,6 +509,15 @@ if grep -Fq "$admin_key" "$bootstrap_log"; then
   printf 'ERROR: bootstrap log exposed the plaintext administrator key\n' >&2
   exit 1
 fi
+key_count_before_preflight="$(sqlite3 "$database_path" 'SELECT count(*) FROM api_keys;')"
+if run_native check-bootstrap-admin another-bootstrap 30 \
+  > "$temporary/active-admin-preflight.out" 2> "$temporary/active-admin-preflight.err"; then
+  printf 'ERROR: bootstrap preflight ignored an active administrator\n' >&2
+  exit 1
+fi
+[[ ! -s "$temporary/active-admin-preflight.out" ]]
+grep -Fqi 'active administrator' "$temporary/active-admin-preflight.err"
+[[ "$(sqlite3 "$database_path" 'SELECT count(*) FROM api_keys;')" == "$key_count_before_preflight" ]]
 if run_native bootstrap-admin second-bootstrap 30 \
   > "$temporary/second-bootstrap.out" 2> "$temporary/second-bootstrap.err"; then
   printf 'ERROR: second administrator bootstrap unexpectedly succeeded\n' >&2
@@ -631,6 +812,18 @@ grep -Fq '"byte_size":123' "$response_body"
 history_body="$(< "$response_body")"
 [[ "$history_body" == *'"guid":"message-guid-100"'*'"guid":"message-guid-101"'* ]]
 assert_no_private_fields
+
+# imsg 0.13.4 emits empty strings when an attachment has no stored or transfer name.
+# Every missing form in the public contract projects to an explicit JSON null.
+printf '%s\n' missing-attachment-filenames > "${fake_imsg}.malformed"
+chmod 0600 "${fake_imsg}.malformed"
+status="$(request '/api/chats/42/messages?limit=1' --header "Authorization: Bearer $read_key")"
+assert_status 200 "$status"
+grep -Fq '"byte_size":0,"filename":null,"is_sticker":false,"mime_type":"","uti":""' \
+  "$response_body"
+[[ "$(grep -oF '"filename":null' "$response_body" | wc -l | tr -d ' ')" == 3 ]]
+assert_no_private_fields
+rm -f -- "${fake_imsg}.malformed"
 
 history_count_before="$(grep -c '^imsg history ' "$fake_imsg_log")"
 for invalid_history_path in \
