@@ -250,17 +250,35 @@ static BOOL IsPrivateRegularFile(NSString *path, NSData **dataOut, NSError **err
     return YES;
 }
 
-static BOOL ValidateParentDirectory(NSString *path, NSError **error) {
+// Paths this project creates itself are fully private: no group or other access
+// at all. The Messages database is different. It is Apple-managed state that
+// macOS ships world-readable inside a TCC-protected directory, so requiring
+// 0600 there would force an operator to weaken their own system just to install
+// this service. Group or other *write* stays refused everywhere, because that is
+// what would let another account tamper with the data this service reads.
+static const mode_t IMPModeMaskPrivate = 077;
+static const mode_t IMPModeMaskNotWritable = 022;
+
+static NSString *ModeRequirementDescription(mode_t forbiddenModeBits) {
+    if ((forbiddenModeBits & 055) != 0) {
+        return @"no group or other access";
+    }
+    return @"no group or other write access";
+}
+
+static BOOL ValidateParentDirectory(NSString *path, mode_t forbiddenModeBits, NSError **error) {
     NSString *parent = path.stringByDeletingLastPathComponent;
     NSString *current = parent.stringByStandardizingPath;
     BOOL finalComponent = YES;
     struct stat metadata;
     while (current.length > 0) {
         if (lstat(current.fileSystemRepresentation, &metadata) != 0 || !S_ISDIR(metadata.st_mode) ||
-            (finalComponent && (metadata.st_uid != getuid() || (metadata.st_mode & 077) != 0))) {
+            (finalComponent && (metadata.st_uid != getuid() || (metadata.st_mode & forbiddenModeBits) != 0))) {
             if (error != NULL) {
-                *error = ServerError(IMPServerErrorInvalidConfiguration,
-                                     @"configured parent directories must be non-symlinked, private, and user-owned");
+                NSString *requirement = ModeRequirementDescription(forbiddenModeBits);
+                NSString *message =
+                    [NSString stringWithFormat:@"%@ must be a real user-owned directory with %@", current, requirement];
+                *error = ServerError(IMPServerErrorInvalidConfiguration, message);
             }
             return NO;
         }
@@ -277,14 +295,15 @@ static BOOL ValidateParentDirectory(NSString *path, NSError **error) {
 
 static BOOL ValidateMessagesDatabase(NSString *path, NSError **error) {
     struct stat metadata;
-    if (![path hasPrefix:@"/"] || !ValidateParentDirectory(path, error) ||
+    if (![path hasPrefix:@"/"] || !ValidateParentDirectory(path, IMPModeMaskNotWritable, error) ||
         lstat(path.fileSystemRepresentation, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
-        metadata.st_uid != getuid() || (metadata.st_mode & 077) != 0 ||
+        metadata.st_uid != getuid() || (metadata.st_mode & IMPModeMaskNotWritable) != 0 ||
         access(path.fileSystemRepresentation, R_OK) != 0) {
         if (error != NULL && *error == nil) {
-            *error = ServerError(
-                IMPServerErrorInvalidConfiguration,
-                @"IMESSAGE_PROXY_MESSAGES_DATABASE_PATH must be a private readable user-owned regular file");
+            NSString *requirement = ModeRequirementDescription(IMPModeMaskNotWritable);
+            NSString *message =
+                [NSString stringWithFormat:@"%@ must be a readable user-owned file with %@", path, requirement];
+            *error = ServerError(IMPServerErrorInvalidConfiguration, message);
         }
         return NO;
     }
@@ -593,7 +612,7 @@ static int OpenPinnedExecutable(NSString *path, NSString *expectedDigest, struct
 
 static int ReopenPinnedExecutable(NSString *path, const struct stat *expectedMetadata) {
     errno = 0;
-    if (!ValidateParentDirectory(path, NULL)) {
+    if (!ValidateParentDirectory(path, IMPModeMaskPrivate, NULL)) {
         if (errno == 0)
             errno = ESTALE;
         return -1;
@@ -886,7 +905,7 @@ static int OpenPinnedExecutable(NSString *path, NSString *expectedDigest, struct
             *error = ServerError(IMPServerErrorInvalidConfiguration, @"IMESSAGE_PROXY_IMSG_BIN must be absolute");
         return -1;
     }
-    if (!ValidateParentDirectory(path, error))
+    if (!ValidateParentDirectory(path, IMPModeMaskPrivate, error))
         return -1;
     int descriptor = open(path.fileSystemRepresentation, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (descriptor >= 0 && !MoveDescriptorAboveStandardIO(&descriptor)) {
@@ -1031,8 +1050,8 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
         return nil;
     }
     if (![configuration.databasePath hasPrefix:@"/"] || configuration.databasePath.length == 0 ||
-        !ValidateParentDirectory(configuration.socketPath, error) ||
-        !ValidateParentDirectory(configuration.databasePath, error)) {
+        !ValidateParentDirectory(configuration.socketPath, IMPModeMaskPrivate, error) ||
+        !ValidateParentDirectory(configuration.databasePath, IMPModeMaskPrivate, error)) {
         if (error != NULL && *error == nil) {
             *error = ServerError(IMPServerErrorInvalidConfiguration, @"IMESSAGE_PROXY_DATABASE_PATH is invalid");
         }
@@ -1051,7 +1070,7 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
         return nil;
 
     NSData *targetsData = nil;
-    if (!ValidateParentDirectory(configuration.allowedTargetsPath, error) ||
+    if (!ValidateParentDirectory(configuration.allowedTargetsPath, IMPModeMaskPrivate, error) ||
         !IsPrivateRegularFile(configuration.allowedTargetsPath, &targetsData, error)) {
         return nil;
     }

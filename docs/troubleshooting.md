@@ -87,6 +87,35 @@ independently reviewed SHA-256, and run `doctor` again. The lifecycle CLI hashes
 the file before executing it and stages that exact binary. Do not replace it in
 place or point the LaunchAgent at an unreviewed binary.
 
+## `doctor` rejects the Messages database
+
+The service reads `~/Library/Messages/chat.db` through the pinned dependency. It
+requires only that no other account can write that file or its directory, which
+is the property that would let another account tamper with what the service
+reads. macOS ships the file group/world *readable* inside a TCC-protected
+directory, and that stock shape is accepted.
+
+```bash
+ls -ld ~/Library/Messages ~/Library/Messages/chat.db
+```
+
+A `w` in either the group or other column is the problem:
+
+```bash
+chmod go-w ~/Library/Messages
+chmod go-w ~/Library/Messages/chat.db
+```
+
+`drwxrwxrwx` on that directory is worth investigating on its own. macOS creates
+it `drwx------`, so something relaxed it; the service only refuses the write
+bits, but the read exposure is yours to judge.
+
+If `doctor` instead reports that the database is *not visible from this
+terminal*, either Messages was never signed in on this Mac — open Messages,
+sign in, and exchange one message — or your terminal lacks Full Disk Access,
+which only limits this check, not the service. The native server holds its own
+grant.
+
 ## `doctor` rejects Caddy
 
 The lifecycle CLI requires the exact host-native Caddy 2.11.4 executable and an

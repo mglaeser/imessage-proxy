@@ -119,7 +119,11 @@ readonly fake_imsg_sha256
 : > "$fake_imsg_log"
 chmod 0600 "$fake_imsg_log"
 : > "$messages_database_path"
-chmod 0600 "$messages_database_path"
+# macOS ships ~/Library/Messages/chat.db group/world readable inside a
+# TCC-protected directory. Mirror Apple's real mode so this suite exercises what
+# a stock Mac actually presents; a stricter fixture hid a defect that blocked
+# every real installation.
+chmod 0644 "$messages_database_path"
 printf '%s\n' "$messages_database_path" > "${fake_imsg}.expected-db"
 chmod 0600 "${fake_imsg}.expected-db"
 printf '%s\n' '+15551234567' 'person@example.test' 'chat_id:42' 'chat_id:999' > "$targets_path"
@@ -288,7 +292,55 @@ if run_native check-config > "$temporary/imsg-parent.out" 2> "$temporary/imsg-pa
   exit 1
 fi
 chmod 0700 "$temporary"
-grep -Fqi 'parent directories' "$temporary/imsg-parent.err"
+grep -Fqi 'must be a real user-owned directory' "$temporary/imsg-parent.err"
+# The rejection must name the exact offending directory, not an anonymous class
+# of paths. An unnamed path cost a real operator a full build to diagnose.
+grep -Fq "$temporary" "$temporary/imsg-parent.err"
+
+# The Messages database is Apple-managed state that macOS ships group/world
+# readable. Accept that exact shape; only another account's write access is a
+# real risk to the data this service reads.
+for apple_mode in 0644 0640 0600; do
+  chmod "$apple_mode" "$messages_database_path"
+  if [[ "$(run_native check-config)" != ok ]]; then
+    chmod 0644 "$messages_database_path"
+    printf 'ERROR: a Messages database mode macOS actually ships was rejected: %s\n' \
+      "$apple_mode" >&2
+    exit 1
+  fi
+done
+chmod 0644 "$messages_database_path"
+
+for writable_mode in 0666 0664 0622; do
+  chmod "$writable_mode" "$messages_database_path"
+  if run_native check-config > "$temporary/messages-mode.out" 2> "$temporary/messages-mode.err"; then
+    chmod 0644 "$messages_database_path"
+    printf 'ERROR: a group/world-writable Messages database was accepted: %s\n' "$writable_mode" >&2
+    exit 1
+  fi
+  grep -Fqi 'no group or other write access' "$temporary/messages-mode.err"
+  grep -Fq "$messages_database_path" "$temporary/messages-mode.err"
+done
+chmod 0644 "$messages_database_path"
+
+# The same rule applies to the directory holding it.
+chmod 0757 "$temporary/messages"
+if run_native check-config > "$temporary/messages-parent.out" 2> "$temporary/messages-parent.err"; then
+  chmod 0700 "$temporary/messages"
+  printf 'ERROR: a world-writable Messages directory was accepted\n' >&2
+  exit 1
+fi
+chmod 0700 "$temporary/messages"
+grep -Fqi 'no group or other write access' "$temporary/messages-parent.err"
+
+# A readable-but-not-writable Messages directory is exactly what macOS ships.
+chmod 0755 "$temporary/messages"
+if [[ "$(run_native check-config)" != ok ]]; then
+  chmod 0700 "$temporary/messages"
+  printf 'ERROR: a Messages directory mode macOS actually ships was rejected: 0755\n' >&2
+  exit 1
+fi
+chmod 0700 "$temporary/messages"
 
 install -m 0600 "$targets_path" "$temporary/allowed-targets.original"
 printf '%s\n' '*' > "$targets_path"
