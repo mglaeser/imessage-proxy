@@ -1,14 +1,14 @@
 # Security policy
 
-iMessage Proxy bridges private Messages data to authenticated network clients. Security reports are treated as a priority.
+iMessage Proxy exposes private Messages data to authenticated HTTPS clients. Security reports are treated as a priority.
 
 ## Supported versions
 
-iMessage Proxy is currently Alpha. Only the latest release on the default branch receives security updates.
+Only the latest stable release on the default branch receives security updates.
 
 | Version | Supported |
 | --- | --- |
-| Latest `0.x` release | Yes |
+| Latest `1.x` release | Yes |
 | Older releases | No |
 | Unreleased forks | No |
 
@@ -19,7 +19,7 @@ iMessage Proxy is currently Alpha. Only the latest release on the default branch
 Use [GitHub's private vulnerability reporting](https://github.com/mglaeser/imessage-proxy/security/advisories/new). Include, where possible:
 
 - the affected version or commit;
-- the macOS, Apple Container, Caddy, and `imsg` versions;
+- the macOS, Caddy, and `imsg` versions;
 - a concise description of the impact and trust boundary crossed;
 - minimal reproduction steps or a proof of concept;
 - whether message contents, credentials, recipients, or host access may have been exposed;
@@ -45,15 +45,17 @@ These are targets, not guarantees for an unfunded project. Please give maintaine
 
 Examples of in-scope issues include:
 
-- bypassing client or bridge authentication;
-- reaching the native bridge from outside loopback;
-- invoking a non-allowlisted `imsg` method or forbidden parameter;
+- bypassing API-key authentication, scope, expiry, or revocation;
+- reaching the native server outside its private Unix socket;
+- invoking an unsupported dependency command or caller-selected argument;
 - bypassing the outbound target allowlist;
 - leaking message content, recipients, credentials, or secrets into logs;
 - request smuggling, parsing confusion, or size-limit bypasses;
 - command, path, configuration, or LaunchAgent injection;
 - unsafe file permissions or secret persistence;
-- unintended public-network exposure caused by iMessage Proxy defaults.
+- bypassing send idempotency or causing unintended duplicate sends;
+- escaping the same-origin console policy; and
+- unintended public exposure while the explicit gate is disabled.
 
 Social engineering, denial of service requiring physical host access, vulnerabilities exclusively in unsupported dependencies, and findings that require disabling documented macOS security controls are generally out of scope. Dependency vulnerabilities that change iMessage Proxy's exposure are still valuable reports.
 
@@ -65,10 +67,13 @@ Good-faith research that respects privacy, uses accounts and devices you own or 
 
 If compromise is suspected:
 
-1. Stop the facade with `bin/imessage-proxy stop`.
+1. Stop public ingress locally with `imessage-proxy edge-stop`; verify its
+   launchd label remains disabled, and optionally remove the external mappings as
+   defense in depth.
 2. Preserve sanitized logs and version information.
-3. Rotate every client password and the bridge token.
-4. Review the send-target allowlist and private-network exposure.
+3. Revoke and replace every affected API key from a trusted administrator.
+4. Review the send-target allowlist, audit metadata, Caddy edge, exact external
+   port mappings, and public IPv4 network path.
 5. Update to a fixed release before restoring service.
 
 See [Security model](docs/security.md) for preventive controls and [Operations](docs/operations.md) for rotation and recovery procedures.

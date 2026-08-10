@@ -1,243 +1,273 @@
 # Architecture
 
-This document explains iMessage Proxy's components, trust boundaries, and design invariants. It describes version 0.3.0; Alpha interfaces may change.
+## Hard minimum
 
-## Design goals
-
-iMessage Proxy exists to make a small subset of Messages functionality available to explicit automation clients without turning a Mac into a general-purpose remote-control server.
-
-The design optimizes for:
-
-- private LAN/VPN operation;
-- a narrow, inspectable native bridge;
-- deny-by-default outbound messaging;
-- independent credentials at each trust boundary;
-- ordinary macOS TCC, SIP, Messages, and GUI-session behavior;
-- minimal logs and recoverable local state;
-- explicit operator actions for security-sensitive lifecycle changes.
-
-Convenience, unrestricted API compatibility, public hosting, and multi-tenant isolation are non-goals.
-
-## System context
-
-```mermaid
-flowchart LR
-    subgraph private["Trusted private network"]
-        client["Authorized API client"]
-    end
-
-    subgraph container["Apple Container boundary"]
-        caddy["Caddy facade"]
-    end
-
-    subgraph mac["macOS user session"]
-        bridge["iMessage Proxy native bridge"]
-        imsg["imsg rpc"]
-        db[("Messages chat database")]
-        app["Messages.app"]
-    end
-
-    client -->|"TLS + per-client Basic Auth"| caddy
-    caddy -->|"Bearer token over container host route"| bridge
-    bridge -->|"sanitized JSON-RPC over stdio"| imsg
-    imsg -->|"bounded reads"| db
-    imsg -->|"AppleScript sends"| app
-```
-
-The native bridge listens only on `127.0.0.1`. Apple Container's explicit host route connects the facade to that listener. The facade publishes HTTPS only on an operator-selected private interface.
-
-## Topology decision record
-
-**Status:** Accepted for the Alpha topology; review again when the host-routing
-capabilities or operational requirements change.
-
-### Context and decision
-
-A pure Apple Container deployment cannot provide live sending. Apple Container
-runs a Linux workload in a lightweight virtual machine. The Linux form of
-`imsg` can inspect a copied Messages database, but it cannot connect to
-Messages.app or send through the signed-in macOS user's identity. Those live
-operations require the user's GUI session, AppleScript, and macOS TCC approval.
-
-The externally reachable Caddy facade therefore remains in Apple Container,
-where its image can be pinned and its resources and host access constrained.
-The smallest host exception is the native bridge: it runs as the signed-in
-Messages user and binds only to loopback. The bridge's narrow authenticated
-contract is the boundary between the network-facing facade and the
-TCC-protected capability; moving Caddy into the container cannot remove that
-host bridge.
-
-### Alternative and review criteria
-
-Running Caddy directly on macOS would remove the container-to-loopback route
-and its lifecycle side effects. It would also move the network-facing TLS,
-authentication, HTTP parsing, and private-CA process onto the host, reducing
-the isolation around the most exposed component. The containerized facade is
-preferred while the supported route remains usable.
-
-Reconsider a user-scoped host Caddy when the route becomes unsupported or
-unreliable, preserving iCloud Private Relay is a deployment requirement, or
-manual route recovery no longer meets the availability target. Any change must
-preserve the private-interface bind, TLS and per-client authentication, header
-separation, size and timeout limits, loopback-only bridge, pinned supply chain,
-and existing CA/credential lifecycle. Also revisit this decision if Apple adds
-a restart-persistent host-access mechanism without the current side effect.
-
-### Consequences
-
-Apple documents that creating its localhost-domain route disables iCloud
-Private Relay and that the associated packet-filter rule is removed by a Mac
-restart. A restart therefore requires the explicit, confirmed route refresh
-and an end-to-end health check before service is considered recovered. The
-manager deliberately does not hide that privileged state change in a generic
-autostart loop. An absent, ambiguous, or incorrectly mapped route requires
-manual observed-state recovery; it is never a reason to expose the bridge on a
-LAN address.
-
-## Components
-
-| Component | Responsibility | Deliberate limitation |
-| --- | --- | --- |
-| `src/imessage-proxy-bridge.m` | Parse HTTP, authenticate the facade, validate/sanitize JSON, enforce API and target policy, invoke `imsg rpc`, and emit minimal audit events | Loopback-only; no TLS, client credential store, or general RPC passthrough |
-| `imsg` | Use supported macOS capabilities to read Messages data and send through Messages.app | Executed as a child process for one sanitized request at a time |
-| LaunchAgent | Run the bridge in the signed-in Messages user's GUI session | Never installed as root or as a system daemon |
-| `config/Caddyfile` | Terminate TLS, authenticate individual clients, reject non-private sources, cap bodies, and proxy three routes | No anonymous route, broad reverse proxy, or public certificate automation |
-| Apple Container | Isolate and resource-bound the Caddy facade | Cannot replace the macOS-side bridge or access TCC-protected host data directly |
-| `bin/imessage-proxy` | Build, prepare, inspect, and operate the host and facade | No delete, reset, prune, or silent security-control bypass |
-
-## Request lifecycle
-
-1. A client establishes TLS using iMessage Proxy's private Caddy CA and sends its own Basic Auth credential.
-2. Caddy checks that the source is in a private address range, authenticates the client, limits the body, and matches an exact route and method.
-3. Caddy removes the client's Authorization header. It adds the bridge bearer token and forwards the authenticated username as caller identity.
-4. The bridge accepts the request only on loopback, performs a constant-time token comparison, applies strict HTTP and JSON limits, and sanitizes caller identity before audit logging.
-5. The policy layer accepts one allowlisted RPC method, rejects unsupported parameters, forces privacy-preserving values, and checks the exact send target when applicable.
-6. The bridge starts `imsg rpc`, writes one JSON-RPC object to standard input, waits within a bounded timeout, and accepts only a bounded JSON response.
-7. The response travels back through Caddy. The bridge records caller, method, status, and duration—but not message text or recipient.
-
-Failures stop at the earliest boundary. A request is never retried automatically because retrying a send could duplicate a message.
-
-The lifecycle manager has one additional host-internal proof endpoint:
-bearer-authenticated `GET /_internal/configuration-fingerprint`. The bridge
-returns only a SHA-256 digest of its immutable startup snapshot, including the
-exact token and allowlist file bytes, recognized environment, paths, version,
-port, dependency path, timeouts, and concurrency. The manager compares that
-live digest with fresh invocations of the same installed bridge under the exact
-reviewed LaunchAgent environment. Caddy publishes only the three API routes
-above, so clients receive `404` for this internal path.
-
-## Trust boundaries
-
-### Client to facade
-
-The client is authorized for the API but should not be trusted with bridge credentials or host access. Each client receives a unique password so access can be attributed and revoked independently. TLS protects Basic Auth in transit.
-
-### Facade to bridge
-
-The Caddy container is trusted to possess the bridge token and forward an authenticated caller ID. Compromise of the facade does not remove the bridge's method, parameter, target, size, or loopback controls.
-
-### Bridge to macOS capabilities
-
-The bridge and `imsg` run with the permissions of the signed-in macOS user. This is the most sensitive boundary: reads can expose conversations and sends use that user's Messages identity. Full Disk Access and Automation remain operator-controlled through System Settings.
-
-### Repository to runtime state
-
-The checkout contains source and public templates only. Runtime credentials, caller hashes, generated environment, Caddy CA material, binaries, logs, and generated LaunchAgent files live below the configured runtime home. Version 0.3.0 retains the existing default `~/Library/Application Support/Stella` with restrictive permissions.
-
-## State model
-
-The default runtime layout is:
+iMessage Proxy uses the smallest practical production design that preserves the
+normal macOS Messages permission model and provides public HTTPS:
 
 ```text
-~/Library/Application Support/Stella/
-├── secrets/
-│   ├── allowed-targets.txt
-│   ├── bridge.token
-│   ├── facade.env
-│   └── users.caddy
-└── state/
-    ├── bin/stella-bridge
-    ├── caddy/
-    │   ├── Caddyfile
-    │   ├── config/
-    │   └── data/
-    ├── io.github.mglaeser.stella.bridge.plist
-    └── logs/
+Internet clients on TCP 80/443
+    │
+    │ exact router/NAT mapping over IPv4
+    │ 80 → host 8080, 443 → host 8443 by default
+    ▼
+host-native Caddy LaunchAgent in the Messages GUI session
+    ├── terminates ACME HTTPS
+    ├── serves three static console files
+    └── forwards /api over one private Unix socket
+            │
+            ▼
+native REST-server LaunchAgent in the same GUI session
+    ├── authenticates/scopes API keys in SQLite
+    ├── validates explicit REST resources
+    └── executes fixed imsg commands
+            │
+            ├── read-only Messages database access
+            └── normal Messages.app AppleScript sends
 ```
 
-`IMESSAGE_PROXY_HOME` can relocate the root. It must point to a user-owned private directory; it should not be a shared checkout, synchronized folder, or world-readable backup target. `prepare` creates private directories and mode-0600 secret files. The active LaunchAgent plist is installed separately under `~/Library/LaunchAgents/`.
+There is no authentication sidecar, application runtime for the console, VM,
+container, socket relay, filesystem mount, published container port, internal
+TCP bridge, synthetic host DNS, packet-filter redirect, copied Messages database,
+or second message store. The REST server must remain native because Messages
+database access and Messages.app Automation belong to the signed-in macOS GUI
+session. Caddy is also host-native because it can connect to the same socket
+directly; adding a virtualization layer would add lifecycle and networking work
+without creating a useful security boundary for this service.
 
-### Rename transition
+## Components and trust
 
-The repository source and public build artifact use `imessage-proxy-bridge`, but `build-host` installs `stella-bridge` below the runtime home. Version 0.3.0 continues to retain the LaunchAgent label `io.github.mglaeser.stella.bridge`, container `stella`, host route `stella-host.container.internal`, and legacy signing/runtime identities. This is intentional: changing those identities could invalidate TCC approval, rotate Caddy trust state, or orphan a running deployment.
+| Component | Runs as | Responsibility | Important boundary |
+| --- | --- | --- | --- |
+| Caddy | Messages GUI user LaunchAgent | ACME TLS, security headers, static console, bounded `/api` forwarding | Sees bearer keys in transit; must not receive Full Disk Access or Automation |
+| Native server | Same GUI user LaunchAgent | HTTP parsing, API-key auth/scopes, rate limits, adapters, normalization, audit | Owns the private socket and is the only service process granted Messages permissions |
+| SQLite file | User-owned private state | Key hashes, scopes, expiry/revocation, audit metadata, send idempotency | Contains no plaintext API keys or message content |
+| Staged `imsg 0.13.4` | Child of native server | Reviewed local reads and normal AppleScript text sends | Exact executable is SHA-256-pinned before use; callers cannot choose commands or database paths |
+| Browser console | Static same-origin files | Status and key lifecycle | Keeps a credential only in the current tab's `sessionStorage` |
 
-The canonical operator interface is `bin/imessage-proxy` with `IMESSAGE_PROXY_*` variables. The deprecated `bin/stella` shim and `STELLA_*` aliases remain for this transition release. Canonical and legacy values may be used separately, but conflicting definitions fail closed. No state, LaunchAgent, container, route, certificate, or TCC identity is migrated automatically.
+Caddy and the native server share one Unix user and therefore one ordinary
+filesystem/account boundary. The Unix socket prevents the REST server from
+becoming a TCP listener; it does **not** isolate Caddy from other files readable
+by that user. A compromised Caddy process must be treated as a compromise of the
+service's user-level trust domain. TCC still provides a distinct macOS privacy
+control: only the exact REST-server binary should receive Full Disk Access and
+Messages Automation.
 
-## Lifecycle and state domains
+High host ports let Caddy run without root. Neither LaunchAgent requires `sudo`,
+a privileged port entitlement, or a packet-filter redirect.
 
-Lifecycle decisions must keep independently owned evidence separate:
+## Private Unix socket
 
-| Domain | Representative evidence | Rule |
-| --- | --- | --- |
-| Source | Repository URL, tag, commit, release provenance | A reviewed checkout does not prove what is installed or running |
-| Package | Installed CLI, templates, and versioned package files | Package changes do not authorize runtime or legacy-state removal |
-| Runtime | Generated bridge binary and plist, LaunchAgent state, processes, listeners, and logs | Inspect the live identity and state before mutation |
-| TCC identity | GUI user, executable identity, Full Disk Access, and Messages Automation behavior | File presence or a healthy process does not prove permission |
-| Container and route | Image identity, container definition, publication, localhost route, and its live mapping | Container existence does not prove that its transient host path works |
-| Secrets and CA | Bridge token, caller hashes, target policy, private key, and enrolled client trust | Never infer that these are disposable or safely reproducible |
-| External migration evidence | Orchestrator-owned lock, receipt, provenance, and acceptance state | Preserve and interpret it only under the schema and controller that created it |
+The native server listens only at:
 
-A successful observation in one domain is not evidence for another, and
-authority to update one domain does not imply authority to delete, adopt, or
-recreate another. Inventory results are `present`, `absent`, or `unknown`.
-Timeouts, permission errors, malformed output, and unsupported probes are
-`unknown`, never proof of absence; security-sensitive mutation stops until the
-state is resolved.
+```text
+~/Library/Application Support/iMessage Proxy/run/server.sock
+```
 
-The standalone manager does not create, adopt, or interpret deployment
-migration receipts. An external migration controller that changes these
-domains should:
+The socket parent is private, non-symlinked, and owned by the Messages GUI user.
+The server rejects unsafe stale-path replacement. Caddy connects to that exact
+host path directly. No socket is copied, mounted, forwarded, published, or
+relayed, and the native process has no TCP listener.
 
-1. acquire a single-writer lock before its first mutation and treat an
-   uncertain existing lock as a blocker;
-2. repeat every safety-critical runtime and identity check after acquiring the
-   lock;
-3. record only metadata and sanitized yes/no observations, never secret
-   contents, using versioned schemas and monotonic state transitions;
-4. write each state update atomically without reinterpreting or erasing prior
-   durable evidence; and
-5. stop further writes after interruption or divergence, then choose recovery
-   from newly observed state instead of blindly retrying a cutover or running a
-   prewritten rollback.
+The socket keeps the native HTTP parser off the network and gives the lifecycle
+CLI one readiness boundary. Because both processes have the same UID, its mode is
+defense in depth against other local accounts rather than process isolation.
 
-## Security invariants
+## Public network path
 
-A change is architecture-compatible only if it preserves all of these properties:
+The supplied edge accepts IPv4 only. Caddy binds to either an explicitly assigned
+host IPv4 address or `0.0.0.0` and uses unprivileged host ports, defaulting to:
 
-1. The bridge process owns exactly one IPv4 TCP listener, bound to the configured `127.0.0.1` port.
-2. No API route works without authentication at both boundaries.
-3. Sending is denied unless exactly one target is selected and that target is allowed.
-4. Unsupported RPC methods and parameters are rejected before `imsg` starts.
-5. Attachment reads, reactions, and conversion remain disabled.
-6. Sends use the ordinary AppleScript transport; iMessage Proxy never asks operators to disable SIP or TCC.
-7. Request, response, execution-time, socket-time, and concurrency limits remain bounded.
-8. Logs omit message content, recipient, raw token, and client password.
-9. Runtime secrets never enter the repository.
-10. The network facade binds to an explicitly selected private interface, not every interface.
-11. Facade creation and restart require the running bridge's authenticated configuration fingerprint to match fresh reviewed state without exposing its preimage.
+```text
+HTTP:  8080
+HTTPS: 8443
+```
 
-Changes to an invariant require an explicit security proposal, threat-model update, negative tests, migration plan, and maintainer approval.
+The external router or NAT device must preserve the standard public service:
 
-## Dependency boundaries
+```text
+external TCP 80  → Mac IPv4 TCP 8080
+external TCP 443 → Mac IPv4 TCP 8443
+```
 
-iMessage Proxy intentionally delegates TLS and client password verification to Caddy, and Messages integration to `imsg`. Caddy must come from the official image and be pinned to a reviewed immutable digest. `imsg` must be installed through a trusted channel and its API compatibility revalidated on updates.
+NAT operates on the public address and port, not the HTTP hostname. This mapping
+therefore claims public TCP 80/443 for every DNS name on that IPv4 address and
+cannot coexist with a different ingress that already owns those ports.
 
-Apple Container is an isolation and delivery boundary, not a substitute for authorization. Messages.app, TCC, the local account, private DNS, VPN/LAN policy, host firewall, and physical host security remain part of the deployment's trusted computing base.
+The public hostname has an `A` record for the intended ingress. The built-in
+deployment does not support a public `AAAA` path. Publishing one could route
+clients around the reviewed IPv4 mapping, so it must remain absent unless an
+independent IPv6 design is reviewed and implemented.
 
-## Further reading
+ACME validation, the HTTP-to-HTTPS redirect, and ordinary clients depend on the
+external 80/443 mapping. Caddy's generated redirects are disabled. Outside
+Caddy's transient ACME HTTP-01 challenge handling, the explicit HTTP route
+redirects only the configured hostname with `308`; it builds `Location` from
+that reviewed hostname and the request URI, so the host's internal HTTPS port
+can never appear. Other HTTP Host values receive `421`. Both routed responses
+remove `Server`, `Alt-Svc`, and cross-origin headers and carry the same no-store,
+noindex, and security-header policy as HTTPS responses. An upstream CDN, tunnel,
+reverse proxy, or TLS terminator would change the source-address, certificate,
+logging, and origin boundaries and is not part of this architecture.
 
-- [Apple Container networking and host access](https://github.com/apple/container/blob/main/docs/how-to.md)
-- [API reference](api.md)
-- [Security model](security.md)
-- [Operations](operations.md)
-- [Migration from an administration repository](migration-from-administration.md)
+## Request path
+
+1. A client connects to the dedicated hostname on public TCP 443.
+2. The router maps that connection to Caddy's configured host IPv4 HTTPS port.
+3. Caddy terminates TLS and applies header, body, and time bounds plus strict
+   security response headers.
+4. Only `/api` and `/api/*` are forwarded to the native Unix socket. Static
+   console files are served directly; other paths fail closed.
+5. Caddy removes client-supplied cookies and `X-API-*` headers, supplies the
+   observed peer address, and preserves the original bearer header.
+6. The native server parses a bounded HTTP/1 request and validates the exact
+   `Authorization: Bearer …` credential against a SHA-256 digest in SQLite.
+7. It checks expiry, revocation, route scope, origin policy, and rate limits.
+8. The route adapter validates only its documented path/query/body fields and
+   constructs a fixed `imsg` argument vector without a shell.
+9. The child process runs inside a deadline and isolated process group with
+   bounded stdout/stderr. A send has one end-to-end 180-second budget;
+   idempotency work and chat validation consume that same budget rather than
+   starting independent nested deadlines. The edge waits 195 seconds for native
+   response headers, its connection write deadline is 200 seconds, and the
+   native LaunchAgent has 210 seconds to exit, preserving a deliberate outer
+   timeout margin at every layer. Every JSON-line record must parse and match the
+   adapter's expected shape.
+10. The server removes host paths and private routing fields, then returns its
+    own REST schema. It never relays command diagnostics to the caller.
+11. An audit event records request ID, key ID, operation, outcome, status, and
+    duration—not message content, recipients, conversations, credentials, or
+    hashes.
+
+## Authentication and authorization
+
+The edge does not replace client identity with a shared internal secret. Caddy
+preserves the original bearer header over the socket, and the native server
+authenticates every API request directly.
+
+Keys contain 256 random bits and are revealed only at creation. SQLite stores a
+32-byte SHA-256 digest plus metadata and normalized scopes. High-entropy keys do
+not need a slow password hash; a fast digest permits bounded lookup without
+making an offline guessing attack practical. Authentication checks current state
+on every request, so revocation is immediate.
+
+Three scopes keep the model understandable:
+
+- `messages:read` for every read resource;
+- `messages:send` for exact-allowlist text sends; and
+- `admin`, which includes all operations and key lifecycle management.
+
+The final active administrator cannot be revoked. A local bootstrap command is
+available only when no active administrator exists.
+
+## Durable send idempotency
+
+A remote timeout can occur after Messages.app has accepted a command. Blindly
+retrying would risk a duplicate. `POST /api/messages` therefore requires an
+`Idempotency-Key`.
+
+Before invoking `imsg`, the server stores the authenticated key ID, idempotency
+value, canonical request digest, operation ID, and `pending` state. It then
+records one of:
+
+- `accepted`, with the normalized response;
+- `failed`, when execution conclusively failed; or
+- `ambiguous`, when the process outcome cannot prove whether Messages accepted it.
+
+The same key/body returns the stored result. The same key with different content
+returns a conflict. Pending or ambiguous records are never executed again
+automatically. This state lives beside the API-key database so a process restart
+cannot erase the duplicate-send boundary.
+
+## Data ownership
+
+iMessage Proxy does not copy, cache, or index conversation content. Read requests
+open the existing Messages database through `imsg`; response bodies live only for
+the request lifetime. The service's SQLite file contains operational metadata:
+
+- API-key digests and lifecycle fields;
+- scopes;
+- privacy-preserving audit events; and
+- idempotency request digests and normalized outcomes.
+
+It never stores plaintext keys, message bodies, recipients, chat identifiers,
+attachment paths, or complete dependency output. Caddy receives plaintext bearer
+keys transiently because it terminates TLS. Access logging is deliberately not
+configured, but Caddy remains a trusted process because it handles live requests
+and shares the same macOS user.
+
+## Public edge
+
+Caddy's native executable is pinned by exact version and independently reviewed
+SHA-256. It runs as the non-root Messages GUI user with its admin API disabled.
+Its configuration:
+
+- uses the dedicated hostname and normal public ACME certificate;
+- uses an explicit, fixed-host HTTP-to-HTTPS redirect and rejects other HTTP
+  Host values without reflecting them;
+- serves the dependency-free console and proxies only `/api`;
+- listens on configurable unprivileged IPv4 host ports;
+- removes server/protocol advertisement headers and applies no-store, noindex,
+  HSTS, a strict content-security policy, clickjacking denial, no-sniff,
+  no-referrer, and a restrictive permissions policy;
+- rejects API bodies above 64 KiB and configures a 12 KiB header budget so the
+  Go parser's fixed read tolerance remains close to a 16 KiB effective ceiling;
+- removes request objects and URIs from runtime error logs and returns a
+  privacy-safe problem response for routed edge failures;
+- serves only HTTP/1.1 and HTTP/2 over TCP, with HTTP/3/UDP disabled; and
+- leaves source/key-aware rate limiting to the native server.
+
+No cross-origin policy is enabled. Browser requests with an `Origin` must match
+the exact configured public origin. API keys are explicit headers rather than
+ambient cookies, but same-origin enforcement reduces browser abuse and keeps the
+console's threat model small.
+
+## Capability boundary
+
+The adapters cover the stable `imsg 0.13.4` commands that fit a remote service:
+chats, chat detail, bounded history, scrubbed chat-background state, future
+scheduled rows, statistics, and plain iMessage text sending.
+
+The server does not expose arbitrary command selection. It excludes infinite
+watch processes, Contacts-assisted whois/identity lookup, host file paths,
+uploads, carrier SMS, UI automation reactions, private-framework features, code
+injection, read/typing mutations, rich content, message mutation, and chat
+administration. Adding any of those requires architecture and threat-model
+review.
+
+The dependency's cross-chat text search is excluded because version 0.13.4 can
+request and enumerate Contacts while running it and provides no no-Contacts
+mode. A remotely triggered address-book prompt or lookup is outside this service's
+minimum TCC and data boundary.
+
+## Startup and shutdown order
+
+Start inside-out:
+
+1. validate private state and pinned native dependencies;
+2. install or start the server LaunchAgent, explicitly re-enabling its launchd
+   label, and prove its socket responds;
+3. install or start the Caddy edge LaunchAgent, explicitly re-enabling its label,
+   and prove its listeners; and
+4. run authenticated end-to-end checks through the external IPv4 path.
+
+Stop outside-in:
+
+1. stop Caddy so no new public work arrives;
+2. let in-flight native work finish or reach its bounded outcome; and
+3. restart or stop the server only after the public edge is quiescent.
+
+The lifecycle CLI refuses a server stop or restart while the edge is loaded. Each
+stop command disables its exact GUI launchd label before unloading it, so the
+stopped service stays stopped across logout/login and reboot without deleting its
+plist or state. Install, start, and restart explicitly re-enable the relevant
+label. A server restart recreates the socket, so validate it before starting
+Caddy again.
+
+## Fresh-state boundary
+
+Version 1.0 intentionally starts in
+`~/Library/Application Support/iMessage Proxy`. It does not discover, copy,
+rename, reinterpret, or delete another installation's runtime state, credentials,
+certificates, permissions, routes, or receipts. Git history preserves earlier
+implementation evidence; current code has one identity and one topology.

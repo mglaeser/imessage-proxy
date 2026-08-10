@@ -1,42 +1,43 @@
 # Roadmap
 
-iMessage Proxy's roadmap prioritizes a small, understandable security boundary over feature count. Milestones describe intent, not delivery commitments.
+The roadmap protects the small 1.0 architecture. New capabilities must remain
+explicit resources with a clear privacy boundary; command passthrough is not a
+growth strategy.
 
-## Now — Alpha hardening (`0.3.x`)
+## 1.0 release gates
 
-- [x] Adopt descriptive public naming while preserving 0.1.x runtime identities through a documented transition release.
-- [ ] Validate installation and lifecycle on a documented macOS compatibility matrix.
-- [ ] Add parser and policy regression coverage for every accepted and rejected request shape.
-- [ ] Exercise install, upgrade, restart, credential rotation, and recovery paths on clean hosts.
-- [ ] Document pinned dependency review and update procedures.
-- [x] Publish checksummed, provenance-attested source releases.
-- [ ] Gather operator feedback without expanding the public-network threat boundary.
+- [ ] Pass Objective-C warnings-as-errors, static analysis, shell/Markdown/API
+  lint, native integration tests, and Caddy Unix-socket tests.
+- [ ] Fuzz the bounded HTTP parser and key/idempotency state transitions.
+- [ ] Validate both host-native LaunchAgents and the direct Unix socket on the
+  target Mac across graceful/forced server restarts, edge restarts, logout/login,
+  sleep/wake, and reboot.
+- [ ] Confirm the exact `imsg 0.13.4` adapter schemas on a harmless fixture account.
+- [ ] Complete external IPv4 `A` DNS, exact 80→host-HTTP/443→host-HTTPS mapping,
+  ACME, firewall, authentication, scope, rate-limit, target-denial, idempotency,
+  audit-privacy, and harmless-send acceptance.
+- [ ] Publish signed release provenance and an independently verified archive digest.
 
-## Next — Beta readiness (`0.4.x`)
+## Candidate additions
 
-- [ ] Stabilize management commands, state paths, and configuration names.
-- [ ] Add configuration schema/version detection and preflight diagnostics.
-- [ ] Define compatibility guarantees for the JSON-RPC facade.
-- [ ] Add upgrade tests from every supported release.
-- [ ] Add structured health detail that does not reveal conversation data.
-- [ ] Complete an independent threat-model and code review.
+- [ ] A bounded one-shot cross-chat cursor command upstream, followed by a REST
+  catch-up resource with durable cursor semantics.
+- [ ] Delivery status only after the supported dependency exposes a stable,
+  non-injected one-shot JSON command.
+- [ ] Contacts-assisted whois/identity lookup only after a stable mode can avoid
+  unexpected Contacts permission and return a privacy-reviewed schema.
+- [ ] Attachment upload/download only with isolated staging IDs, strict media/size
+  validation, safe lifecycle cleanup, and no host path disclosure.
+- [ ] Live events only with explicit backpressure, reconnect cursors, bounded
+  subscriptions, revocation during streams, and restart acceptance.
+- [ ] Reproducible release signing and notarization that preserves a stable TCC identity.
 
-## Later — Stable (`1.0`)
+## Permanently out of scope
 
-- [ ] Publish a stable API and operator compatibility policy.
-- [ ] Provide a documented security-release and deprecation process.
-- [ ] Meet the supported-host test matrix across two consecutive releases.
-- [ ] Demonstrate reliable backup-free recovery from checked-in configuration and regenerated secrets.
-- [ ] Graduate only after real-world private-network operation produces no unresolved critical design issues.
-
-## Explicitly not planned
-
-- anonymous or public-Internet access;
-- disabling SIP, TCC, or normal Messages protections;
-- general macOS remote control or private-framework injection;
-- attachment retrieval, arbitrary file access, or remote URL fetching;
-- accepting unrestricted `imsg` RPC methods;
-- storing plaintext client passwords in the repository;
-- multi-tenant hosting with mutually untrusted users.
-
-Propose roadmap changes through the [feature request form](https://github.com/mglaeser/imessage-proxy/issues/new?template=feature_request.yml). Security and maintenance cost are acceptance criteria, not follow-up work.
+- disabling System Integrity Protection or TCC;
+- injecting code into Messages.app or using private messaging frameworks;
+- arbitrary command, database, shell, transport, or host-file access;
+- anonymous or cookie-authenticated API access;
+- carrier-SMS fallback or wildcard send targets;
+- copying conversation databases into another runtime; and
+- a second message database or application-side conversation cache.

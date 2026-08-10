@@ -1,241 +1,403 @@
-# API reference
+# API
 
-iMessage Proxy 0.3.0 exposes three HTTPS routes through its Caddy facade. The API is Alpha and may change before 1.0.
+iMessage Proxy 1.0 exposes one unversioned REST surface under `/api`. The routes
+documented here are the entire API. Every API request, including a status check,
+requires exactly one scoped key as
+`Authorization: Bearer <key>`. The service never accepts a credential in a query
+parameter, cookie, JSON body, or another authorization scheme.
 
-The repository also ships an [OpenAPI 3.1 description](../openapi.yaml) for tooling and client generation. This document defines the method-specific policy details that the compact OpenAPI schema references; changes to either must update both.
-
-## Conventions
-
-Set the base URL to the private DNS name and configured port, for example:
-
-```text
-https://messages.example.internal:9443
+```bash
+export IMESSAGE_PROXY_URL='https://messages.example.com'
+export IMESSAGE_PROXY_API_KEY='imp_REPLACE_WITH_YOUR_KEY'
 ```
 
-External clients authenticate to Caddy with HTTP Basic Auth over TLS. Every client should have a distinct username and password. Clients must trust the private Caddy root CA and must not disable certificate verification.
+Use the standard header on every example:
 
-Authorization is currently coarse: every valid facade client can use every read
-method and can send to any target in the deployment-wide allowlist. Give
-credentials only to clients that may read the exposed conversations, and revoke
-each client independently.
+```text
+Authorization: Bearer imp_REPLACE_WITH_YOUR_KEY
+```
 
-The bearer credential between Caddy and the native bridge is an internal implementation detail. Never distribute it to API clients or send it to the HTTPS facade.
+Never disable certificate verification. Public mode uses an ordinary ACME
+certificate for the configured hostname.
 
-POST request bodies use UTF-8 JSON with `Content-Type: application/json`. Query strings, chunked transfer encoding, duplicate headers, bodies over 64 KiB, and headers over 16 KiB are rejected. Responses include `Cache-Control: no-store`.
+## Scopes
 
-## Routes
+| Scope | Grants |
+| --- | --- |
+| `messages:read` | Chats, background state, history, scheduled messages, and statistics |
+| `messages:send` | Allowlisted text sends |
+| `admin` | Audit/key administration and every read/send operation |
 
-| Method | Path | Purpose | Success |
-| --- | --- | --- | --- |
-| `GET` | `/healthz` | Exercise the facade, bridge, `imsg`, and a minimal Messages read | `200` JSON |
-| `POST` | `/v1/rpc` | Submit one allowlisted JSON-RPC 2.0 request | `200` JSON-RPC |
-| `POST` | `/v2/sessions/sms` | Send one allowlisted iMessage with a compact JSON body | `204` empty body |
+`GET /api/status` accepts any valid key. A missing, malformed, expired, revoked,
+or unknown key returns the same `401` response. A valid key without the required
+scope returns `403`.
 
-Other route/method combinations return `404`.
+## Status
 
-## Health
+`GET /api/status` exercises the native service, pinned `imsg` dependency, and a
+minimal Messages database read. It is a readiness check, not merely a process
+check.
 
-`GET /healthz` runs an internal `chats.list` request with a limit of one. A healthy response is:
+```bash
+curl --fail-with-body \
+  --header "Authorization: Bearer $IMESSAGE_PROXY_API_KEY" \
+  "$IMESSAGE_PROXY_URL/api/status"
+```
 
 ```json
 {
   "status": "ok",
-  "version": "0.3.0"
-}
-```
-
-This is a functional readiness check, not merely a process liveness check. It can fail if authentication, the bridge, Full Disk Access, `imsg`, or the Messages database is unavailable.
-
-```bash
-curl \
-  --cacert /secure/path/imessage-proxy-root.crt \
-  --user automation-a \
-  https://messages.example.internal:9443/healthz
-```
-
-## JSON-RPC endpoint
-
-`POST /v1/rpc` accepts one JSON-RPC 2.0 object. Batches and notifications are not supported. The object may contain only `jsonrpc`, `id`, `method`, and `params`; the first three are required. `id` must be a non-boolean number or a non-empty string of at most 256 characters, and `params` must be an object when present.
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "request-1",
-  "method": "messages.after",
-  "params": {
-    "since_rowid": 0,
-    "limit": 20
+  "version": "1.0.0",
+  "uptime_seconds": 180,
+  "messages": {
+    "status": "ready",
+    "dependency_version": "0.13.4"
+  },
+  "key": {
+    "id": "48b64de5-fe25-44a7-9d4e-cdfad09f881b",
+    "name": "automation-a",
+    "key_prefix": "imp_PVHqRwmN",
+    "scopes": ["messages:read", "messages:send"],
+    "expires_at": "2026-11-07T12:00:00Z"
   }
 }
 ```
 
-The sanitized `imsg` JSON-RPC response is returned verbatim. HTTP `200` means the bridge completed the exchange; callers must still inspect the JSON-RPC `error` member before treating the operation as successful.
+## Chats
 
-### `chats.list`
+### List chats
 
-Lists a bounded set of chats.
-
-| Parameter | Required | Constraint |
-| --- | --- | --- |
-| `limit` | No | Positive integer, maximum `100` |
-| `unread_only` | No | Boolean |
-
-```json
-{"jsonrpc":"2.0","id":"chats-1","method":"chats.list","params":{"limit":20}}
-```
-
-### `messages.history`
-
-Reads a bounded history page for one chat.
-
-| Parameter | Required | Constraint |
-| --- | --- | --- |
-| `chat_id` | Yes | Positive integer |
-| `limit` | No | Positive integer, maximum `200` |
-| `participants` | No | Array of at most `32` non-empty strings, each at most `256` characters |
-| `start` | No | Non-empty string, maximum `64` characters |
-| `end` | No | Non-empty string, maximum `64` characters |
-| `attachments` | No | Must be absent or `false`; iMessage Proxy forces `false` |
-
-```json
-{"jsonrpc":"2.0","id":"history-1","method":"messages.history","params":{"chat_id":42,"limit":50}}
-```
-
-### `messages.after`
-
-Reads messages after a Messages database row cursor. This is the recommended polling method.
-
-| Parameter | Required | Constraint |
-| --- | --- | --- |
-| `since_rowid` | Yes | Non-negative integer |
-| `chat_id` | No | Positive integer |
-| `limit` | No | Positive integer, maximum `200` |
-| `attachments` | No | Must be absent or `false`; forced `false` |
-| `convert_attachments` | No | Must be absent or `false`; forced `false` |
-| `include_reactions` | No | Must be absent or `false`; forced `false` |
+`GET /api/chats` returns at most 20 recent chats by default. `limit` accepts
+`1-100`; `unread_only` accepts `true` or `false`.
 
 ```bash
-curl \
-  --cacert /secure/path/imessage-proxy-root.crt \
-  --user automation-a \
-  --header 'Content-Type: application/json' \
-  --data '{"jsonrpc":"2.0","id":"poll-1","method":"messages.after","params":{"since_rowid":0,"limit":20}}' \
-  https://messages.example.internal:9443/v1/rpc
+curl --fail-with-body \
+  --header "Authorization: Bearer $IMESSAGE_PROXY_API_KEY" \
+  "$IMESSAGE_PROXY_URL/api/chats?limit=20&unread_only=true"
 ```
 
-Persist the returned next cursor after every successful page. A cursor belongs to one Messages database; reset and reconcile it if that database is replaced or restored. Use the response's actual cursor field rather than calculating one from timestamps.
+```json
+{"chats":[{"id":42,"name":"Example","identifier":"person@example.net","service":"iMessage","is_group":false,"participants":["person@example.net"]}]}
+```
 
-### `send`
+Private account-routing fields returned by the local dependency are deliberately
+removed at the API boundary.
 
-Sends text through Messages.app. iMessage Proxy requires exactly one target selector.
+### Get one chat
 
-| Parameter | Required | Constraint |
-| --- | --- | --- |
-| `text` | Yes | String containing `1`–`4000` characters |
-| `to` | One target | Non-empty address string, maximum `256` characters |
-| `chat_id` | One target | Positive integer |
-| `chat_identifier` | One target | Non-empty string, maximum `256` characters |
-| `chat_guid` | One target | Non-empty string, maximum `256` characters |
-| `service` | No | `auto`, `imessage`, or `sms`; normalized to lowercase |
-| `region` | No | String, maximum `16` characters |
+```bash
+curl --fail-with-body \
+  --header "Authorization: Bearer $IMESSAGE_PROXY_API_KEY" \
+  "$IMESSAGE_PROXY_URL/api/chats/42"
+```
 
-Unlike the simple endpoint below, this advanced RPC may request carrier SMS via
-`service: "sms"` or let Messages choose via `service: "auto"`. Client
-credentials are not scoped per route or method.
+The local positive chat ID is preferred for group reads and sends. It belongs to
+one Messages database and is not portable to another Mac or restored database.
+An unknown ID returns `404`.
 
-The target's exact allowlist representation must appear in `allowed-targets.txt`:
+### Inspect chat-background state
+
+`GET /api/chats/{chat_id}/background` reads the pinned dependency's local
+background metadata without returning a host path, remote asset URL, opaque
+asset/object/channel identifier, communication-safety state, background-event row
+ID, or implementation-version field. It returns only the semantic set/clear
+state, a declared file size when available, safe cache-presence booleans, and the
+latest set/clear timestamp.
+
+```bash
+curl --fail-with-body \
+  --header "Authorization: Bearer $IMESSAGE_PROXY_API_KEY" \
+  "$IMESSAGE_PROXY_URL/api/chats/42/background"
+```
+
+```json
+{
+  "chat_id": 42,
+  "background_set": true,
+  "file_size": 2048,
+  "cache_exists": true,
+  "watch_background_exists": false,
+  "latest_event": {
+    "action": "set",
+    "date": "2026-08-09T12:03:00Z"
+  }
+}
+```
+
+Nullable fields are returned as `null` when the pinned dependency does not
+provide them. An unknown chat returns `404`.
+
+## Message history
+
+`GET /api/chats/{chat_id}/messages` returns up to 50 messages by default and no
+more than 200. Optional `start` is inclusive and `end` is exclusive. Both are
+calendar-valid RFC 3339 date-times, for example `2026-08-09T10:15:00Z`. The
+grammar requires uppercase `T` and `Z`, seconds from `00` through `59`, an
+optional fractional part containing one to nine digits, and either `Z` or a
+numeric UTC offset no greater than `14:00`. Leap seconds are not accepted. `end`
+must be later than `start` when both are supplied. Invalid bounds return `400`
+with the `invalid-date` problem type. A repeated `participant` filters
+case-insensitive whole sender handles; each value contains `1-256` Unicode code
+points and cannot begin with a hyphen or contain a comma or control character.
+
+```bash
+curl --fail-with-body \
+  --header "Authorization: Bearer $IMESSAGE_PROXY_API_KEY" \
+  "$IMESSAGE_PROXY_URL/api/chats/42/messages?limit=50"
+```
+
+```json
+{
+  "messages": [
+    {
+      "id": 1979,
+      "chat_id": 42,
+      "guid": "D6C5A028-4C63-44A4-8A4A-61D4430D7A51",
+      "sender": "person@example.net",
+      "is_from_me": false,
+      "text": "Hello",
+      "created_at": "2026-08-09T10:15:00Z",
+      "attachments": [],
+      "reactions": []
+    }
+  ]
+}
+```
+
+Attachment metadata may include a safe filename, media type, UTI, byte size, and
+sticker flag. Absolute host paths, converted paths, private account identifiers,
+and destination routing fields are never returned.
+
+History is sorted by `created_at` ascending, then by numeric message ID when two
+rows have the same timestamp.
+
+## Global search boundary
+
+Cross-chat text search is not part of 1.0. The pinned dependency couples that
+command to Contacts access and provides no no-Contacts mode. A remote read could
+therefore trigger a TCC prompt or enumerate address-book data. Bounded history
+stays available per chat without expanding that permission boundary.
+
+## Send a message
+
+`POST /api/messages` accepts exactly one `recipient` or positive `chat_id`, plus
+`text` containing `1-4000` Unicode code points. A recipient contains `1-256`
+Unicode code points and must be either `+` followed by 7-15 ASCII digits whose
+first digit is nonzero, or an email-like handle containing exactly one `@`.
+Whitespace, control characters, leading hyphens, and contact names are rejected.
+The recipient must exactly match the typed allowlist. The service always requests
+iMessage and disables carrier-SMS fallback. Text may contain tabs and line
+breaks; other control characters and a leading hyphen are rejected because the
+pinned dependency parses dash-prefixed values as options. An allowlisted but
+unknown `chat_id` returns `404` without sending.
+
+Every logical send needs an `Idempotency-Key` containing `8-128` ASCII letters,
+digits, periods, underscores, tildes, or hyphens. Generate the value before the
+first attempt and persist it beside the calling job. Reusing it with the same
+request returns the stored outcome; reusing it with different content returns
+`409`.
+
+```bash
+curl --fail-with-body \
+  --request POST \
+  --header "Authorization: Bearer $IMESSAGE_PROXY_API_KEY" \
+  --header "Idempotency-Key: $(uuidgen)" \
+  --header 'Content-Type: application/json' \
+  --data '{"recipient":"person@example.net","text":"Hello"}' \
+  "$IMESSAGE_PROXY_URL/api/messages"
+```
+
+Or target one reviewed local chat:
+
+```json
+{"chat_id":42,"text":"Hello group"}
+```
+
+An exact line must exist in `allowed-targets.txt`:
 
 ```text
 person@example.net
 chat_id:42
-chat_identifier:example-value
-chat_guid:example-guid
 ```
 
-A line containing only `*` deliberately disables target restriction. It is not recommended. The bridge always replaces the transport with `applescript`; callers cannot select a private or injected transport.
+The allowlist has no wildcard. An empty file disables sending without disabling
+reads or key administration.
 
-```bash
-curl \
-  --cacert /secure/path/imessage-proxy-root.crt \
-  --user automation-a \
-  --header 'Content-Type: application/json' \
-  --data '{"jsonrpc":"2.0","id":"send-1","method":"send","params":{"to":"person@example.net","text":"iMessage Proxy test","service":"imessage"}}' \
-  https://messages.example.internal:9443/v1/rpc
-```
-
-Do not automatically retry a send after an ambiguous timeout. Reconcile using the returned GUID or message history to avoid duplicates.
-
-### `message.send_status`
-
-Looks up the status of one sent message.
-
-| Parameter | Required | Constraint |
-| --- | --- | --- |
-| `guid` | Yes | Non-empty string, maximum `256` characters |
+A successful command returns `202`:
 
 ```json
-{"jsonrpc":"2.0","id":"status-1","method":"message.send_status","params":{"guid":"example-guid"}}
+{
+  "operation_id": "7B740A82-2149-43DB-BE37-6F3D28711A47",
+  "state": "accepted",
+  "message_id": 1979,
+  "guid": "D6C5A028-4C63-44A4-8A4A-61D4430D7A51"
+}
 ```
 
-## Simple SMS-style endpoint
+`message_id` and `guid` are present only when the inserted row is observable.
+Accepted does not mean delivered. A deadline after Messages may have received the
+command is recorded as ambiguous; the server never automatically executes that
+idempotency key again. Inspect Messages.app before making a deliberate new send
+with a new key.
 
-`POST /v2/sessions/sms` is an easy-to-use endpoint for immediate iMessage
-sends without a JSON-RPC envelope. Its small JSON body works like sending an
-SMS: provide the required opaque `smsId` value, recipient, and message. The endpoint always forces
-the `imessage` service and normal AppleScript transport; it is not a carrier SMS
-gateway and exposes no provider-side account, caller-ID, balance, history, or
-scheduling surface.
+## Scheduled messages
 
-The request must use `Content-Type: application/json` and contain only:
-
-| Field | Required | Constraint |
-| --- | --- | --- |
-| `smsId` | Yes | Opaque string, maximum `64` characters; validated and discarded, never logged or returned, and not used for correlation, deduplication, or idempotency |
-| `recipient` | Yes | Non-empty string, maximum `256` characters; must be exactly allowlisted |
-| `message` | Yes | String containing `1`–`460` characters |
-| `sendAt` | No | Legacy immediate marker; omit it in new requests, or use numeric `-1`; scheduled timestamps are rejected |
-
-Success returns `204 No Content`, which means Messages.app accepted the send
-command—not that the recipient received it. Do not automatically retry after an
-ambiguous timeout; reconcile through message history to avoid duplicate sends.
+`GET /api/scheduled-messages?limit=50` reads future Send Later rows without
+changing them. `limit` accepts `1-100`. A macOS database without scheduling
+columns fails explicitly instead of returning an ambiguous empty list.
 
 ```bash
-curl \
-  --cacert /secure/path/imessage-proxy-root.crt \
-  --user automation-a \
-  --header 'Content-Type: application/json' \
-  --data '{"smsId":"request-1","recipient":"person@example.net","message":"Hello from iMessage Proxy"}' \
-  https://messages.example.internal:9443/v2/sessions/sms
+curl --fail-with-body \
+  --header "Authorization: Bearer $IMESSAGE_PROXY_API_KEY" \
+  "$IMESSAGE_PROXY_URL/api/scheduled-messages?limit=50"
 ```
 
-Use a distinct iMessage Proxy credential for every client. Never reuse a
-password or token from another service.
+## Statistics
+
+`GET /api/statistics/messages` returns aggregate logical-message counts. Optional
+parameters are a positive `chat_id`, an IANA `time_zone` identifier recognized
+by the Mac (for example, `UTC` or `Europe/Vienna`), and `include_media=true`.
+The time zone must be `UTC` or an exact, case-sensitive entry in macOS's
+`NSTimeZone.knownTimeZoneNames` set and is limited to 64 UTF-8 bytes. Invalid
+names return `400` with the `invalid-time-zone` problem type.
+
+The response is a closed schema: total/sent/received counts; chat, sender,
+service, and date breakdowns; the resolved time zone; and either `null` or
+explicit attachment totals and type/chat breakdowns in `media`. Unknown
+dependency fields and private host paths are dropped. An unknown `chat_id`
+returns `404`. Totals cover the complete selected database scope; every
+breakdown array is deterministically capped at the first 100 rows in the pinned
+dependency's order. The required
+`truncated_dimensions` array contains only upstream dimensions that exceeded
+100 rows, in the fixed order `chats`, `senders`, `services`, `dates`,
+`media.types`, `media.chats`. It is empty when every dimension is complete.
+
+```bash
+curl --fail-with-body \
+  --header "Authorization: Bearer $IMESSAGE_PROXY_API_KEY" \
+  "$IMESSAGE_PROXY_URL/api/statistics/messages?time_zone=Europe%2FVienna&include_media=true"
+```
+
+## Audit events
+
+`GET /api/audit-events` requires `admin` and returns newest-first operational
+metadata. `limit` defaults to `100` and accepts `1-1000`. Each event contains a
+request ID, nullable caller/target key IDs, observed source address (`local` for
+a direct socket caller or `invalid` when rejected proxy metadata cannot be
+parsed), action, attempted/final phase, nullable status and duration, and
+creation time. It never contains a credential, hash, message, recipient, conversation, or
+dependency output.
+
+```bash
+curl --fail-with-body \
+  --header "Authorization: Bearer $IMESSAGE_PROXY_API_KEY" \
+  "$IMESSAGE_PROXY_URL/api/audit-events?limit=100"
+```
+
+## API-key administration
+
+### List metadata
+
+`GET /api/keys` returns metadata for active, expired, and revoked keys,
+newest-created first. Key storage and this response are both capped at 1000
+rows. It never returns a plaintext credential or hash.
+
+```bash
+curl --fail-with-body \
+  --header "Authorization: Bearer $IMESSAGE_PROXY_API_KEY" \
+  "$IMESSAGE_PROXY_URL/api/keys"
+```
+
+### Create
+
+`POST /api/keys` accepts a display name, one or more unique scopes, and an expiry
+of `1-365` days. The default is 90 days. Leading and trailing whitespace is
+removed from the name; the normalized value must encode to `1-80` UTF-8 bytes
+and contain no Unicode control characters. Storage is capped at 1000 keys.
+Before enforcing that cap, creation deletes at most 100 expired or revoked keys
+that no idempotency record still references; if the store remains full, creation
+returns `409`. Historical audit rows retain the event while their deleted caller
+reference becomes null.
+
+```bash
+curl --fail-with-body \
+  --request POST \
+  --header "Authorization: Bearer $IMESSAGE_PROXY_API_KEY" \
+  --header 'Content-Type: application/json' \
+  --data '{"name":"automation-a","scopes":["messages:read","messages:send"],"expires_in_days":90}' \
+  "$IMESSAGE_PROXY_URL/api/keys"
+```
+
+The response returns the new `imp_…` credential once. Store it immediately; it
+cannot be recovered from the database later. Its `Location` header identifies
+the metadata-only `GET /api/keys/{key_id}` resource:
+
+```bash
+curl --fail-with-body \
+  --header "Authorization: Bearer $IMESSAGE_PROXY_API_KEY" \
+  "$IMESSAGE_PROXY_URL/api/keys/48B64DE5-FE25-44A7-9D4E-CDFAD09F881B"
+```
+
+The detail response has the same non-secret shape as an item from `GET /api/keys`;
+unknown key IDs return `404`.
+
+### Revoke
+
+```bash
+curl --fail-with-body \
+  --request DELETE \
+  --header "Authorization: Bearer $IMESSAGE_PROXY_API_KEY" \
+  "$IMESSAGE_PROXY_URL/api/keys/48B64DE5-FE25-44A7-9D4E-CDFAD09F881B"
+```
+
+Revocation is immediate and returns `204`. It is a soft, auditable state change.
+The final active administrator key cannot be revoked. Rotate by creating and
+testing a replacement before revoking the old key.
 
 ## Errors
 
-Bridge-generated errors use a small JSON object:
+API errors produced after routing use `application/problem+json`. Native-service
+problems include a request ID suitable for matching the privacy-reviewed macOS
+unified-log category:
 
 ```json
-{"error":"send target is not allowed"}
+{
+  "type": "https://github.com/mglaeser/imessage-proxy/problems/insufficient-scope",
+  "title": "Forbidden",
+  "status": 403,
+  "detail": "The API key does not grant this operation.",
+  "request_id": "1f825d86-1626-4a0c-a163-644a4cebd91b"
+}
 ```
 
-| HTTP status | Meaning |
+| Status | Meaning |
 | --- | --- |
-| `400` | Malformed HTTP/JSON, invalid parameter, unsupported transfer style, or scheduled send |
-| `401` | Missing or invalid credentials at an authentication boundary |
-| `403` | RPC method, parameter, or send target is forbidden |
-| `404` | Route or HTTP method not found |
-| `408` | The bounded HTTP request timed out at the facade or bridge |
-| `413` | Request body exceeds 64 KiB |
-| `415` | A POST endpoint is not using JSON content type |
+| `400` | Invalid path/query/body/header contract |
+| `401` | Missing or unusable bearer key |
+| `403` | Missing scope, disallowed browser origin, or non-allowlisted target |
+| `404` | Authenticated resource does not exist |
+| `408` | Client request transfer exceeded its deadline |
+| `409` | Idempotency/send-state conflict, key-capacity limit, or final-admin protection |
+| `413` | Body exceeds 64 KiB |
+| `415` | JSON endpoint received another media type |
+| `429` | Per-source or per-key rate limit exceeded |
 | `431` | Headers exceed 16 KiB |
-| `500` | The bridge or facade encountered an internal error |
-| `502` | `imsg` failed or returned an invalid response, an SMS-style send failed, or the facade could not use the bridge upstream |
-| `503` | Functional health failed, the bridge concurrency limit is full, or the facade/upstream is temporarily unavailable |
-| `504` | The bridge's `imsg` deadline or the facade's wait for the bridge expired |
+| `502` | The bounded dependency command failed or returned invalid output |
+| `503` | Messages readiness or native capacity is unavailable |
+| `504` | The dependency command exceeded its deadline |
 
-Caddy can reject a request before it reaches the bridge; its error body is not part of iMessage Proxy's JSON error contract. Clients should primarily branch on HTTP status and treat bodies as diagnostic text.
+`Retry-After` accompanies `429`; `WWW-Authenticate: Bearer` accompanies `401`.
+Unknown `/api` routes authenticate before returning `404`, so route discovery
+does not create an unauthenticated side channel.
 
-## Stability
+Caddy or the operating system can reject a malformed connection before the API
+route exists—for example, an over-limit request header can receive a plain
+`431`. Such pre-routing transport responses cannot carry the API problem schema
+or its complete response-header set. They perform no API operation. The supplied
+Caddy configuration still removes request objects and URIs from runtime error
+logs.
 
-During Alpha, additions and breaking changes may occur in minor releases. The method allowlist, parameter limits, authentication boundaries, target policy, and response forwarding rules are compatibility-sensitive. Consult [CHANGELOG.md](../CHANGELOG.md) before upgrading.
+A routed edge failure also receives a UUID-shaped `request_id`, but the
+privacy-first edge does not emit an access/error record for that request. Treat
+that value as response correlation for the client, not as a promise that every
+edge failure appears in a log.

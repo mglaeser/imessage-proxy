@@ -11,6 +11,7 @@
 *.profraw
 *.profdata
 compile_commands.json
+/node_modules/
 
 # Editor state
 .idea/
@@ -26,7 +27,9 @@ compile_commands.json
 *.token
 *.pem
 *.key
-/users.caddy
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
 /allowed-targets.txt
 
 # Runtime state

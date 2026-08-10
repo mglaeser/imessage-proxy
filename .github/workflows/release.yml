@@ -34,17 +34,49 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Require the tagged commit on main
+      - name: Require an annotated tag on main
         shell: bash
         run: |
+          tag_ref="refs/tags/$GITHUB_REF_NAME"
+          if ! git show-ref --verify --quiet "$tag_ref"; then
+            printf 'error: checked-out tag is missing: %s\n' \
+              "$GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          if [[ "$(git cat-file -t "$tag_ref")" != tag ]]; then
+            printf 'error: releases require an annotated tag; %s is not annotated\n' \
+              "$GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          tagged_commit="$(git rev-parse "$tag_ref^{commit}")"
+          if [[ "$tagged_commit" != "$GITHUB_SHA" ]]; then
+            printf 'error: annotated tag %s resolves to %s, expected %s\n' \
+              "$GITHUB_REF_NAME" "$tagged_commit" "$GITHUB_SHA" >&2
+            exit 1
+          fi
+
           git fetch --no-tags origin \
             '+refs/heads/main:refs/remotes/origin/main'
-          git merge-base --is-ancestor \
-            "$GITHUB_SHA" refs/remotes/origin/main
-          tag_ref="refs/tags/$GITHUB_REF_NAME^{}"
+          if ! git merge-base --is-ancestor \
+            "$GITHUB_SHA" refs/remotes/origin/main; then
+            printf 'error: tagged commit %s is not on main\n' \
+              "$GITHUB_SHA" >&2
+            exit 1
+          fi
+
+          tag_object="$(git rev-parse "$tag_ref")"
           tag_record="$(git ls-remote --exit-code origin "$tag_ref")"
-          test "$tag_record" = "$GITHUB_SHA"$'\t'"$tag_ref"
-      - name: Require successful main checks
+          if [[ "$tag_record" != "$tag_object"$'\t'"$tag_ref" ]]; then
+            printf 'error: remote annotated tag does not match the checked-out tag object\n' >&2
+            exit 1
+          fi
+          peeled_ref="$tag_ref^{}"
+          peeled_record="$(git ls-remote --exit-code origin "$peeled_ref")"
+          if [[ "$peeled_record" != "$GITHUB_SHA"$'\t'"$peeled_ref" ]]; then
+            printf 'error: remote annotated tag does not resolve to the tagged commit\n' >&2
+            exit 1
+          fi
+      - name: Require successful CI for the tagged commit
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -54,8 +86,8 @@ jobs:
             "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100")"
           for required_check in \
             'Workflows and API contract' \
-            'Caddy facade integration (ARM64)' \
-            'Build, lint, and test' \
+            'Caddy Unix-socket edge (ARM64)' \
+            'Build, lint, analyze, and test' \
             'Install layout' \
             'Analyze GitHub Actions' \
             'Gitleaks' \
@@ -75,16 +107,18 @@ jobs:
         id: metadata
         shell: bash
         run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'error: release tag must have the form vMAJOR.MINOR.PATCH\n' >&2
+            exit 1
+          fi
           version="${GITHUB_REF_NAME#v}"
-          test "$GITHUB_REF_NAME" = "v$version"
-          test "$version" = "$(make --no-print-directory version)"
+          project_version="$(< VERSION)"
+          if [[ "$version" != "$project_version" ]]; then
+            printf 'error: tag version %s does not match VERSION (%s)\n' \
+              "$version" "$project_version" >&2
+            exit 1
+          fi
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-      - name: Install validation tools
-        run: brew install caddy clang-format markdownlint-cli2 shellcheck
-      - name: Revalidate tagged source
-        run: |
-          make check STRICT=1
-          npx --yes @redocly/cli@2.46.0 lint openapi.yaml
       - name: Create source archive and checksum
         env:
           VERSION: ${{ steps.metadata.outputs.version }}
@@ -94,6 +128,8 @@ jobs:
           export COPYFILE_DISABLE=1
           git archive --format=tar --prefix="imessage-proxy-$VERSION/" "$GITHUB_SHA" |
             gzip -n -9 > "dist/imessage-proxy-$VERSION.tar.gz"
+          test "$(tar -xOzf "dist/imessage-proxy-$VERSION.tar.gz" \
+            "imessage-proxy-$VERSION/REVISION")" = "$GITHUB_SHA"
           cd dist
           shasum -a 256 "imessage-proxy-$VERSION.tar.gz" > SHA256SUMS
       - name: Attest source archive
@@ -105,10 +141,24 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           verify_remote_tag() {
-            local tag_record tag_ref
-            tag_ref="refs/tags/$GITHUB_REF_NAME^{}"
+            local peeled_record peeled_ref tag_object tag_record tag_ref
+            tag_ref="refs/tags/$GITHUB_REF_NAME"
+            if [[ "$(git cat-file -t "$tag_ref")" != tag ]]; then
+              printf 'error: release tag is no longer an annotated tag\n' >&2
+              return 1
+            fi
+            tag_object="$(git rev-parse "$tag_ref")"
             tag_record="$(git ls-remote --exit-code origin "$tag_ref")"
-            test "$tag_record" = "$GITHUB_SHA"$'\t'"$tag_ref"
+            if [[ "$tag_record" != "$tag_object"$'\t'"$tag_ref" ]]; then
+              printf 'error: remote annotated tag changed during release\n' >&2
+              return 1
+            fi
+            peeled_ref="$tag_ref^{}"
+            peeled_record="$(git ls-remote --exit-code origin "$peeled_ref")"
+            if [[ "$peeled_record" != "$GITHUB_SHA"$'\t'"$peeled_ref" ]]; then
+              printf 'error: remote annotated tag no longer resolves to the tagged commit\n' >&2
+              return 1
+            fi
           }
           verify_remote_tag
           archive="dist/imessage-proxy-${{ steps.metadata.outputs.version }}.tar.gz"

@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="referrer" content="no-referrer">
+    <meta name="robots" content="noindex, nofollow, noarchive">
+    <meta name="description" content="Secure status and API-key management for iMessage Proxy.">
+    <title>iMessage Proxy Console</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="page-glow" aria-hidden="true"></div>
+
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="iMessage Proxy console home">
+        <span class="brand-mark" aria-hidden="true"><span></span></span>
+        <span>
+          <strong>iMessage Proxy</strong>
+          <small>Management console</small>
+        </span>
+      </a>
+      <div class="connection-chip" id="connection-chip" data-state="signed-out">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="connection-label">Signed out</span>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section class="signin-layout" id="signin-view" aria-labelledby="signin-title">
+        <div class="hero-copy">
+          <p class="eyebrow">Private by default</p>
+          <h1 id="signin-title">One key.<br>A clear view.</h1>
+          <p class="hero-lede">
+            Check service health and manage scoped access without exposing account
+            credentials or storing your key beyond this browser tab.
+          </p>
+          <ul class="trust-list" aria-label="Security properties">
+            <li><span aria-hidden="true">01</span>Keys stay in this tab</li>
+            <li><span aria-hidden="true">02</span>Every data request is authenticated</li>
+            <li><span aria-hidden="true">03</span>Secrets are shown once</li>
+          </ul>
+        </div>
+
+        <div class="panel signin-panel">
+          <div class="panel-heading">
+            <p class="eyebrow">Administrator access</p>
+            <h2>Open the console</h2>
+            <p>Enter an API key with the <code>admin</code> scope.</p>
+          </div>
+
+          <form id="signin-form" action="/" method="get" novalidate>
+            <label for="signin-key">API key</label>
+            <div class="secret-field">
+              <input
+                id="signin-key"
+                type="password"
+                required
+                autocomplete="off"
+                autocapitalize="none"
+                spellcheck="false"
+                placeholder="imp_••••••••••••••••"
+              >
+              <button class="field-action" id="toggle-key" type="button" aria-pressed="false">
+                Show
+              </button>
+            </div>
+            <p class="field-help">Saved only in session storage and cleared when this tab closes.</p>
+            <p class="form-error" id="signin-error" role="alert" hidden></p>
+            <button class="button button-primary button-wide" id="signin-button" type="submit">
+              <span>Continue securely</span>
+              <span aria-hidden="true">→</span>
+            </button>
+          </form>
+        </div>
+      </section>
+
+      <section id="console-view" aria-labelledby="console-title" hidden>
+        <div class="console-heading">
+          <div>
+            <p class="eyebrow">Operations</p>
+            <h1 id="console-title">Service overview</h1>
+            <p id="status-updated">Waiting for the first status check.</p>
+          </div>
+          <div class="heading-actions">
+            <button class="button button-secondary" id="refresh-button" type="button">Refresh</button>
+            <button class="button button-quiet" id="logout-button" type="button">Sign out</button>
+          </div>
+        </div>
+
+        <section class="metrics" aria-label="Service status">
+          <article class="metric-card metric-primary">
+            <p>Service</p>
+            <strong id="service-status">Checking</strong>
+            <span id="service-detail">Secure endpoint</span>
+          </article>
+          <article class="metric-card">
+            <p>Messages</p>
+            <strong id="messages-status">Checking</strong>
+            <span>Native service</span>
+          </article>
+          <article class="metric-card">
+            <p>Version</p>
+            <strong id="service-version">—</strong>
+            <span>Running release</span>
+          </article>
+          <article class="metric-card">
+            <p>Uptime</p>
+            <strong id="service-uptime">—</strong>
+            <span>Current process</span>
+          </article>
+        </section>
+
+        <div class="workspace-grid">
+          <section class="panel keys-panel" aria-labelledby="keys-title">
+            <div class="panel-heading panel-heading-row">
+              <div>
+                <p class="eyebrow">Access</p>
+                <h2 id="keys-title">API keys</h2>
+                <p>Active, expired, and revoked credentials.</p>
+              </div>
+              <span class="count-badge" id="key-count">0 keys</span>
+            </div>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Name</th>
+                    <th scope="col">Scopes</th>
+                    <th scope="col">Expires</th>
+                    <th scope="col">Last used</th>
+                    <th scope="col"><span class="visually-hidden">Actions</span></th>
+                  </tr>
+                </thead>
+                <tbody id="keys-body"></tbody>
+              </table>
+              <div class="empty-state" id="keys-empty" hidden>
+                <strong>No keys to display</strong>
+                <p>Create a scoped key for your first client.</p>
+              </div>
+            </div>
+          </section>
+
+          <aside class="panel create-panel" aria-labelledby="create-title">
+            <div class="panel-heading">
+              <p class="eyebrow">New credential</p>
+              <h2 id="create-title">Create an API key</h2>
+              <p>Use the smallest set of permissions the client needs.</p>
+            </div>
+
+            <form id="create-form" novalidate>
+              <label for="key-name">Key name</label>
+              <input
+                id="key-name"
+                name="name"
+                type="text"
+                required
+                minlength="1"
+                maxlength="80"
+                aria-describedby="key-name-help"
+                autocomplete="off"
+                placeholder="Production notifier"
+              >
+              <p class="field-help" id="key-name-help">1–80 UTF-8 bytes after surrounding whitespace is removed.</p>
+
+              <fieldset>
+                <legend>Scopes</legend>
+                <label class="scope-option">
+                  <input type="checkbox" name="scope" value="messages:read">
+                  <span><strong>Read messages</strong><small>Chats, backgrounds, schedules, and statistics</small></span>
+                </label>
+                <label class="scope-option">
+                  <input type="checkbox" name="scope" value="messages:send">
+                  <span><strong>Send messages</strong><small>Allowlisted recipients only</small></span>
+                </label>
+                <label class="scope-option">
+                  <input type="checkbox" name="scope" value="admin">
+                  <span><strong>Administration</strong><small>All API access and key management</small></span>
+                </label>
+              </fieldset>
+
+              <label for="key-expiry">Expires in</label>
+              <div class="number-field">
+                <input id="key-expiry" name="expires_in_days" type="number" min="1" max="365" value="90" required>
+                <span>days</span>
+              </div>
+
+              <p class="form-error" id="create-error" role="alert" hidden></p>
+              <button class="button button-primary button-wide" id="create-button" type="submit">
+                Generate key
+              </button>
+            </form>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <dialog class="secret-dialog" id="created-key-dialog" aria-labelledby="created-key-title">
+      <div class="dialog-icon" aria-hidden="true">✓</div>
+      <p class="eyebrow">Created successfully</p>
+      <h2 id="created-key-title">Copy this key now</h2>
+      <p>This secret cannot be retrieved again. Move it directly into the client’s secret manager.</p>
+      <label for="created-key">New API key</label>
+      <input id="created-key" class="created-key" type="text" readonly spellcheck="false">
+      <p class="copy-status" id="copy-status" role="status"></p>
+      <div class="dialog-actions">
+        <button class="button button-primary" id="copy-key-button" type="button">Copy key</button>
+        <button class="button button-secondary" id="close-key-dialog" type="button">I stored it</button>
+      </div>
+    </dialog>
+
+    <dialog class="confirm-dialog" id="revoke-dialog" aria-labelledby="revoke-title">
+      <p class="eyebrow">Confirm revocation</p>
+      <h2 id="revoke-title">Revoke this API key?</h2>
+      <p>
+        <strong id="revoke-key-name">This key</strong> will stop working immediately.
+        This action cannot be undone.
+      </p>
+      <form id="revoke-form">
+        <div class="dialog-actions">
+          <button class="button button-danger" id="confirm-revoke" type="submit">Revoke key</button>
+          <button class="button button-secondary" id="cancel-revoke" type="button">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -1,250 +1,275 @@
 <!-- markdownlint-disable MD033 -->
-<p align="center">
-  <img src="docs/assets/imessage-proxy.svg" width="112" height="112" alt="iMessage Proxy: a star inside a message bubble">
-</p>
 <h1 align="center">iMessage Proxy</h1>
 <p align="center">
-  <strong>A small, security-first iMessage proxy for macOS and private networks.</strong>
+  <strong>A small, security-first REST API for Messages.app.</strong>
 </p>
 <p align="center">
   <a href="https://github.com/mglaeser/imessage-proxy/actions/workflows/ci.yml"><img src="https://github.com/mglaeser/imessage-proxy/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <a href="https://github.com/mglaeser/imessage-proxy/releases"><img src="https://img.shields.io/github/v/release/mglaeser/imessage-proxy?display_name=tag&amp;sort=semver" alt="Latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/mglaeser/imessage-proxy" alt="Apache-2.0 license"></a>
-  <a href="ROADMAP.md"><img src="https://img.shields.io/badge/status-alpha-f59e0b" alt="Status: Alpha"></a>
   <a href="docs/operations.md"><img src="https://img.shields.io/badge/platform-macOS-111827?logo=apple" alt="Platform: macOS"></a>
 </p>
 <!-- markdownlint-enable MD033 -->
 
-iMessage Proxy exposes a deliberately narrow Messages interface to explicitly authorized clients on a trusted LAN or VPN. A native, loopback-only bridge validates every request before handing an allowlisted operation to [`imsg`](https://github.com/openclaw/imsg). A Caddy facade supplies TLS and per-client authentication at the private-network boundary.
+iMessage Proxy turns a signed-in Mac into a deliberately small HTTPS service for
+reading conversations and sending iMessages. It keeps Messages access in the
+normal macOS user session, exposes only explicit REST resources, and authenticates
+every API request with a scoped, revocable key.
 
-> [!WARNING]
-> iMessage Proxy is **Alpha software**. It handles private conversations and can send messages as the signed-in macOS user. Review the threat model, test with a harmless recipient, and keep it off the public Internet.
+> [!IMPORTANT]
+> The repository can prepare an Internet-facing service, but it cannot safely
+> expose a real Mac without a real hostname, reviewed IPv4 DNS and port mapping,
+> firewall decisions, a maintenance window, and acceptance tests on that Mac.
+> Keep the public-exposure gate disabled until the complete operations checklist
+> passes.
 
-## Send an iMessage with one request
+## Send an iMessage with one POST
 
 > [!TIP]
-> **A familiar SMS-style request, delivered as iMessage.** Once the private
-> service is installed, provide the required `smsId` field, an allowlisted recipient, and
-> message text to one authenticated endpoint.
+> **As straightforward as an SMS API.** Supply a recipient and text—no protocol
+> envelope, session resource, or provider-specific payload.
 
 ```bash
-IMESSAGE_PROXY_URL='https://messages.example.internal:9443'
+export IMESSAGE_PROXY_URL='https://messages.example.com'
+export IMESSAGE_PROXY_API_KEY='imp_REPLACE_WITH_YOUR_KEY'
 
 curl --fail-with-body \
-  --cacert /secure/path/imessage-proxy-root.crt \
-  --user automation-a \
+  --request POST \
+  --header "Authorization: Bearer $IMESSAGE_PROXY_API_KEY" \
+  --header "Idempotency-Key: $(uuidgen)" \
   --header 'Content-Type: application/json' \
-  --data '{"smsId":"request-1","recipient":"person@example.net","message":"Hello from iMessage Proxy"}' \
-  "$IMESSAGE_PROXY_URL/v2/sessions/sms"
+  --data '{"recipient":"person@example.net","text":"Hello from iMessage Proxy"}' \
+  "$IMESSAGE_PROXY_URL/api/messages"
 ```
 
-`204 No Content` means Messages.app accepted the send command; it is not
-delivery confirmation. The recipient must be explicitly allowlisted. The
-endpoint uses a familiar SMS-style path and payload for convenience, but it
-always requests an iMessage—never carrier SMS. Do not blindly retry an
-ambiguous timeout. `smsId` is validated and discarded; it is not logged,
-returned, or used for correlation, deduplication, or idempotency.
+```json
+{"operation_id":"7B740A82-2149-43DB-BE37-6F3D28711A47","state":"accepted"}
+```
 
-> [!NOTE]
-> The never-carrier-SMS guarantee applies to this simple endpoint. The advanced
-> `/v1/rpc` `send` method also accepts `auto` and `sms`. Credentials are not
-> route-scoped, so give one only to a client trusted with the complete read/send
-> API and deployment-wide target allowlist.
+`202 Accepted` means Messages.app accepted the command. It is not delivery
+confirmation. Each logical send needs an idempotency key, and the recipient must
+appear in the local allowlist. The service forces iMessage and disables
+carrier-SMS fallback.
 
-## Why iMessage Proxy?
+## Why this project stays small
 
-- **Small attack surface.** Five tightly validated RPC methods and one compact send route; every other operation is rejected.
-- **Deny-by-default sending.** Exact recipients or chats must be placed on a local allowlist.
-- **Two authentication boundaries.** Clients authenticate to Caddy; Caddy authenticates separately to the loopback bridge.
-- **Private by construction.** The native service binds to `127.0.0.1`, while the facade is intended only for a private LAN or VPN.
-- **Bounded payloads.** Request, response, method, attachment, and text limits are enforced at the bridge boundary.
-- **Useful audit trails.** Logs identify caller, method, outcome, and duration without recording message contents or recipients.
-- **macOS-native permissions.** Messages access stays inside the signed-in user's GUI session and normal TCC controls remain enabled.
+- **Two host-native processes.** Caddy terminates public HTTPS; one native macOS
+  server validates requests and invokes `imsg`. Both are user LaunchAgents.
+  SQLite and the browser console add no service process.
+- **One private Unix socket.** Caddy connects directly to the server through a
+  local socket. There is no VM, container, socket relay, mount, internal TCP
+  bridge, synthetic hostname, packet-filter rule, or reboot-time route repair.
+- **One authentication model.** Every `/api` route accepts only a bearer API key.
+  Keys are scoped, expiring, revocable, and stored as SHA-256 hashes.
+- **Explicit adapters.** Requests map to reviewed `imsg 0.13.4` commands with
+  fixed arguments and bounded output. Callers can never submit command names,
+  filesystem paths, database paths, or arbitrary flags.
+- **Safe sends.** Exact target allowlisting, durable idempotency, no wildcard,
+  no automatic retry after an ambiguous outcome, and no SMS fallback.
+- **Normal macOS protections.** System Integrity Protection and TCC stay enabled.
+  The project does not inject code into Messages.app or call private messaging
+  APIs.
 
-## How it works
+## Architecture
 
 ```mermaid
 flowchart LR
-    client["Authorized client"] -->|"HTTPS + client credentials"| caddy["Caddy facade<br/>Apple Container"]
-    caddy -->|"Private bearer token"| bridge["iMessage Proxy bridge<br/>127.0.0.1"]
-    bridge -->|"Validated JSON-RPC over stdio"| imsg["imsg"]
-    imsg --> db["Messages database<br/>read"]
-    imsg --> app["Messages.app<br/>send"]
+    client["Browser or API client"] -->|"public TCP 80/443"| ingress["Router / NAT"]
+    ingress -->|"IPv4 80→8080<br/>443→8443"| caddy["Caddy LaunchAgent<br/>Messages GUI user"]
+    caddy -->|"private Unix socket"| server["Native REST server LaunchAgent<br/>same GUI user"]
+    server -->|"fixed CLI commands"| imsg["imsg 0.13.4"]
+    imsg -->|"read-only"| database["Messages database"]
+    imsg -->|"AppleScript send"| app["Messages.app"]
 ```
 
-The facade is the only network-facing component. The bridge is not a general-purpose Messages server: it strips or rejects unsupported parameters and forces sends through the normal AppleScript transport. See [Architecture](docs/architecture.md) and [Security model](docs/security.md).
+Caddy serves the static management console and forwards only `/api` to the Unix
+socket. High host ports avoid a root daemon; the external router must map public
+TCP 80 and 443 exactly to the configured host IPv4 ports, which default to 8080
+and 8443. Its explicit HTTP route redirects only the configured hostname to the
+ordinary public HTTPS URL; it never publishes the internal `:8443` port.
 
-## Scope
+Caddy and the REST server run as the same macOS GUI user. The socket narrows
+network reachability, but it is not a privilege boundary between those processes.
+Caddy necessarily sees bearer keys while terminating TLS and must be treated as
+part of the trusted service. Grant Full Disk Access and Messages Automation only
+to the exact REST-server binary—never to Caddy. See
+[Architecture](docs/architecture.md) and [Security](docs/security.md).
 
-iMessage Proxy currently supports:
+## API at a glance
 
-- health checks that exercise the `imsg` read path;
-- listing chats and reading bounded message history;
-- cursor-based polling for new messages;
-- sending text to an explicitly allowed address or chat;
-- checking a sent message's status;
-- an easy-to-use, SMS-style endpoint for immediate iMessage sends.
+| Method | Resource | Scope | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/status` | any valid key | Check service and Messages readiness |
+| `GET` | `/api/chats` | `messages:read` | List recent or unread chats |
+| `GET` | `/api/chats/{id}` | `messages:read` | Read chat metadata and participants |
+| `GET` | `/api/chats/{id}/messages` | `messages:read` | Read bounded chat history |
+| `GET` | `/api/chats/{id}/background` | `messages:read` | Inspect scrubbed background/cache state |
+| `GET` | `/api/scheduled-messages` | `messages:read` | Inspect future Send Later rows |
+| `GET` | `/api/statistics/messages` | `messages:read` | Calculate message/media statistics |
+| `POST` | `/api/messages` | `messages:send` | Send allowlisted iMessage text |
+| `GET` | `/api/audit-events` | `admin` | Review bounded privacy-safe request metadata |
+| `GET` | `/api/keys` | `admin` | List key metadata |
+| `POST` | `/api/keys` | `admin` | Create and reveal a key once |
+| `GET` | `/api/keys/{id}` | `admin` | Read one key's non-secret metadata |
+| `DELETE` | `/api/keys/{id}` | `admin` | Revoke a key immediately |
 
-iMessage Proxy intentionally does **not** provide anonymous access, Internet exposure, attachments, webhooks, reactions, contact access, remote URL fetching, message mutation, typing indicators, private framework injection, or scheduled sending.
+The complete examples and error semantics are in [API](docs/api.md), with a
+machine-readable [OpenAPI 3.1 contract](openapi.yaml).
+
+## Management console
+
+Open the service origin in a browser and enter an administrator key. The
+same-origin console shows readiness and API-key metadata, creates scoped keys,
+reveals each new credential once, and revokes old keys. The entered key lives
+only in that tab's `sessionStorage`; the console uses no cookies, analytics,
+third-party assets, external fonts, or service worker.
 
 ## Requirements
 
-- a Mac supported by [Apple Container](https://github.com/apple/container), with the Container CLI installed and running;
-- a non-root macOS GUI user signed in to Messages;
-- Xcode Command Line Tools (`xcode-select --install`);
-- [`imsg`](https://github.com/openclaw/imsg) installed for that user;
-- Git, Make, OpenSSL, `jq`, and `curl`;
-- private DNS and a LAN/VPN path between clients and the Mac;
-- a reviewed Caddy image pinned by SHA-256 digest.
+- a supported macOS release and a non-root GUI user signed in to Messages;
+- Full Disk Access for the exact native REST-server binary;
+- Messages Automation permission for intentional sends;
+- an independently reviewed [`imsg`](https://github.com/openclaw/imsg)
+  **0.13.4** executable pinned by SHA-256;
+- Xcode Command Line Tools, Git, Make, `curl`, and the standard macOS tools used
+  by the lifecycle CLI;
+- a reviewed host-native Caddy **2.11.4** executable pinned by SHA-256; and
+- for public mode, a dedicated hostname with an IPv4 `A` record and an external
+  router/firewall that maps TCP 80 to the configured host HTTP port and TCP 443
+  to the configured host HTTPS port.
 
-iMessage Proxy has not yet published a broad macOS compatibility matrix. Treat upgrades to macOS, Apple Container, `imsg`, or Caddy as security-sensitive changes and re-run the smoke tests.
+Those public address-and-port mappings are exclusive: they apply to every
+hostname on that public IPv4 address, not just the iMessage Proxy hostname. If
+another ingress already owns TCP 80/443, use a separately reviewed shared-edge
+design or another public address; do not enable this direct edge alongside it.
 
-## Quick start
+The built-in edge is IPv4-only. Do not publish an `AAAA` record for it. A direct
+public IPv6 path or a different upstream proxy is a separate architecture and
+requires its own threat model.
 
-For an operated deployment, use the independently checksum-pinned release
-procedure in [Operations](docs/operations.md#2-obtain-and-verify-imessage-proxy).
-For a source review, detach at the reviewed release and verify its full commit
-before executing project code. Obtain the full commit through the release's
-reviewed provenance, then run:
+## Install and prepare
+
+Build and test a reviewed source checkout:
 
 ```bash
-(
-set -Eeuo pipefail
-readonly imessage_proxy_tag='v0.3.0'
-readonly imessage_proxy_revision='REPLACE_WITH_REVIEWED_40_HEX_COMMIT'
-
-[[ "$imessage_proxy_revision" =~ ^[0-9a-f]{40}$ ]]
-git clone --no-checkout https://github.com/mglaeser/imessage-proxy.git
-cd imessage-proxy
-test "$(git rev-parse "$imessage_proxy_tag^{commit}")" = \
-  "$imessage_proxy_revision"
-git checkout --detach "$imessage_proxy_revision"
 make build
 make test
-)
+make install
+export PATH="$HOME/.local/bin:$PATH"
+command -v imessage-proxy
 ```
 
-Create a local configuration from the public example and replace every placeholder:
+The default install prefix is `$HOME/.local`; the final command must resolve its
+CLI from `$HOME/.local/bin`. Add that directory to your shell startup file or use
+the absolute CLI path in future sessions. Copy the configuration outside the
+repository, protect it, and replace every example value. Configure independently
+reviewed executable paths and digests for both `imsg` and Caddy as described in
+[Operations](docs/operations.md).
 
 ```bash
-cp config/imessage-proxy.env.example imessage-proxy.env
-chmod 600 imessage-proxy.env
-${EDITOR:-vi} imessage-proxy.env
+mkdir -p "$HOME/.config/imessage-proxy"
+install -m 600 config/imessage-proxy.env.example \
+  "$HOME/.config/imessage-proxy/service.env"
+${EDITOR:-vi} "$HOME/.config/imessage-proxy/service.env"
 set -a
-. ./imessage-proxy.env
+. "$HOME/.config/imessage-proxy/service.env"
 set +a
 ```
 
-Prepare local state, validate the native bridge, and inspect the generated LaunchAgent before installing it:
+Prepare a completely fresh 1.0 state tree and build the native server:
 
 ```bash
-bin/imessage-proxy prepare
-bin/imessage-proxy build-host
-bin/imessage-proxy check-host
-bin/imessage-proxy agent-install
-bin/imessage-proxy agent-status
+imessage-proxy doctor
+imessage-proxy prepare
+imessage-proxy build-host
 ```
 
-Then create the private host route and generate a caller password hash. Each
-operation prints its prerequisites; do not bypass its confirmation gates.
+Create the first short-lived administrator key locally. It is printed once;
+store it in a password manager before clearing the terminal:
 
 ```bash
-bin/imessage-proxy host-route-create
-bin/imessage-proxy hash-password
+imessage-proxy api-key bootstrap-admin \
+  --name local-bootstrap \
+  --expires-in-days 30
+imessage-proxy check-host
 ```
 
-Copy only the returned hash—not the plaintext password—into the caller file
-printed by `prepare`, for example as `automation-a HASH`. Add one consenting test
-recipient to the printed allowlist path. With the default runtime home, edit:
+Edit the exact-target allowlist printed by `prepare`, then install the server
+LaunchAgent:
 
 ```bash
-${EDITOR:-vi} "$HOME/Library/Application Support/Stella/secrets/users.caddy"
-${EDITOR:-vi} "$HOME/Library/Application Support/Stella/secrets/allowed-targets.txt"
+${EDITOR:-vi} "$HOME/Library/Application Support/iMessage Proxy/private/allowed-targets.txt"
+imessage-proxy server-install
+imessage-proxy server-status
 ```
 
-After completing the security checklist, set
-`IMESSAGE_PROXY_ENABLE_ALPHA=yes` in `imessage-proxy.env`, source it again, and
-only then create the facade:
+At this point only the private Unix-socket service exists. There is no network
+listener.
+
+## Enable public HTTPS deliberately
+
+Complete [Public exposure](docs/operations.md#public-exposure-gate) first. The
+gate requires a real hostname and IPv4 `A` record, exact external
+80→host-HTTP/443→host-HTTPS mappings, reviewed firewall state, a maintenance
+window, and real-Mac acceptance. Then set:
 
 ```bash
-set -a
-. ./imessage-proxy.env
-set +a
-bin/imessage-proxy create
-bin/imessage-proxy status
+export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=yes
+imessage-proxy edge-install --confirm 'EXPOSE IMESSAGE PROXY PUBLICLY'
+imessage-proxy edge-status
+imessage-proxy edge-logs
 ```
 
-The complete, review-first procedure is in [Operations](docs/operations.md). Existing installations extracted from another administration repository should follow the [migration guide](docs/migration-from-administration.md).
+The host-native Caddy LaunchAgent listens on the configured unprivileged IPv4
+ports (8080/8443 by default), obtains a normal public certificate, serves the
+console, and forwards `/api` through the local socket. Public clients still use
+ordinary `https://HOST/`; the external router performs the port mapping.
+`edge-stop` disables the launchd label before unloading it, so the edge remains
+stopped across login and reboot; `edge-start` explicitly re-enables it.
 
-## 0.2+ compatibility contract
+## Scope and non-goals
 
-Version 0.2.0 adopts the descriptive `imessage-proxy` project, repository, command, source, configuration, and `IMESSAGE_PROXY_*` environment names. To keep existing private CAs, macOS TCC grants, LaunchAgents, containers, and migration receipts valid, this transition release deliberately retains these runtime identities:
+The 1.0 surface covers stable, non-injected `imsg` capabilities that make sense
+across a remote security boundary: chat discovery, bounded history, scrubbed
+chat-background state, scheduled-message inspection, statistics, and text sends.
 
-- deprecated command shim `bin/stella`;
-- deprecated `STELLA_*` environment aliases;
-- runtime home `~/Library/Application Support/Stella`;
-- LaunchAgent label `io.github.mglaeser.stella.bridge`;
-- runtime bridge binary `stella-bridge`;
-- Apple Container name `stella`; and
-- host route `stella-host.container.internal`.
+It intentionally does not expose live infinite streams, Contacts-assisted
+whois/identity lookup, attachment file paths or uploads, arbitrary databases,
+carrier SMS, UI-driven reactions, read receipts, typing indicators, message
+mutation, chat management, rich effects, stickers, polls, private frameworks, or
+code injection. Those features require different privacy, streaming, upload, or
+macOS security models; they are not hidden generic commands.
 
-The source and public build artifact are named `imessage-proxy-bridge`, while `build-host` installs the runtime binary as `stella-bridge` for TCC continuity. Version 0.3.0 retains the 0.2 compatibility contract and performs no automatic runtime-state or identity migration. Do not rename or move those resources during an upgrade; use the canonical names for new configuration and automation, and treat conflicting canonical and legacy environment values as an error.
-
-## Explore the API
-
-Export the private API origin and use the Caddy root CA—never `curl -k`. `curl` prompts for the caller's password:
-
-```bash
-export IMESSAGE_PROXY_URL=https://messages.example.internal:9443
-
-curl \
-  --cacert /secure/path/imessage-proxy-root.crt \
-  --user automation-a \
-  "$IMESSAGE_PROXY_URL/healthz"
-```
-
-Read a bounded page after cursor zero:
-
-```bash
-curl \
-  --cacert /secure/path/imessage-proxy-root.crt \
-  --user automation-a \
-  --header 'Content-Type: application/json' \
-  --data '{"jsonrpc":"2.0","id":"poll-1","method":"messages.after","params":{"since_rowid":0,"limit":20}}' \
-  "$IMESSAGE_PROXY_URL/v1/rpc"
-```
-
-For production-like automation, store the returned cursor durably and use a distinct credential for every client. See the full [API reference](docs/api.md) and machine-readable [OpenAPI 3.1 description](openapi.yaml).
+Cross-chat text search is also excluded from 1.0: the pinned dependency couples
+that command to Contacts access and has no no-Contacts mode. Exposing it would
+allow a remote read request to trigger a TCC prompt or enumerate address-book
+data, which does not fit the minimum permission boundary.
 
 ## Repository layout
 
 ```text
 .
-├── bin/imessage-proxy                       # lifecycle and deployment manager
-├── bin/stella                               # deprecated compatibility shim
-├── config/Caddyfile                         # authenticated TLS facade
-├── config/io.github.mglaeser.stella.plist.in # retained runtime identity
-├── config/imessage-proxy.env.example
-├── docs/                                    # design and operator guides
-├── openapi.yaml                             # machine-readable HTTPS API contract
-├── src/imessage-proxy-bridge.m              # native loopback bridge
-└── tests/test-imessage-proxy-bridge.sh       # integration-focused shell tests
+├── bin/imessage-proxy                         # lifecycle and deployment manager
+├── config/Caddyfile                           # native HTTPS/static/API edge
+├── config/io.github.mglaeser.imessage-proxy.plist.in
+├── config/io.github.mglaeser.imessage-proxy.edge.plist.in
+├── src/api-key-store.{h,m}                    # SQLite keys, audit, idempotency
+├── src/imessage-proxy-server.m                # Unix-socket REST server
+├── web/                                       # dependency-free management console
+├── openapi.yaml                               # public API contract
+├── REVISION                                   # immutable commit embedded in release archives
+└── tests/                                     # native, edge, and lifecycle tests
 ```
-
-## Project status
-
-The current version is **0.3.0** and the maturity level is **Alpha**. Interfaces, state layout, and operator commands may change before 1.0. Changes are recorded in the [changelog](CHANGELOG.md), and intended milestones live in the [roadmap](ROADMAP.md).
 
 ## Community and security
 
 - Read [Contributing](CONTRIBUTING.md) before opening a pull request.
 - Use [GitHub Discussions](https://github.com/mglaeser/imessage-proxy/discussions) for usage questions.
-- Report vulnerabilities privately according to [Security](SECURITY.md)—not in a public issue.
-- Project decisions and maintainer responsibilities are described in [Governance](GOVERNANCE.md).
-- Participation is governed by our [Code of Conduct](CODE_OF_CONDUCT.md).
+- Report vulnerabilities privately according to [Security policy](SECURITY.md).
+- Project decisions and maintainer responsibilities are in [Governance](GOVERNANCE.md).
+- Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-## License and non-affiliation
-
-Licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for attribution information.
-
-iMessage Proxy is an independent open-source project. It is not affiliated with, endorsed by, or sponsored by Apple Inc. iMessage and macOS are trademarks of Apple Inc. Use of those names describes interoperability only.
+Licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for
+attribution information. iMessage Proxy is independent software and is not
+affiliated with, endorsed by, or sponsored by Apple Inc. iMessage and macOS are
+trademarks of Apple Inc.; their names describe interoperability only.

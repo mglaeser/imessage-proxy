@@ -1,5 +1,18 @@
 ---
 BasedOnStyle: LLVM
+ColumnLimit: 120
+IndentWidth: 4
+ContinuationIndentWidth: 4
+TabWidth: 4
+UseTab: Never
+BreakBeforeBraces: Attach
+IndentCaseLabels: false
+PointerAlignment: Right
+SortIncludes: CaseSensitive
+SpacesInContainerLiterals: false
+...
+---
+BasedOnStyle: LLVM
 Language: ObjC
 ColumnLimit: 120
 IndentWidth: 4

@@ -1,6 +1,6 @@
 # Contributing to iMessage Proxy
 
-Thank you for helping make private-network Messages automation safer. iMessage Proxy welcomes focused bug reports, documentation improvements, tests, and carefully scoped code changes.
+Thank you for helping make remote Messages automation safer. iMessage Proxy welcomes focused bug reports, documentation improvements, tests, and carefully scoped code changes.
 
 ## Before you start
 
@@ -9,7 +9,7 @@ Thank you for helping make private-network Messages automation safer. iMessage P
 - For a substantial feature or architecture change, open a proposal issue before writing code.
 - Report security concerns through the private process in [SECURITY.md](SECURITY.md).
 
-iMessage Proxy is intentionally narrow. Features that broaden host control, weaken authentication, expose the bridge beyond loopback, bypass macOS protections, or encourage public-Internet operation are unlikely to be accepted.
+iMessage Proxy is intentionally narrow. Features that broaden host control, weaken API-key authentication, bypass the private Unix socket, expose host files, or bypass macOS protections are unlikely to be accepted. Public-edge changes must preserve the explicit exposure gate and complete threat model.
 
 ## Development setup
 
@@ -18,8 +18,28 @@ Most source-level validation requires macOS and Xcode Command Line Tools. The in
 ```bash
 git clone https://github.com/mglaeser/imessage-proxy.git
 cd imessage-proxy
+npm ci --ignore-scripts --no-audit --no-fund
 make build
 make test
+npm run lint:markdown
+npm run lint:openapi
+```
+
+The repository pins its Node 22/npm 10 validation tools exactly in
+`package.json` and commits npm's integrity-bearing lockfile. Always install them
+with lifecycle scripts disabled. Do not replace the locked commands with `npx`
+or a globally resolved package.
+
+When a tooling update is intentional, use an exact version, review both package
+files, and prove that a clean, script-free install reproduces the lock:
+
+```bash
+npm install --package-lock-only --save-dev --save-exact --ignore-scripts \
+  --no-audit --no-fund PACKAGE@VERSION
+npm ci --ignore-scripts --no-audit --no-fund
+npm run lint:markdown
+npm run lint:openapi
+git diff -- package.json package-lock.json
 ```
 
 Do not put real tokens, credentials, recipients, Messages databases, logs, or private infrastructure details in fixtures. Use reserved example domains and synthetic addresses.
@@ -29,7 +49,7 @@ Do not put real tokens, credentials, recipients, Messages databases, logs, or pr
 1. Fork the repository and create a short-lived branch from the default branch.
 2. Keep the change small and add tests for observable behavior.
 3. Update the API, operations, or security documentation when a contract changes.
-4. Add a concise entry under `Unreleased` in [CHANGELOG.md](CHANGELOG.md) for user-visible changes.
+4. Add a concise changelog entry for user-visible changes.
 5. Run the local checks.
 
 ```bash
@@ -61,11 +81,26 @@ Use an imperative subject that explains the outcome, for example:
 Reject duplicate authorization headers
 ```
 
-Add a body when the motivation, compatibility impact, or threat model is not obvious. Signed commits are welcome but not currently required.
+Add a body when the motivation or threat model is not obvious. Signed commits
+are welcome but not currently required.
 
-## Compatibility and releases
+## Releases
 
-iMessage Proxy uses Semantic Versioning, with the usual caveat that `0.x` versions may contain breaking changes. Maintainers create releases; contributors should not update the version unless a maintainer asks.
+iMessage Proxy uses Semantic Versioning. Maintainers create releases;
+contributors should not update the version unless a maintainer asks.
+Security-sensitive schema, socket, identity, and edge changes require an
+explicit, reviewed upgrade design.
+
+A release tag must be an annotated `vMAJOR.MINOR.PATCH` tag whose version equals
+`VERSION` and whose commit is already on `main`. Every required CI check must
+have succeeded on that exact commit before the tag is created. Never move or
+reuse a release tag.
+
+The release workflow validates that tag object and the required check runs,
+then creates the deterministic archive, checksum, provenance attestation, and
+GitHub release. It deliberately does not install packages or rerun source
+validation while holding release and attestation permissions; ordinary CI owns
+validation and uses the reviewed lockfile.
 
 ## Licensing
 

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Rendered by bin/imessage-proxy. This template never contains credentials. -->
+<dict>
+	<key>Label</key>
+	<string>io.github.mglaeser.imessage-proxy</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__SERVER_BIN__</string>
+		<string>serve</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>IMESSAGE_PROXY_ALLOWED_TARGETS_FILE</key>
+		<string>__TARGETS_FILE__</string>
+		<key>IMESSAGE_PROXY_DATABASE_PATH</key>
+		<string>__DATABASE_PATH__</string>
+		<key>IMESSAGE_PROXY_EXPECTED_IMSG_VERSION</key>
+		<string>0.13.4</string>
+		<key>IMESSAGE_PROXY_IMSG_BIN</key>
+		<string>__IMSG_BIN__</string>
+		<key>IMESSAGE_PROXY_IMSG_SHA256</key>
+		<string>__IMSG_SHA256__</string>
+		<key>IMESSAGE_PROXY_MAX_CONCURRENCY</key>
+		<string>8</string>
+		<key>IMESSAGE_PROXY_PUBLIC_ORIGIN</key>
+		<string>__PUBLIC_ORIGIN__</string>
+		<key>IMESSAGE_PROXY_READ_TIMEOUT_SECONDS</key>
+		<string>30</string>
+		<key>IMESSAGE_PROXY_SEND_TIMEOUT_SECONDS</key>
+		<string>180</string>
+		<key>IMESSAGE_PROXY_SOCKET_PATH</key>
+		<string>__SOCKET_PATH__</string>
+		<key>IMESSAGE_PROXY_SOCKET_TIMEOUT_SECONDS</key>
+		<string>10</string>
+	</dict>
+	<key>ExitTimeOut</key>
+	<integer>210</integer>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/dev/null</string>
+	<key>StandardOutPath</key>
+	<string>/dev/null</string>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+</dict>
+</plist>

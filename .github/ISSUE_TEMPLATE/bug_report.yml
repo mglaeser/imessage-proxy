@@ -25,15 +25,15 @@ body:
     attributes:
       label: iMessage Proxy version
       description: Release tag or commit SHA; run `bin/imessage-proxy version` when available.
-      placeholder: v0.3.0
+      placeholder: v1.0.0
     validations:
       required: true
   - type: input
     id: environment
     attributes:
       label: Environment
-      description: macOS version and architecture, Apple Container version, Caddy image version/digest, and imsg version.
-      placeholder: macOS 00.0 (arm64); container ...; Caddy ...; imsg ...
+      description: macOS version and architecture, host Caddy version/digest, and imsg version.
+      placeholder: macOS 00.0 (arm64); Caddy ...; imsg ...
     validations:
       required: true
   - type: dropdown
@@ -41,11 +41,12 @@ body:
     attributes:
       label: Component
       options:
-        - Native bridge
+        - Native server
+        - API keys or database
         - LaunchAgent
         - Lifecycle manager
-        - Caddy facade
-        - Apple Container host route
+        - Caddy edge
+        - Management console
         - API client behavior
         - Build or tests
         - Documentation
