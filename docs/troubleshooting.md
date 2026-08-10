@@ -106,15 +106,43 @@ chmod go-w ~/Library/Messages
 chmod go-w ~/Library/Messages/chat.db
 ```
 
-`drwxrwxrwx` on that directory is worth investigating on its own. macOS creates
-it `drwx------`, so something relaxed it; the service only refuses the write
-bits, but the read exposure is yours to judge.
+`drwxrwxrwx` on that directory is worth correcting on its own. macOS creates it
+`drwx------`, so something relaxed it. The service refuses only the write bits;
+the read exposure is yours to judge.
 
-If `doctor` instead reports that the database is *not visible from this
-terminal*, either Messages was never signed in on this Mac — open Messages,
-sign in, and exchange one message — or your terminal lacks Full Disk Access,
-which only limits this check, not the service. The native server holds its own
-grant.
+### The `chmod` itself is denied
+
+```text
+chmod: Unable to change file mode on /Users/you/Library/Messages: Operation not permitted
+```
+
+`sudo` fails the same way. That is expected and is not a permission problem you
+can solve with privilege: `~/Library/Messages` is TCC-protected, and TCC
+attributes a request to the responsible application rather than to the user ID.
+`sudo` runs as a child of your terminal, so it inherits the terminal's TCC
+context and is refused identically.
+
+Distinguish the two causes before changing anything:
+
+```bash
+ls -ldO ~/Library/Messages
+csrutil status
+```
+
+`-O` prints file flags. A `restricted` flag means macOS owns that path
+outright — nothing, including root, may change its mode, and the service does
+not ask you to. An empty flags column (`-`) means TCC is the only obstacle:
+grant your terminal Full Disk Access in System Settings, quit and reopen it so
+a fresh process picks up the grant, then run the `chmod` again. You can revoke
+that grant afterwards; the native server holds its own.
+
+### The database is not visible from this terminal
+
+`doctor` reports this when it cannot inspect the database at all. Either
+Messages was never signed in on this Mac — open Messages, sign in, and exchange
+one message — or your terminal lacks Full Disk Access. The latter limits only
+this check, never the service: the native server holds a separate grant for the
+exact binary it builds.
 
 ## `doctor` rejects Caddy
 
