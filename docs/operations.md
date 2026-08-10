@@ -678,3 +678,51 @@ for investigation, rotate all keys from a trusted build, review the Messages
 account, and treat user-readable service state plus live bearer keys as exposed.
 Do not erase executables, databases, or logs before deciding what evidence is
 required.
+
+## 17. Decommission
+
+`scripts/uninstall.sh` reverses section 0. It stops and removes both
+LaunchAgents, clears the persistent launchd disable record each stop action
+writes, and deletes the CLI, the installed assets, the pinned `imsg` and Caddy
+payloads, and the private configuration file.
+
+```bash
+bash scripts/uninstall.sh --dry-run
+bash scripts/uninstall.sh
+```
+
+Run `--dry-run` first. It prints every path it would remove and changes nothing.
+
+Runtime state is preserved by default. API keys, the send allowlist,
+certificates, and logs remain, so a later installation adopts them instead of
+issuing new credentials. That default matters after an incident: section 16
+requires preserving evidence before erasing databases or logs.
+
+Destroying state is a separate, explicit decision and cannot be undone:
+
+```bash
+bash scripts/uninstall.sh --purge --confirm 'DESTROY IMESSAGE PROXY STATE'
+```
+
+`--purge` refuses any runtime root whose final path component is not
+`iMessage Proxy` or `imessage-proxy`, so a stray `IMESSAGE_PROXY_HOME` cannot
+redirect the deletion. Every removal target must also be a normalized path
+strictly below `HOME`, and shared parents such as `~/.local/bin` and
+`~/Library/Application Support` are refused outright. `~/.local/bin/imsg` is
+removed only when it still points into the installed payload; an executable you
+placed there yourself is reported and kept.
+
+Add `--include-legacy` to also remove pre-1.0 Stella-era artifacts: the
+`io.github.mglaeser.stella.bridge` agent, the `stella` CLI, and — with
+`--purge` — its runtime directory.
+
+The lifecycle CLI still exposes no reset or state-removal action. Decommission
+is deliberately a separate script, so the running service can never destroy its
+own credentials.
+
+Two removals macOS reserves for a human. Delete the Full Disk Access and
+Automation entries for the removed server binary in System Settings; a stale
+entry points at a binary that no longer exists and will confuse a later
+installation. Also drop any `PATH` line for the install prefix from your shell
+startup file, and remove a trusted Caddy local CA only after reviewing what else
+depends on it.

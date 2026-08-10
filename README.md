@@ -343,6 +343,32 @@ ordinary `https://HOST/`; the external router performs the port mapping.
 `edge-stop` disables the launchd label before unloading it, so the edge remains
 stopped across login and reboot; `edge-start` explicitly re-enables it.
 
+## Uninstall
+
+[`scripts/uninstall.sh`](scripts/uninstall.sh) reverses the installer. It stops
+and removes both LaunchAgents, deletes the CLI, the installed assets, the pinned
+`imsg` and Caddy dependencies, and the private configuration file:
+
+```bash
+bash scripts/uninstall.sh --dry-run
+bash scripts/uninstall.sh
+```
+
+Start with `--dry-run`; it prints every path it would touch and changes nothing.
+
+Runtime state is kept by default, so your API keys, send allowlist,
+certificates, and logs survive and a later reinstall adopts them. Destroying
+that state is a separate, deliberate decision:
+
+```bash
+bash scripts/uninstall.sh --purge --confirm 'DESTROY IMESSAGE PROXY STATE'
+```
+
+Add `--include-legacy` to also remove pre-1.0 Stella-era artifacts. Two things
+no script may revoke on macOS: delete the Full Disk Access and Automation
+entries for the removed server binary in System Settings, or a stale entry will
+point at a binary that no longer exists.
+
 ## Scope and non-goals
 
 The 1.0 surface covers stable, non-injected `imsg` capabilities that make sense
@@ -372,6 +398,7 @@ data, which does not fit the minimum permission boundary.
 ├── src/api-key-store.{h,m}                    # SQLite keys, audit, idempotency
 ├── src/imessage-proxy-server.m                # Unix-socket REST server
 ├── scripts/install.sh                         # one-command install and first run
+├── scripts/uninstall.sh                       # guarded removal, state opt-in
 ├── web/                                       # dependency-free management console
 ├── openapi.yaml                               # public API contract
 ├── REVISION                                   # immutable commit embedded in release archives

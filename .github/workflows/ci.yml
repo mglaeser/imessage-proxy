@@ -66,6 +66,8 @@ jobs:
         run: make test-ui
       - name: Test the one-command installer
         run: make test-installer
+      - name: Test the uninstaller
+        run: make test-uninstaller
       - name: Validate Caddy configuration with a pinned disposable image
         shell: bash
         run: |
@@ -244,10 +246,12 @@ jobs:
         run: |
           test -x bin/imessage-proxy
           test -x scripts/install.sh
+          test -x scripts/uninstall.sh
           test -x tests/test-caddy-edge.sh
           test -x tests/test-imessage-proxy-server.sh
           test -x tests/test-imessage-proxy-cli.sh
           test -x tests/test-install-script.sh
+          test -x tests/test-uninstall-script.sh
       - name: Stage install and uninstall
         run: |
           stage="$(mktemp -d)"
