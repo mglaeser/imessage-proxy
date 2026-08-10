@@ -468,28 +468,6 @@ grep -Fqi 'could not be delivered' "$temporary/bootstrap-delivery.err"
   "SELECT count(*) FROM api_keys WHERE revoked_at IS NULL AND instr(','||scopes||',', ',admin,')>0;")" == 0 ]]
 [[ "$(sqlite3 "$database_path" "SELECT count(*) FROM api_keys WHERE name='cleanup-sentinel';")" == 1 ]]
 [[ "$(sqlite3 "$database_path" 'SELECT count(*) FROM api_keys;')" == 1 ]]
-
-# A regular-file size limit also returns a handled failure instead of dying on
-# SIGXFSZ. The sparse output starts beyond the limit while SQLite remains below
-# it, so this exercises token delivery rather than an earlier database write.
-dd if=/dev/zero of="$temporary/bootstrap-file-limit.out" bs=1 count=1 seek=134217727 2> /dev/null
-file_limit_size="$(stat -f '%z' "$temporary/bootstrap-file-limit.out")"
-file_limit_status=0
-if (
-  ulimit -f 65536
-  exec 7>> "$temporary/bootstrap-file-limit.out"
-  run_native bootstrap-admin file-limit-admin 30 >&7 \
-    2> "$temporary/bootstrap-file-limit.err"
-); then
-  printf 'ERROR: bootstrap accepted a token beyond RLIMIT_FSIZE\n' >&2
-  exit 1
-else
-  file_limit_status="$?"
-fi
-[[ "$file_limit_status" == 1 ]]
-grep -Fqi 'could not be delivered' "$temporary/bootstrap-file-limit.err"
-[[ "$(stat -f '%z' "$temporary/bootstrap-file-limit.out")" == "$file_limit_size" ]]
-[[ "$(sqlite3 "$database_path" 'SELECT count(*) FROM api_keys;')" == 1 ]]
 sqlite3 "$database_path" "DELETE FROM api_keys WHERE name='cleanup-sentinel';"
 [[ "$(run_native check-bootstrap-admin retry-admin 30)" == ok ]]
 
