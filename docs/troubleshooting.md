@@ -87,62 +87,30 @@ independently reviewed SHA-256, and run `doctor` again. The lifecycle CLI hashes
 the file before executing it and stages that exact binary. Do not replace it in
 place or point the LaunchAgent at an unreviewed binary.
 
-## `doctor` rejects the Messages database
-
-The service reads `~/Library/Messages/chat.db` through the pinned dependency. It
-requires only that no other account can write that file or its directory, which
-is the property that would let another account tamper with what the service
-reads. macOS ships the file group/world *readable* inside a TCC-protected
-directory, and that stock shape is accepted.
-
-```bash
-ls -ld ~/Library/Messages ~/Library/Messages/chat.db
-```
-
-A `w` in either the group or other column is the problem:
-
-```bash
-chmod go-w ~/Library/Messages
-chmod go-w ~/Library/Messages/chat.db
-```
-
-`drwxrwxrwx` on that directory is worth correcting on its own. macOS creates it
-`drwx------`, so something relaxed it. The service refuses only the write bits;
-the read exposure is yours to judge.
-
-### The `chmod` itself is denied
+## `doctor` reports no Messages database
 
 ```text
-chmod: Unable to change file mode on /Users/you/Library/Messages: Operation not permitted
+FAIL no Messages database at /Users/you/Library/Messages/chat.db
+FAIL open Messages, sign in to iMessage, and exchange one message
 ```
 
-`sudo` fails the same way. That is expected and is not a permission problem you
-can solve with privilege: `~/Library/Messages` is TCC-protected, and TCC
-attributes a request to the responsible application rather than to the user ID.
-`sudo` runs as a child of your terminal, so it inherits the terminal's TCC
-context and is refused identically.
+The database appears once Messages has actually signed in on this Mac. Open
+Messages, sign in to iMessage, exchange one message, and run `doctor` again.
 
-Distinguish the two causes before changing anything:
+Nothing here depends on the file's permissions. This project never opens the
+Messages database: it passes the path to the pinned dependency, which reads it
+under its own Full Disk Access grant. A `0644` file inside a `0777` directory is
+accepted, because no permission shape can make the read succeed or fail — only
+the dependency's own access can. Bootstrap proves that path for real by running
+a bounded `imsg chats --limit 1`, first directly and again inside the
+LaunchAgent before it accepts the service as ready.
 
-```bash
-ls -ldO ~/Library/Messages
-csrutil status
-```
-
-`-O` prints file flags. A `restricted` flag means macOS owns that path
-outright — nothing, including root, may change its mode, and the service does
-not ask you to. An empty flags column (`-`) means TCC is the only obstacle:
-grant your terminal Full Disk Access in System Settings, quit and reopen it so
-a fresh process picks up the grant, then run the `chmod` again. You can revoke
-that grant afterwards; the native server holds its own.
-
-### The database is not visible from this terminal
-
-`doctor` reports this when it cannot inspect the database at all. Either
-Messages was never signed in on this Mac — open Messages, sign in, and exchange
-one message — or your terminal lacks Full Disk Access. The latter limits only
-this check, never the service: the native server holds a separate grant for the
-exact binary it builds.
+So do not `chmod` anything under `~/Library/Messages` on this project's account.
+That directory is TCC-protected, and `sudo` does not help: TCC attributes a
+request to the responsible application rather than to the user ID, so a `sudo`
+child of your terminal inherits the same refusal. If you want to tighten a
+permissive directory for your own reasons, grant your terminal Full Disk Access
+first — but the service does not require it.
 
 ## `doctor` rejects Caddy
 
