@@ -24,12 +24,15 @@ Run this on the Mac that is signed in to Messages:
 curl -fsSL https://raw.githubusercontent.com/mglaeser/imessage-proxy/main/scripts/install.sh | bash
 ```
 
-That one command checks the Mac, fetches a checksum-verified release, builds and
-installs the CLI, pins the Caddy edge, writes one private configuration file,
-starts the service, and prints your first API key. It asks only for the things it
-cannot know: a hostname, an operator email, and the path to your reviewed
-[`imsg`](https://github.com/openclaw/imsg) executable. macOS prompts once for
-Full Disk Access.
+That one command checks the Mac, fetches and verifies the source, builds and
+installs the CLI, installs the pinned [`imsg`](https://github.com/openclaw/imsg)
+and Caddy dependencies, writes one private configuration file, starts the
+service, and prints your first API key. Every executable it downloads is
+verified against a digest recorded in the script.
+
+It asks only for the two things it cannot know: a hostname and an operator
+email. macOS then prompts once for Full Disk Access, which is the single manual
+step.
 
 Add one recipient to the allowlist it prints, then send a message straight over
 the private socket:
@@ -176,12 +179,13 @@ external fonts, or service worker.
 - a supported macOS release and a non-root GUI user signed in to Messages;
 - Full Disk Access for the exact native REST-server binary;
 - Messages Automation permission for intentional sends;
-- an independently reviewed [`imsg`](https://github.com/openclaw/imsg)
-  **0.13.4** executable pinned by SHA-256;
-- Xcode Command Line Tools, Git, Make, `curl`, Node.js **22.12 or newer within
-  major 22** for the dependency-free console tests, and the standard macOS tools
-  used by the lifecycle CLI;
-- a reviewed host-native Caddy **2.11.4** executable pinned by SHA-256; and
+- Xcode Command Line Tools, `curl`, `unzip`, and the standard macOS tools used by
+  the lifecycle CLI, plus Node.js **22.12 or newer within major 22** to run the
+  dependency-free console tests;
+- [`imsg`](https://github.com/openclaw/imsg) **0.13.4** and host-native Caddy
+  **2.11.4**, each pinned by digest. The [Get started](#get-started) installer
+  downloads and verifies both for you; supply your own reviewed executables with
+  `--imsg` and `--caddy` when a deployment requires it; and
 - for public mode, a dedicated hostname with an IPv4 `A` record and an external
   router/firewall that maps TCP 80 to the configured host HTTP port and TCP 443
   to the configured host HTTPS port.

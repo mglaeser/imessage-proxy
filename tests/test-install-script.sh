@@ -126,22 +126,53 @@ for pin in \
     fail "installer dependency pin disagrees with the CLI: $pin"
 done
 
-# Without an explicit --tag the installer must resolve the repository's own
-# latest published release rather than a hard-coded, possibly unreleased tag.
-resolved_endpoint="$(bash -c "source '$INSTALLER'; printf '%s' \"\$LATEST_RELEASE_API\"")"
-[[ "$resolved_endpoint" == 'https://api.github.com/repos/mglaeser/imessage-proxy/releases/latest' ]] ||
-  fail "installer resolves an unexpected release endpoint: $resolved_endpoint"
+# By default the installer must install the branch carrying the 1.0
+# architecture, not a published release that predates it.
+resolved_endpoint="$(bash -c "source '$INSTALLER'; printf '%s' \"\$REPOSITORY_API\"")"
+[[ "$resolved_endpoint" == 'https://api.github.com/repos/mglaeser/imessage-proxy' ]] ||
+  fail "installer resolves an unexpected repository endpoint: $resolved_endpoint"
+resolved_endpoint="$(bash -c "source '$INSTALLER'; printf '%s' \"\$SOURCE_ARCHIVE_BASE_URL\"")"
+[[ "$resolved_endpoint" == 'https://codeload.github.com/mglaeser/imessage-proxy/tar.gz' ]] ||
+  fail "installer resolves an unexpected source-archive endpoint: $resolved_endpoint"
+[[ "$(bash -c "source '$INSTALLER'; printf '%s' \"\$SOURCE_BRANCH\"")" == main ]] ||
+  fail 'installer does not default to the main branch'
 if grep -q 'DEFAULT_RELEASE_TAG' "$INSTALLER"; then
   fail 'installer must not hard-code a default release tag'
 fi
 
-# The release-tag parser must accept real GitHub metadata and invent nothing.
-parsed_tag="$(printf '%s' '{"name":"x","tag_name":"v0.3.0","draft":false}' |
-  bash -c "source '$INSTALLER'; parse_latest_release_tag")"
-[[ "$parsed_tag" == v0.3.0 ]] || fail "release-tag parser returned: $parsed_tag"
-parsed_tag="$(printf '%s' '{"name":"no tag"}' |
-  bash -c "source '$INSTALLER'; parse_latest_release_tag")"
-[[ -z "$parsed_tag" ]] || fail 'release-tag parser invented a tag'
+# The JSON field parser must accept real GitHub metadata and invent nothing.
+parsed_sha="$(printf '%s' '{"sha":"0123456789abcdef0123456789abcdef01234567","x":1}' |
+  bash -c "source '$INSTALLER'; parse_json_string_field sha")"
+[[ "$parsed_sha" == 0123456789abcdef0123456789abcdef01234567 ]] ||
+  fail "commit parser returned: $parsed_sha"
+parsed_sha="$(printf '%s' '{"name":"no sha"}' |
+  bash -c "source '$INSTALLER'; parse_json_string_field sha")"
+[[ -z "$parsed_sha" ]] || fail 'commit parser invented a value'
+
+# The downloaded tree must be proven to be the resolved commit, and releases
+# without the bootstrap action must be refused rather than half-installed.
+grep -Fq 'REVISION' "$INSTALLER" ||
+  fail 'installer does not verify the archive REVISION against the resolved commit'
+grep -Fq 'require_bootstrap_capable_cli' "$INSTALLER" ||
+  fail 'installer does not reject releases lacking the bootstrap action'
+
+# imsg must be installed automatically, pinned by digest, with its full payload.
+grep -Fq 'install_pinned_imsg' "$INSTALLER" ||
+  fail 'installer does not install imsg automatically'
+imsg_digest="$(bash -c "source '$INSTALLER'; printf '%s' \"\$IMSG_ARCHIVE_SHA256\"")"
+[[ "$imsg_digest" =~ ^[0-9a-f]{64}$ ]] ||
+  fail "pinned imsg digest is not a SHA-256: $imsg_digest"
+imsg_expected_version="$(bash -c "source '$INSTALLER'; printf '%s' \"\$EXPECTED_IMSG_VERSION\"")"
+grep -Fq "readonly EXPECTED_IMSG_VERSION='$imsg_expected_version'" "$REPOSITORY/bin/imessage-proxy" ||
+  fail 'installer imsg version pin disagrees with the CLI'
+
+# A symlinked imsg (for example a Homebrew shim) must resolve, not be rejected.
+grep -Fq 'resolve_real_path' "$INSTALLER" ||
+  fail 'installer does not resolve a symlinked --imsg to its real target'
+ln -sf /bin/sh "$temporary/imsg-shim"
+resolved_link="$(bash -c "source '$INSTALLER'; resolve_real_path '$temporary/imsg-shim'")"
+[[ -n "$resolved_link" && ! -L "$resolved_link" ]] ||
+  fail "symlink resolution returned an unusable path: $resolved_link"
 
 # README must advertise the one-liner before any manual instructions.
 readme_oneliner="$(grep -n 'scripts/install.sh | bash' "$REPOSITORY/README.md" | head -1 | cut -d: -f1)"

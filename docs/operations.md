@@ -8,18 +8,30 @@ acceptance tests in this guide are complete.
 ## 0. Choose an installation path
 
 `scripts/install.sh` performs sections 2–9 as one guarded command. It verifies
-the Mac, obtains a checksum-verified release, builds and installs the CLI, pins
-Caddy by SHA-512 and both native dependencies by SHA-256, writes one private
-`0600` configuration file with the exposure gate closed, and then runs the
-product's own `bootstrap`:
+the Mac, obtains and verifies the source, builds and installs the CLI, installs
+both pinned native dependencies, writes one private `0600` configuration file
+with the exposure gate closed, and then runs the product's own `bootstrap`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mglaeser/imessage-proxy/main/scripts/install.sh | bash
 ```
 
-Without `--tag` it resolves this repository's latest published release and
-verifies the archive against the `SHA256SUMS` asset published beside it. A
-reviewed deployment should always pin the tag and digest explicitly.
+Without `--tag` it installs the current `main` commit, because the 1.0
+architecture and its `bootstrap` action exist only there; published releases
+still carry the previous architecture. It resolves `main`'s exact commit through
+the GitHub API, downloads that immutable commit, and then requires the archive's
+exported `REVISION` to equal that commit before building anything. A reviewed
+deployment should still pin `--tag` and `--sha256` explicitly once a 1.0 release
+is published; the installer refuses any release whose CLI lacks `bootstrap`.
+
+It also installs both native dependencies itself, each verified against a digest
+recorded in the script: `imsg 0.13.4` by SHA-256 and Caddy 2.11.4 by SHA-512.
+`imsg` ships as a payload directory whose executable resolves a sidecar library
+through `@loader_path`, so the installer keeps that payload intact under
+`~/.local/libexec/imessage-proxy/imsg-0.13.4` and links
+`~/.local/bin/imsg` to it. Pass `--imsg PATH` to use a reviewed executable
+instead; a symlink such as a Homebrew shim is resolved to its real target,
+because the product CLI requires a real path.
 
 It never enables public HTTPS, never accepts `--public`, and never writes the
 administrator key anywhere but standard output. Reviewed deployments should pass

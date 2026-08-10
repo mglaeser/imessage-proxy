@@ -19,10 +19,19 @@ umask 077
 readonly PROJECT_REPOSITORY='mglaeser/imessage-proxy'
 readonly PROJECT_URL="https://github.com/${PROJECT_REPOSITORY}"
 readonly RELEASE_BASE_URL="${PROJECT_URL}/releases/download"
-readonly LATEST_RELEASE_API="https://api.github.com/repos/${PROJECT_REPOSITORY}/releases/latest"
+readonly REPOSITORY_API="https://api.github.com/repos/${PROJECT_REPOSITORY}"
+readonly SOURCE_ARCHIVE_BASE_URL="https://codeload.github.com/${PROJECT_REPOSITORY}/tar.gz"
+# The 1.0 architecture lives on main. No 1.0 release is published yet, so the
+# default install resolves main's current commit and proves the downloaded
+# archive is exactly that commit. Published releases predate this architecture
+# and are opt-in through --tag.
+readonly SOURCE_BRANCH='main'
 readonly SERVER_LABEL='io.github.mglaeser.imessage-proxy'
 readonly EXPECTED_IMSG_VERSION='0.13.4'
-readonly IMSG_PROJECT_URL='https://github.com/openclaw/imsg'
+readonly IMSG_BASE_URL='https://github.com/openclaw/imsg/releases/download'
+readonly IMSG_ARCHIVE='imsg-macos.zip'
+# Reviewed digest of the published imsg 0.13.4 macOS archive.
+readonly IMSG_ARCHIVE_SHA256='e2fcac341363b5d53d16d28e61df981c4585bcc6b7fa8fdc77ec41f14e87c468'
 readonly EXPECTED_CADDY_VERSION='2.11.4'
 readonly CADDY_BASE_URL='https://github.com/caddyserver/caddy/releases/download'
 # Reviewed Caddy 2.11.4 release-archive digests; identical to the pins the CI
@@ -81,7 +90,9 @@ Installs iMessage Proxy on this Mac and creates the first administrator key.
 Options:
   --host HOSTNAME        Public DNS name the service will eventually use
   --email ADDRESS        Operator email used for future ACME certificates
-  --imsg PATH            Absolute path to a reviewed imsg 0.13.4 executable
+  --imsg PATH            Use this imsg 0.13.4 executable instead of installing
+                         the pinned one (a symlink such as a Homebrew shim is
+                         resolved to its real target)
   --caddy PATH           Absolute path to a reviewed Caddy 2.11.4 executable
                          (default: download and verify the pinned release)
   --admin-name NAME      First administrator label (default: local-bootstrap)
@@ -390,27 +401,32 @@ verify_release_archive() {
   fi
 }
 
-parse_latest_release_tag() {
-  awk '{
-    if (match($0, /"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
-      field = substr($0, RSTART, RLENGTH)
-      sub(/^.*:[[:space:]]*"/, "", field)
-      sub(/"$/, "", field)
-      print field
+parse_json_string_field() {
+  local field="$1"
+  awk -v field="$field" '{
+    pattern = "\"" field "\"[[:space:]]*:[[:space:]]*\"[^\"]+\""
+    if (match($0, pattern)) {
+      value = substr($0, RSTART, RLENGTH)
+      sub(/^.*:[[:space:]]*"/, "", value)
+      sub(/"$/, "", value)
+      print value
       exit
     }
   }'
 }
 
-resolve_latest_release_tag() {
-  local metadata tag
-  metadata="$temporary_root/latest-release.json"
-  require_download "$LATEST_RELEASE_API" "$metadata"
-  tag="$(parse_latest_release_tag < "$metadata")"
-  release_tag_valid "$tag" ||
-    die 'could not determine the latest published release; pass --tag vMAJOR.MINOR.PATCH'
-  note "Latest published release: $tag"
-  printf '%s\n' "$tag"
+commit_sha_valid() {
+  [[ "$1" =~ ^[0-9a-f]{40}$ ]]
+}
+
+resolve_branch_commit() {
+  local commit metadata
+  metadata="$temporary_root/branch.json"
+  require_download "$REPOSITORY_API/commits/$SOURCE_BRANCH" "$metadata"
+  commit="$(parse_json_string_field sha < "$metadata")"
+  commit_sha_valid "$commit" ||
+    die "could not resolve the current $SOURCE_BRANCH commit; pass --tag vMAJOR.MINOR.PATCH"
+  printf '%s\n' "$commit"
 }
 
 resolve_source_tree() {
@@ -434,10 +450,44 @@ resolve_source_tree() {
     return
   fi
 
-  tag="$release_tag"
-  if [[ -z "$tag" ]]; then
-    tag="$(resolve_latest_release_tag)"
+  if [[ -n "$archive_path" || -n "$release_tag" ]]; then
+    resolve_released_source_tree
+    return
   fi
+  resolve_branch_source_tree
+}
+
+# Default path: install the current main commit. The 1.0 architecture, its
+# bootstrap action, and this installer all live on main; published releases
+# still carry the previous architecture and a CLI without bootstrap.
+resolve_branch_source_tree() {
+  local archive candidate commit prefix
+  commit="$(resolve_branch_commit)"
+  prefix="imessage-proxy-${commit}"
+  archive="$temporary_root/${prefix}.tar.gz"
+  note "Downloading iMessage Proxy $SOURCE_BRANCH at ${commit:0:7} from $PROJECT_URL"
+  require_download "$SOURCE_ARCHIVE_BASE_URL/$commit" "$archive"
+  verify_archive_members "$archive" "$prefix/"
+  mkdir -m 700 "$temporary_root/source"
+  tar -xzf "$archive" -C "$temporary_root/source" ||
+    die 'could not extract the downloaded source archive'
+  candidate="$temporary_root/source/$prefix"
+  [[ -d "$candidate" && ! -L "$candidate" ]] ||
+    die 'the source archive did not contain the expected directory'
+  # GitHub exports REVISION through export-subst, so the archive proves which
+  # commit it carries without trusting the download path.
+  [[ -f "$candidate/REVISION" && "$(< "$candidate/REVISION")" == "$commit" ]] ||
+    die 'the downloaded source archive does not carry the resolved commit'
+  [[ -f "$candidate/VERSION" && -f "$candidate/src/imessage-proxy-server.m" ]] ||
+    die 'the downloaded source archive is not a complete iMessage Proxy tree'
+  note "Verified the source archive against commit $commit"
+  printf '%s\n' "$candidate"
+}
+
+resolve_released_source_tree() {
+  local archive candidate tag version
+  tag="$release_tag"
+  [[ -n "$tag" ]] || die '--archive requires --tag vMAJOR.MINOR.PATCH'
   release_tag_valid "$tag" || die 'the release tag must have the form vMAJOR.MINOR.PATCH'
   version="${tag#v}"
   archive="$temporary_root/imessage-proxy-${version}.tar.gz"
@@ -452,10 +502,8 @@ resolve_source_tree() {
     if ! download_verified_file \
       "$RELEASE_BASE_URL/$tag/imessage-proxy-${version}.tar.gz" "$archive"; then
       note ''
-      note "iMessage Proxy $tag is not published yet."
-      note "Check the available releases at $PROJECT_URL/releases and either"
-      note '  install a published release:  --tag vMAJOR.MINOR.PATCH'
-      note '  or install a reviewed checkout: --source /path/to/imessage-proxy'
+      note "iMessage Proxy $tag has no published source archive."
+      note "Check $PROJECT_URL/releases, or omit --tag to install $SOURCE_BRANCH."
       die "release $tag is unavailable"
     fi
     if [[ -z "$archive_sha256" ]]; then
@@ -474,7 +522,21 @@ resolve_source_tree() {
     die 'the release archive did not contain the expected source directory'
   [[ "$(< "$candidate/VERSION")" == "$version" ]] ||
     die 'the release archive VERSION does not match its tag'
+  require_bootstrap_capable_cli "$candidate" "$tag"
   printf '%s\n' "$candidate"
+}
+
+# Releases before 1.0 ship a CLI without the bootstrap action this installer
+# drives. Refuse them up front instead of failing with a bare usage dump.
+require_bootstrap_capable_cli() {
+  local candidate="$1" label="$2"
+  grep -Eq '^[[:space:]]*bootstrap\)' "$candidate/bin/imessage-proxy" || {
+    note ''
+    note "iMessage Proxy $label predates the one-command bootstrap architecture,"
+    note 'so this installer cannot drive it.'
+    note "Omit --tag to install $SOURCE_BRANCH, which supports it."
+    die "$label does not support one-command installation"
+  }
 }
 
 tests_are_possible() {
@@ -577,28 +639,113 @@ resolve_caddy() {
   printf '%s\n' "$managed"
 }
 
+imsg_reports_expected_version() {
+  [[ "$("$1" --version 2>/dev/null || true)" == "$EXPECTED_IMSG_VERSION" ]]
+}
+
+# imsg ships as a directory payload: the executable loads a sidecar dylib and
+# resource bundles through @loader_path, so the whole payload must stay together
+# and the executable must be launched from inside it.
+install_pinned_imsg() {
+  local archive candidate managed_directory payload
+  managed_directory="$install_prefix/libexec/imessage-proxy/imsg-$EXPECTED_IMSG_VERSION"
+  candidate="$managed_directory/imsg"
+
+  if [[ -x "$candidate" && ! -L "$candidate" ]] && imsg_reports_expected_version "$candidate"; then
+    note "Reusing the pinned imsg $EXPECTED_IMSG_VERSION at $candidate"
+    printf '%s\n' "$candidate"
+    return
+  fi
+
+  require_command unzip
+  step "Fetching the pinned imsg $EXPECTED_IMSG_VERSION"
+  archive="$temporary_root/$IMSG_ARCHIVE"
+  require_download "$IMSG_BASE_URL/v$EXPECTED_IMSG_VERSION/$IMSG_ARCHIVE" "$archive"
+  [[ "$(file_sha256 "$archive")" == "$IMSG_ARCHIVE_SHA256" ]] ||
+    die 'the downloaded imsg archive does not match the reviewed SHA-256 digest'
+
+  payload="$temporary_root/imsg-payload"
+  mkdir -m 700 "$payload"
+  unzip -q -o "$archive" -d "$payload" || die 'could not extract the imsg archive'
+  [[ -f "$payload/imsg" && ! -L "$payload/imsg" ]] ||
+    die 'the imsg archive did not contain the expected executable'
+  chmod 700 "$payload/imsg"
+  imsg_reports_expected_version "$payload/imsg" ||
+    die "the downloaded imsg executable is not $EXPECTED_IMSG_VERSION"
+
+  install -d -m 700 "$install_prefix/libexec/imessage-proxy"
+  # Guard the recursive replace: only ever the installer's own versioned payload.
+  [[ "$managed_directory" == "$install_prefix/libexec/imessage-proxy/imsg-$EXPECTED_IMSG_VERSION" ]] ||
+    die "refusing to replace an unexpected imsg directory: $managed_directory"
+  if [[ -e "$managed_directory" || -L "$managed_directory" ]]; then
+    [[ -d "$managed_directory" && ! -L "$managed_directory" ]] ||
+      die "existing imsg payload path is not a directory: $managed_directory"
+    rm -rf -- "$managed_directory"
+  fi
+  mkdir -m 700 "$managed_directory"
+  # Copy the complete payload; the executable cannot run without its siblings.
+  (cd "$payload" && tar -cf - .) | (cd "$managed_directory" && tar -xf -) ||
+    die "could not install the imsg payload at $managed_directory"
+  chmod 500 "$candidate"
+  [[ -x "$candidate" && ! -L "$candidate" ]] ||
+    die "the installed imsg executable is invalid: $candidate"
+  imsg_reports_expected_version "$candidate" ||
+    die "the installed imsg executable is not $EXPECTED_IMSG_VERSION"
+  note "Installed the pinned imsg $EXPECTED_IMSG_VERSION at $candidate"
+  printf '%s\n' "$candidate"
+}
+
+# Expose imsg on PATH next to the product CLI. The executable finds its sidecar
+# dylib and resource bundles through @loader_path, which dyld resolves from the
+# real payload directory, so a symlink here is safe.
+link_imsg() {
+  local link payload="$1"
+  link="$install_prefix/bin/imsg"
+  install -d -m 755 "$install_prefix/bin"
+  if [[ -e "$link" && ! -L "$link" ]]; then
+    note "Left the existing $link in place; it is not managed by this installer."
+    return
+  fi
+  ln -sfn "$payload" "$link" || die "could not link imsg at $link"
+  [[ -x "$link" ]] || die "the imsg link is not executable: $link"
+  note "Linked imsg to $link"
+}
+
 resolve_imsg() {
-  local candidate="$imsg_path" reported
-  while true; do
-    if [[ -z "$candidate" ]]; then
-      note ''
-      note "iMessage Proxy drives Messages.app through imsg $EXPECTED_IMSG_VERSION."
-      note "Download and review it first: $IMSG_PROJECT_URL"
-      candidate="$(prompt_for_value "Absolute path to imsg $EXPECTED_IMSG_VERSION: ")"
-    fi
-    if [[ "$candidate" == /* && -f "$candidate" && ! -L "$candidate" && -x "$candidate" ]]; then
-      reported="$("$candidate" --version 2>/dev/null || true)"
-      if [[ "$reported" == "$EXPECTED_IMSG_VERSION" ]]; then
-        printf '%s\n' "$candidate"
-        return
-      fi
-      note "That executable reports '${reported:-unknown}'; exactly $EXPECTED_IMSG_VERSION is required."
-    else
-      note 'That path is not an absolute, executable, regular, non-symlink file.'
-    fi
-    [[ -z "$imsg_path" ]] || die "the --imsg executable is not a usable imsg $EXPECTED_IMSG_VERSION"
-    candidate=''
-  done
+  local reported
+  if [[ -z "$imsg_path" ]]; then
+    install_pinned_imsg
+    return
+  fi
+
+  # An explicit --imsg is honored, including a symlink such as a Homebrew shim:
+  # resolve it to its real target rather than rejecting it.
+  [[ "$imsg_path" == /* ]] || die '--imsg must be an absolute path'
+  local resolved
+  resolved="$(resolve_real_path "$imsg_path")" ||
+    die "--imsg does not name an existing executable: $imsg_path"
+  [[ -f "$resolved" && -x "$resolved" ]] ||
+    die "--imsg must resolve to an executable regular file: $imsg_path"
+  reported="$("$resolved" --version 2>/dev/null || true)"
+  [[ "$reported" == "$EXPECTED_IMSG_VERSION" ]] ||
+    die "--imsg reports '${reported:-unknown}'; exactly $EXPECTED_IMSG_VERSION is required"
+  if [[ "$resolved" != "$imsg_path" ]]; then
+    note "Resolved --imsg $imsg_path to $resolved"
+  fi
+  printf '%s\n' "$resolved"
+}
+
+resolve_real_path() {
+  local target="$1"
+  [[ -e "$target" ]] || return 1
+  if [[ -L "$target" ]]; then
+    # The product CLI requires a real, non-symlink path.
+    python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$target" 2>/dev/null ||
+      readlink -f "$target" 2>/dev/null ||
+      return 1
+  else
+    printf '%s\n' "$target"
+  fi
 }
 
 collect_service_identity() {
@@ -674,10 +821,39 @@ print_next_steps() {
   note "  Configuration: $config_path"
   note "  Allowlist:     $HOME/Library/Application Support/iMessage Proxy/private/allowed-targets.txt"
   note "  CLI:           $install_prefix/bin/imessage-proxy"
+  note "  imsg:          $install_prefix/bin/imsg"
+  note ''
+  note 'The administrator key above is shown once. Store it in a password manager.'
+  print_path_hint
   note ''
   note 'Next: add one exact recipient to the allowlist, then send a test message.'
-  note 'The administrator key above is shown once. Store it in a password manager.'
   note "Public HTTPS stays disabled. To publish the service, follow $PROJECT_URL/blob/main/docs/operations.md"
+}
+
+# The install prefix is frequently absent from an interactive shell's PATH, which
+# otherwise leaves the operator with `command not found` right after a success.
+print_path_hint() {
+  local profile
+  case ":$PATH:" in
+    *":$install_prefix/bin:"*)
+      note "Both commands are already on your PATH."
+      return
+      ;;
+  esac
+  case "${SHELL##*/}" in
+    zsh) profile="$HOME/.zshrc" ;;
+    bash) profile="$HOME/.bash_profile" ;;
+    *) profile='your shell startup file' ;;
+  esac
+  note ''
+  note "$install_prefix/bin is not on your PATH yet, so 'imessage-proxy' will not"
+  note 'resolve by name in this shell. Add it once:'
+  note ''
+  note "  echo 'export PATH=\"$install_prefix/bin:\$PATH\"' >> $profile"
+  note "  export PATH=\"$install_prefix/bin:\$PATH\""
+  note ''
+  note 'Until then, call the CLI by its full path:'
+  note "  $install_prefix/bin/imessage-proxy server-status"
 }
 
 report_existing_installation() {
@@ -687,6 +863,7 @@ report_existing_installation() {
   note ''
   note 'Check it, or create more keys from the management console:'
   note "  $install_prefix/bin/imessage-proxy server-status"
+  print_path_hint
   note ''
   note 'To adopt a rebuilt server binary, stop the edge and server, then run'
   note 'prepare, build-host, and server-install as described in the operations guide.'
@@ -733,8 +910,18 @@ self_test() {
     ! release_tag_valid "$candidate" ||
       die "self-test accepted an invalid release tag: ${candidate:-<empty>}"
   done
-  [[ "$LATEST_RELEASE_API" == "https://api.github.com/repos/$PROJECT_REPOSITORY/releases/latest" ]] ||
-    die 'the latest-release endpoint does not target the project repository'
+  [[ "$REPOSITORY_API" == "https://api.github.com/repos/$PROJECT_REPOSITORY" ]] ||
+    die 'the repository endpoint does not target the project repository'
+  [[ "$SOURCE_ARCHIVE_BASE_URL" == "https://codeload.github.com/$PROJECT_REPOSITORY/tar.gz" ]] ||
+    die 'the source-archive endpoint does not target the project repository'
+  commit_sha_valid "$(printf 'a%.0s' {1..40})" ||
+    die 'self-test rejected a valid commit SHA'
+  for candidate in '' abc main "$(printf 'A%.0s' {1..40})" "$(printf 'a%.0s' {1..39})"; do
+    ! commit_sha_valid "$candidate" ||
+      die "self-test accepted an invalid commit SHA: ${candidate:-<empty>}"
+  done
+  sha256_valid "$IMSG_ARCHIVE_SHA256" ||
+    die 'the pinned imsg archive digest is not a valid SHA-256'
   node_version_supported v22.12.0 || die 'self-test rejected the minimum Node.js version'
   node_version_supported v22.23.2 || die 'self-test rejected a supported Node.js version'
   for candidate in v22.11.9 v23.0.0 22.12.0 v21.9.9; do
@@ -746,12 +933,13 @@ self_test() {
     ! config_value_valid "$candidate" ||
       die 'self-test accepted an unsafe configuration value'
   done
-  parse_latest_release_tag <<< '{"name":"x","tag_name":"v1.2.3","draft":false}' |
-    grep -Fqx v1.2.3 || die 'self-test could not parse a release tag'
-  parse_latest_release_tag <<< '{"tag_name": "v10.20.30" , "x":1}' |
-    grep -Fqx v10.20.30 || die 'self-test could not parse a spaced release tag'
-  [[ -z "$(parse_latest_release_tag <<< '{"name":"no tag here"}')" ]] ||
-    die 'self-test invented a release tag'
+  parse_json_string_field sha <<< '{"sha":"0123456789abcdef0123456789abcdef01234567","x":1}' |
+    grep -Fqx 0123456789abcdef0123456789abcdef01234567 ||
+    die 'self-test could not parse a commit SHA'
+  parse_json_string_field sha <<< '{"sha": "abc" , "y":2}' |
+    grep -Fqx abc || die 'self-test could not parse a spaced JSON field'
+  [[ -z "$(parse_json_string_field sha <<< '{"name":"no sha here"}')" ]] ||
+    die 'self-test invented a JSON field value'
   printf 'installer self-test passed\n' >&2
 }
 
@@ -793,6 +981,7 @@ main() {
   step 'Collecting service identity and native dependencies'
   collect_service_identity
   imsg_binary="$(resolve_imsg)"
+  link_imsg "$imsg_binary"
   caddy_binary="$(resolve_caddy)"
   config_path="$(write_service_config "$caddy_binary" "$imsg_binary")"
 

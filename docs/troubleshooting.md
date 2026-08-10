@@ -27,16 +27,21 @@ re-enables the label.
 `scripts/install.sh` fails closed and changes nothing after the failing step. The
 common causes are specific:
 
-- **"release … is unavailable"** means that tag has no published archive. Install
-  a published release with `--tag vMAJOR.MINOR.PATCH`, or a reviewed checkout with
-  `--source /path/to/imessage-proxy`.
+- **"does not support one-command installation"** means `--tag` named a release
+  whose CLI predates the `bootstrap` action. Omit `--tag` to install `main`.
+- **"release … is unavailable"** means that tag has no published source archive.
+  Omit `--tag`, or install a reviewed checkout with `--source /path/to/checkout`.
+- **"does not carry the resolved commit"** means the downloaded archive did not
+  match the commit resolved from the GitHub API. Do not retry blindly.
 - **"the release archive does not match …"** means the download did not match the
-  published `SHA256SUMS` or your `--sha256` value. Do not retry blindly; verify
-  the release first.
+  published `SHA256SUMS` or your `--sha256` value. Verify the release first.
+- **"does not match the reviewed SHA-256 digest"** (imsg) or **"reviewed SHA-512
+  digest"** (Caddy) means a dependency download did not match its recorded pin.
+  Stop and investigate rather than retrying.
 - **"install the Xcode Command Line Tools first"** means the compiler is missing.
   Run `xcode-select --install` and start over.
-- **"That executable reports …"** means the supplied `imsg` is not exactly
-  `0.13.4`. The pinned version is mandatory.
+- **"`--imsg` reports …"** means the executable you supplied is not exactly
+  `0.13.4`. Omit `--imsg` to let the installer fetch the pinned build.
 - **"run the installer in an interactive terminal"** means it had no TTY. Full
   Disk Access must be granted interactively, so run it from a real terminal.
 - **"finish editing the existing configuration first"** means a previous run left
@@ -44,7 +49,28 @@ common causes are specific:
   file.
 
 Re-running the installer is safe. It reuses an already valid configuration,
-reuses the pinned Caddy, and leaves an already loaded service untouched.
+reuses the pinned `imsg` and Caddy, and leaves an already loaded service
+untouched.
+
+## `imessage-proxy: command not found`
+
+The CLI installs into `~/.local/bin`, which many shells do not search by
+default. The installer prints the exact line to add when it detects this. Add it
+once, then reopen the shell or re-export it:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Until then, call the CLI by its full path, which always works:
+
+```bash
+"$HOME/.local/bin/imessage-proxy" server-status
+```
+
+`imessage-proxy start` is not an action. The lifecycle actions are `server-start`,
+`server-status`, and `server-stop`; run `imessage-proxy --help` for the full list.
 
 ## `doctor` rejects `imsg`
 
