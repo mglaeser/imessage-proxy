@@ -399,6 +399,21 @@ require_imsg_source() {
 # Access, which the native server holds and an ordinary terminal usually does
 # not. Prints one status word so doctor can distinguish a definite
 # misconfiguration from a state it simply cannot observe.
+
+# Changing a mode under ~/Library/Messages is refused unless the calling
+# application holds Full Disk Access, and sudo does not help: TCC attributes the
+# request to the responsible application rather than the user ID, so a sudo child
+# of the terminal inherits the same refusal. A bare "run chmod" would therefore
+# send an operator into a loop that cannot succeed.
+print_messages_mode_remedy() {
+  local target="$1"
+  printf 'FAIL fix it with:  chmod go-w %s\n' "$target" >&2
+  printf 'FAIL if that reports "Operation not permitted", macOS is refusing it, not the file mode:\n' >&2
+  printf 'FAIL   ls -ldO %s        # a "restricted" flag means macOS owns the path; leave it alone\n' "$target" >&2
+  printf 'FAIL   otherwise grant this terminal Full Disk Access, reopen it, and retry the chmod\n' >&2
+  printf 'FAIL sudo does not bypass this; TCC follows the application, not the user ID.\n' >&2
+}
+
 messages_database_status() {
   local mode owner parent path="$MESSAGES_DATABASE_PATH"
   parent="${path%/*}"
@@ -1542,12 +1557,12 @@ doctor() {
       ;;
     writable-directory)
       printf 'FAIL another account can write %s\n' "${MESSAGES_DATABASE_PATH%/*}" >&2
-      printf 'FAIL run: chmod go-w %s\n' "${MESSAGES_DATABASE_PATH%/*}" >&2
+      print_messages_mode_remedy "${MESSAGES_DATABASE_PATH%/*}"
       failed=1
       ;;
     writable-database)
       printf 'FAIL another account can write %s\n' "$MESSAGES_DATABASE_PATH" >&2
-      printf 'FAIL run: chmod go-w %s\n' "$MESSAGES_DATABASE_PATH" >&2
+      print_messages_mode_remedy "$MESSAGES_DATABASE_PATH"
       failed=1
       ;;
     symlinked-directory | symlinked-database)
