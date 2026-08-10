@@ -390,6 +390,69 @@ require_imsg_source() {
   printf '%s\n' "$source"
 }
 
+# The Messages database is Apple-managed state, not something this project
+# creates. macOS ships it group/world readable inside a TCC-protected directory,
+# so require only that no other account can write it. Demanding 0600 would force
+# an operator to weaken their own system just to install this service.
+#
+# Metadata is checked, never content: reading the database requires Full Disk
+# Access, which the native server holds and an ordinary terminal usually does
+# not. Prints one status word so doctor can distinguish a definite
+# misconfiguration from a state it simply cannot observe.
+messages_database_status() {
+  local mode owner parent path="$MESSAGES_DATABASE_PATH"
+  parent="${path%/*}"
+  if [[ -L "$parent" ]]; then
+    printf 'symlinked-directory'
+    return
+  fi
+  if [[ ! -d "$parent" ]]; then
+    printf 'unavailable'
+    return
+  fi
+  mode="$(secure_mode "$parent" 2>/dev/null)" || {
+    printf 'unavailable'
+    return
+  }
+  owner="$(stat -f '%Su' "$parent" 2>/dev/null)" || {
+    printf 'unavailable'
+    return
+  }
+  if [[ "$owner" != "$(id -un)" ]]; then
+    printf 'foreign-directory'
+    return
+  fi
+  if [[ "$((8#$mode & 022))" -ne 0 ]]; then
+    printf 'writable-directory'
+    return
+  fi
+  if [[ -L "$path" ]]; then
+    printf 'symlinked-database'
+    return
+  fi
+  if [[ ! -f "$path" ]]; then
+    printf 'unavailable'
+    return
+  fi
+  mode="$(secure_mode "$path" 2>/dev/null)" || {
+    printf 'unavailable'
+    return
+  }
+  owner="$(stat -f '%Su' "$path" 2>/dev/null)" || {
+    printf 'unavailable'
+    return
+  }
+  if [[ "$owner" != "$(id -un)" ]]; then
+    printf 'foreign-database'
+    return
+  fi
+  if [[ "$((8#$mode & 022))" -ne 0 ]]; then
+    printf 'writable-database'
+    return
+  fi
+  printf 'ok'
+}
+
 write_initial_targets() {
   local links owner temporary
   if [[ -e "$TARGETS_FILE" || -L "$TARGETS_FILE" ]]; then
@@ -1468,6 +1531,31 @@ doctor() {
     no) printf 'OK   public-exposure gate is disabled\n' ;;
     *)
       printf 'FAIL IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS must be yes or no\n' >&2
+      failed=1
+      ;;
+  esac
+  case "$(messages_database_status)" in
+    ok) printf 'OK   Messages database metadata: %s\n' "$MESSAGES_DATABASE_PATH" ;;
+    unavailable)
+      printf 'WARN Messages database is not visible from this terminal: %s\n' "$MESSAGES_DATABASE_PATH" >&2
+      printf 'WARN sign in to Messages, or grant this terminal Full Disk Access to check it here\n' >&2
+      ;;
+    writable-directory)
+      printf 'FAIL another account can write %s\n' "${MESSAGES_DATABASE_PATH%/*}" >&2
+      printf 'FAIL run: chmod go-w %s\n' "${MESSAGES_DATABASE_PATH%/*}" >&2
+      failed=1
+      ;;
+    writable-database)
+      printf 'FAIL another account can write %s\n' "$MESSAGES_DATABASE_PATH" >&2
+      printf 'FAIL run: chmod go-w %s\n' "$MESSAGES_DATABASE_PATH" >&2
+      failed=1
+      ;;
+    symlinked-directory | symlinked-database)
+      printf 'FAIL the Messages database path must not be a symlink: %s\n' "$MESSAGES_DATABASE_PATH" >&2
+      failed=1
+      ;;
+    foreign-directory | foreign-database)
+      printf 'FAIL the Messages database must belong to %s: %s\n' "$(id -un)" "$MESSAGES_DATABASE_PATH" >&2
       failed=1
       ;;
   esac
