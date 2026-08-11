@@ -397,6 +397,31 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
   : > "$DATABASE_PATH"
   chmod 600 "$DATABASE_PATH"
 
+  # The checkpoint exists so a human reads the sentence, not to test typing. A
+  # single mistyped character used to discard a completed build and install, so
+  # case and surrounding whitespace are forgiven while the words remain
+  # mandatory. Anything short of the full sentence must still be refused.
+  for accepted in \
+    'FULL DISK ACCESS GRANTED' \
+    'full disk access granted' \
+    'Full Disk Access Granted' \
+    '   FULL DISK ACCESS GRANTED   '; do
+    full_disk_access_acknowledgement_matches "$accepted" ||
+      fail "a valid Full Disk Access acknowledgement was refused: $accepted"
+  done
+  for refused in \
+    'FULL DISK ACCESS GRANTE' \
+    'FULL DISK ACCESS' \
+    'GRANTED' \
+    'FULL  DISK ACCESS GRANTED' \
+    'FULL DISK ACCESS GRANTED PLEASE' \
+    'yes' \
+    ''; do
+    if full_disk_access_acknowledgement_matches "$refused"; then
+      fail "an invalid Full Disk Access acknowledgement was accepted: $refused"
+    fi
+  done
+
   bootstrap_token="imp_$(printf 'a%.0s' {1..43})"
   (
     bootstrap_log="$temporary/bootstrap-sequence.log"
