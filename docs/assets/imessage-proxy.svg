@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="imessage-proxy-title imessage-proxy-description">
+  <title id="imessage-proxy-title">iMessage Proxy</title>
+  <desc id="imessage-proxy-description">A message bubble on a dark rounded plate, its trailing dots handed off to a forward chevron.</desc>
+  <rect x="1" y="1" width="62" height="62" rx="15" fill="#071019" stroke="#5eead4" stroke-opacity="0.3" stroke-width="1.5"/>
+  <path d="M20 13 H44 A8 8 0 0 1 52 21 V37 A8 8 0 0 1 44 45 H27 L17 53 L20.5 45 A8 8 0 0 1 12 37 V21 A8 8 0 0 1 20 13 Z" fill="none" stroke="#5eead4" stroke-width="3.2" stroke-linejoin="round"/>
+  <g fill="#5eead4">
+    <circle cx="23" cy="29" r="3.1"/>
+    <circle cx="32" cy="29" r="3.1"/>
+  </g>
+  <path d="M39 22.5 L45.5 29 L39 35.5" fill="none" stroke="#60a5fa" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
