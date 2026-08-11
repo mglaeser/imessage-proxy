@@ -368,6 +368,49 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
   assert_contains 'IMESSAGE_PROXY_UI_DIR' "$CADDYFILE"
   assert_contains 'IMESSAGE_PROXY_EDGE_LOG_PATH' "$CADDYFILE"
 
+  # The rendered ProgramArguments array is what launchd actually executes, and
+  # it was the one artifact nothing verified. Rendering used to patch the array
+  # by index, and "plutil -replace ProgramArguments.0" inserts rather than
+  # replaces on some macOS releases: the native agent shipped as
+  # [<server binary>, "__SERVER_BIN__", "serve"], which lints, matches a second
+  # identical render, bootstraps, and then exits 64 with a usage line on every
+  # spawn behind a blind 50-second readiness wait. Assert the vector itself.
+  rendered_server_agent="$temporary/rendered-server-agent.plist"
+  render_server_agent_to "$rendered_server_agent"
+  [[ "$(plutil -extract ProgramArguments.0 raw -o - "$rendered_server_agent")" == "$SERVER_BIN" ]] ||
+    fail 'the rendered native LaunchAgent does not execute the staged server binary'
+  [[ "$(plutil -extract ProgramArguments.1 raw -o - "$rendered_server_agent")" == serve ]] ||
+    fail 'the rendered native LaunchAgent does not pass the serve subcommand'
+  ! plutil -extract ProgramArguments.2 raw -o - "$rendered_server_agent" > /dev/null 2>&1 ||
+    fail 'the rendered native LaunchAgent passes unexpected extra arguments'
+  plutil -extract ProgramArguments json -o - "$rendered_server_agent" > "$temporary/server-argv.json"
+  assert_not_contains '__' "$temporary/server-argv.json"
+  rendered_edge_agent="$temporary/rendered-edge-agent.plist"
+  render_edge_agent_to "$rendered_edge_agent"
+  [[ "$(plutil -extract ProgramArguments.0 raw -o - "$rendered_edge_agent")" == "$CADDY_BIN" ]] ||
+    fail 'the rendered edge LaunchAgent does not execute the staged Caddy binary'
+  [[ "$(plutil -extract ProgramArguments.3 raw -o - "$rendered_edge_agent")" == "$CADDYFILE" ]] ||
+    fail 'the rendered edge LaunchAgent does not point at the staged Caddyfile'
+  plutil -extract ProgramArguments json -o - "$rendered_edge_agent" > "$temporary/edge-argv.json"
+  assert_not_contains '__' "$temporary/edge-argv.json"
+  # A lint-clean plist with a truncated, padded, or mistyped vector must be
+  # rejected: that is exactly the shape launchd accepts and the server cannot
+  # run. Each fixture is built through the same append path the renderer uses,
+  # so the assertions never depend on plutil's array-index semantics.
+  argument_fixture="$temporary/argument-vector.plist"
+  install -m 0600 "$rendered_server_agent" "$argument_fixture"
+  set_program_arguments "$argument_fixture" "$SERVER_BIN"
+  plutil -lint "$argument_fixture" > /dev/null ||
+    fail 'the truncated argument-vector fixture is not a valid plist'
+  expect_failure 'rendered LaunchAgent lost argument 1 (serve)' \
+    require_rendered_program_arguments "$argument_fixture" "$SERVER_BIN" serve
+  set_program_arguments "$argument_fixture" "$SERVER_BIN" serve check-config
+  expect_failure 'rendered LaunchAgent has more than 2 arguments' \
+    require_rendered_program_arguments "$argument_fixture" "$SERVER_BIN" serve
+  set_program_arguments "$argument_fixture" "$SERVER_BIN" __SERVER_BIN__ serve
+  expect_failure "rendered LaunchAgent argument 1 is '__SERVER_BIN__'" \
+    require_rendered_program_arguments "$argument_fixture" "$SERVER_BIN" serve
+
   server_environment_capture="$temporary/server-environment.capture"
   {
     printf '%s\n' '#!/usr/bin/env bash'
@@ -859,14 +902,33 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     setup_lifecycle_prerequisites
     reset_lifecycle_case server-start-readiness-log
     server_loaded() { return 1; }
-    wait_for_socket() { return 1; }
-    printf '%s\n' 'WARNING: distinctive native startup detail' > "$SERVER_LOG"
+    wait_for_socket() {
+      printf '%s\n' 'WARNING: distinctive native startup detail' >> "$SERVER_LOG"
+      return 1
+    }
     capture="$temporary/server-start-readiness-log.out"
     if (server_start) > "$capture" 2>&1; then
       fail 'server-start succeeded despite an unready socket'
     fi
     assert_contains 'distinctive native startup detail' "$capture"
     assert_contains 'server-logs' "$capture"
+  )
+  # Only the lines this start appended may be presented as its evidence. The log
+  # survives reinstalls and nothing truncates it, so an unscoped tail reported an
+  # earlier crash loop as the current cause and sent triage after the wrong
+  # fault. The report must instead say that this start wrote nothing.
+  (
+    setup_lifecycle_prerequisites
+    reset_lifecycle_case server-start-readiness-stale-log
+    server_loaded() { return 1; }
+    wait_for_socket() { return 1; }
+    printf '%s\n' 'Usage: imessage-proxy-server <serve|version>' > "$SERVER_LOG"
+    capture="$temporary/server-start-readiness-stale.out"
+    if (server_start) > "$capture" 2>&1; then
+      fail 'server-start succeeded despite an unready socket'
+    fi
+    assert_not_contains 'Usage: imessage-proxy-server' "$capture"
+    assert_contains 'wrote nothing' "$capture"
   )
   (
     setup_lifecycle_prerequisites
@@ -878,7 +940,7 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     if (server_start) > "$capture" 2>&1; then
       fail 'server-start succeeded despite an unready socket'
     fi
-    assert_contains 'the log is empty' "$capture"
+    assert_contains 'wrote nothing' "$capture"
   )
   # A service that answers requests but cannot read Messages is running, not
   # healthy. Only lines appended by this start may raise the notice, so a stale
