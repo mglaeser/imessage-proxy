@@ -1,4 +1,7 @@
 <!-- markdownlint-disable MD033 -->
+<p align="center">
+  <img src="docs/assets/imessage-proxy.svg" width="112" height="112" alt="iMessage Proxy: a message bubble handing off to a forward chevron">
+</p>
 <h1 align="center">iMessage Proxy</h1>
 <p align="center">
   <strong>A small, security-first REST API for Messages.app.</strong>
