@@ -262,8 +262,7 @@ static BOOL ValidateParentDirectory(NSString *path, NSError **error) {
             (finalComponent && (metadata.st_uid != getuid() || (metadata.st_mode & 077) != 0))) {
             if (error != NULL) {
                 NSString *format = @"%@ must be a private user-owned directory";
-                *error = ServerError(IMPServerErrorInvalidConfiguration,
-                                     [NSString stringWithFormat:format, current]);
+                *error = ServerError(IMPServerErrorInvalidConfiguration, [NSString stringWithFormat:format, current]);
             }
             return NO;
         }
