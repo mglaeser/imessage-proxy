@@ -350,6 +350,13 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
   [[ -f "$TARGETS_FILE" ]] || fail 'prepare did not create the target allowlist'
   [[ -f "$EDGE_LOG" && ! -L "$EDGE_LOG" ]] ||
     fail 'prepare did not create the bounded edge log safely'
+  # A start failure used to be undiagnosable because both LaunchAgent streams
+  # went to /dev/null. The server log must exist, be private, and be rendered
+  # into the plist instead.
+  [[ -f "$SERVER_LOG" && ! -L "$SERVER_LOG" ]] ||
+    fail 'prepare did not create the bounded native server log safely'
+  [[ "$(stat -f '%Lp' "$SERVER_LOG")" == 600 ]] ||
+    fail 'the native server log is not private'
   [[ -f "$CADDYFILE" && -x "$CADDY_BIN" && -x "$IMSG_BIN" ]] ||
     fail 'prepare did not stage the pinned native dependencies'
   [[ -f "$SERVER_PLIST_STATE" && -f "$EDGE_PLIST_STATE" ]] ||
@@ -820,6 +827,60 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     wait_for_socket() { return 1; }
     expect_failure 'native LaunchAgent did not become ready and was disabled again' server_start
     assert_rollback "$SERVER_LABEL" "$lifecycle_call_log"
+  )
+  # A readiness failure must carry its own explanation. This exact failure was
+  # unresolvable in the field because both LaunchAgent streams went to /dev/null
+  # and the operator was told only that the socket never appeared.
+  (
+    setup_lifecycle_prerequisites
+    reset_lifecycle_case server-start-readiness-log
+    server_loaded() { return 1; }
+    wait_for_socket() { return 1; }
+    printf '%s\n' 'WARNING: distinctive native startup detail' > "$SERVER_LOG"
+    capture="$temporary/server-start-readiness-log.out"
+    if (server_start) > "$capture" 2>&1; then
+      fail 'server-start succeeded despite an unready socket'
+    fi
+    assert_contains 'distinctive native startup detail' "$capture"
+    assert_contains 'server-logs' "$capture"
+  )
+  (
+    setup_lifecycle_prerequisites
+    reset_lifecycle_case server-start-readiness-empty-log
+    server_loaded() { return 1; }
+    wait_for_socket() { return 1; }
+    : > "$SERVER_LOG"
+    capture="$temporary/server-start-readiness-empty.out"
+    if (server_start) > "$capture" 2>&1; then
+      fail 'server-start succeeded despite an unready socket'
+    fi
+    assert_contains 'the log is empty' "$capture"
+  )
+  # A service that answers requests but cannot read Messages is running, not
+  # healthy. Only lines appended by this start may raise the notice, so a stale
+  # warning cannot become a false alarm.
+  (
+    setup_lifecycle_prerequisites
+    reset_lifecycle_case server-start-degraded
+    server_loaded() { return 1; }
+    printf '%s\n' 'WARNING: serving in a degraded state.' > "$SERVER_LOG"
+    wait_for_socket() {
+      printf '%s\n' 'WARNING: serving in a degraded state.' >> "$SERVER_LOG"
+      return 0
+    }
+    capture="$temporary/server-start-degraded.out"
+    server_start > "$capture" 2>&1
+    assert_contains 'cannot read Messages' "$capture"
+    assert_contains 'Full Disk Access' "$capture"
+  )
+  (
+    setup_lifecycle_prerequisites
+    reset_lifecycle_case server-start-stale-degraded
+    server_loaded() { return 1; }
+    printf '%s\n' 'WARNING: serving in a degraded state.' > "$SERVER_LOG"
+    capture="$temporary/server-start-stale-degraded.out"
+    server_start > "$capture" 2>&1
+    assert_not_contains 'cannot read Messages' "$capture"
   )
   (
     setup_lifecycle_prerequisites
