@@ -17,7 +17,7 @@
 		<key>IMESSAGE_PROXY_DATABASE_PATH</key>
 		<string>__DATABASE_PATH__</string>
 		<key>IMESSAGE_PROXY_EXPECTED_IMSG_VERSION</key>
-		<string>0.13.4</string>
+		<string>__EXPECTED_IMSG_VERSION__</string>
 		<key>IMESSAGE_PROXY_IMSG_BIN</key>
 		<string>__IMSG_BIN__</string>
 		<key>IMESSAGE_PROXY_IMSG_SHA256</key>

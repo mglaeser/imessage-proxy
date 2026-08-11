@@ -21,11 +21,11 @@
 		<key>IMESSAGE_PROXY_EDGE_LOG_PATH</key>
 		<string>__EDGE_LOG_PATH__</string>
 		<key>IMESSAGE_PROXY_HTTP_PORT</key>
-		<string>8080</string>
+		<string>__HTTP_PORT__</string>
 		<key>IMESSAGE_PROXY_HTTPS_PORT</key>
-		<string>8443</string>
+		<string>__HTTPS_PORT__</string>
 		<key>IMESSAGE_PROXY_PUBLIC_BIND</key>
-		<string>0.0.0.0</string>
+		<string>__PUBLIC_BIND__</string>
 		<key>IMESSAGE_PROXY_API_HOST</key>
 		<string>__API_HOST__</string>
 		<key>IMESSAGE_PROXY_SOCKET_PATH</key>

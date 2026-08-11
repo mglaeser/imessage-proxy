@@ -370,11 +370,12 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
 
   # The rendered ProgramArguments array is what launchd actually executes, and
   # it was the one artifact nothing verified. Rendering used to patch the array
-  # by index, and "plutil -replace ProgramArguments.0" inserts rather than
-  # replaces on some macOS releases: the native agent shipped as
-  # [<server binary>, "__SERVER_BIN__", "serve"], which lints, matches a second
-  # identical render, bootstraps, and then exits 64 with a usage line on every
-  # spawn behind a blind 50-second readiness wait. Assert the vector itself.
+  # by index and then prove only that the result was a well-formed plist. A
+  # vector that is truncated, padded, or still carrying a placeholder satisfies
+  # that check, compares equal to a second identical render, and bootstraps; the
+  # service then exits 64 with a usage line on every spawn behind a blind
+  # 50-second readiness wait. That is what a real install hit. Assert the vector
+  # itself, since nothing else in the pipeline looks at it.
   rendered_server_agent="$temporary/rendered-server-agent.plist"
   render_server_agent_to "$rendered_server_agent"
   [[ "$(plutil -extract ProgramArguments.0 raw -o - "$rendered_server_agent")" == "$SERVER_BIN" ]] ||
@@ -395,21 +396,87 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
   assert_not_contains '__' "$temporary/edge-argv.json"
   # A lint-clean plist with a truncated, padded, or mistyped vector must be
   # rejected: that is exactly the shape launchd accepts and the server cannot
-  # run. Each fixture is built through the same append path the renderer uses,
-  # so the assertions never depend on plutil's array-index semantics.
+  # run. Each fixture is written as literal XML rather than through plutil, so
+  # the assertions never inherit the array-index semantics that caused the
+  # original defect.
   argument_fixture="$temporary/argument-vector.plist"
-  install -m 0600 "$rendered_server_agent" "$argument_fixture"
-  set_program_arguments "$argument_fixture" "$SERVER_BIN"
+  write_argument_vector_fixture() {
+    local argument
+    {
+      printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+      printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+      printf '%s\n' '<plist version="1.0">'
+      printf '%s\n' '<dict>'
+      printf '%s\n' '<key>Label</key>'
+      printf '%s\n' '<string>io.github.mglaeser.imessage-proxy</string>'
+      printf '%s\n' '<key>ProgramArguments</key>'
+      printf '%s\n' '<array>'
+      for argument; do
+        printf '<string>%s</string>\n' "$argument"
+      done
+      printf '%s\n' '</array>'
+      printf '%s\n' '</dict>'
+      printf '%s\n' '</plist>'
+    } > "$argument_fixture"
+    chmod 600 "$argument_fixture"
+    plutil -lint "$argument_fixture" > /dev/null ||
+      fail 'an argument-vector fixture is not a valid plist'
+  }
+  write_argument_vector_fixture "$SERVER_BIN"
   plutil -lint "$argument_fixture" > /dev/null ||
     fail 'the truncated argument-vector fixture is not a valid plist'
   expect_failure 'rendered LaunchAgent lost argument 1 (serve)' \
     require_rendered_program_arguments "$argument_fixture" "$SERVER_BIN" serve
-  set_program_arguments "$argument_fixture" "$SERVER_BIN" serve check-config
+  write_argument_vector_fixture "$SERVER_BIN" serve check-config
   expect_failure 'rendered LaunchAgent has more than 2 arguments' \
     require_rendered_program_arguments "$argument_fixture" "$SERVER_BIN" serve
-  set_program_arguments "$argument_fixture" "$SERVER_BIN" __SERVER_BIN__ serve
+  # The exact shape the field failure produced: the placeholder survived as its
+  # own element and shifted the real arguments right.
+  write_argument_vector_fixture "$SERVER_BIN" __SERVER_BIN__ serve
   expect_failure "rendered LaunchAgent argument 1 is '__SERVER_BIN__'" \
     require_rendered_program_arguments "$argument_fixture" "$SERVER_BIN" serve
+
+  # Rendering is literal text substitution, so the two ways it can go wrong are
+  # a value that reshapes the document and a placeholder nobody supplied. Both
+  # must fail loudly at render time rather than produce a plist that lints.
+  template_fixture="$temporary/template-render.plist"
+  expect_failure 'contains XML metacharacters and was refused' \
+    write_plist_from_template "$template_fixture" \
+    "$REPOSITORY/config/io.github.mglaeser.imessage-proxy.plist.in" \
+    __SERVER_BIN__ '/tmp/server</string><string>--rogue'
+  expect_failure 'no longer contains __NO_SUCH_TOKEN__' \
+    write_plist_from_template "$template_fixture" \
+    "$REPOSITORY/config/io.github.mglaeser.imessage-proxy.plist.in" \
+    __NO_SUCH_TOKEN__ value
+  write_plist_from_template "$template_fixture" \
+    "$REPOSITORY/config/io.github.mglaeser.imessage-proxy.plist.in" \
+    __SERVER_BIN__ "$SERVER_BIN"
+  expect_failure 'still contains an unsubstituted placeholder' \
+    require_no_unrendered_placeholders "$template_fixture"
+  [[ "$(stat -f '%Lp' "$template_fixture")" == 600 ]] ||
+    fail 'a rendered LaunchAgent is not private'
+
+  # The default state root on macOS contains spaces:
+  # "~/Library/Application Support/iMessage Proxy". The test harness runs from a
+  # space-free temporary directory, so render the spaced path explicitly. It has
+  # to arrive as exactly one argument, not as three.
+  spaced_server_bin='/Users/fixture/Library/Application Support/iMessage Proxy/state/bin/imessage-proxy-server'
+  write_plist_from_template "$template_fixture" \
+    "$REPOSITORY/config/io.github.mglaeser.imessage-proxy.plist.in" \
+    __SERVER_BIN__ "$spaced_server_bin" \
+    __TARGETS_FILE__ "$TARGETS_FILE" \
+    __DATABASE_PATH__ "$DATABASE_PATH" \
+    __EXPECTED_IMSG_VERSION__ "$EXPECTED_IMSG_VERSION" \
+    __IMSG_BIN__ "$IMSG_BIN" \
+    __IMSG_SHA256__ "$IMESSAGE_PROXY_IMSG_SHA256" \
+    __MESSAGES_DATABASE_PATH__ "$MESSAGES_DATABASE_PATH" \
+    __PUBLIC_ORIGIN__ "https://$IMESSAGE_PROXY_API_HOST" \
+    __SOCKET_PATH__ "$SOCKET_PATH" \
+    __SERVER_LOG__ "$SERVER_LOG"
+  require_no_unrendered_placeholders "$template_fixture"
+  plutil -lint "$template_fixture" > /dev/null ||
+    fail 'a rendered LaunchAgent with a spaced path is not a valid plist'
+  require_rendered_program_arguments "$template_fixture" "$spaced_server_bin" serve
 
   server_environment_capture="$temporary/server-environment.capture"
   {

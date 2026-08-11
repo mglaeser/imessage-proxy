@@ -545,26 +545,18 @@ stage_imsg_binary() {
   mv -f "$temporary" "$IMSG_BIN"
 }
 
-# "plutil -replace ProgramArguments.0 -string X" is not a replacement on every
-# macOS: it can INSERT at that index, leaving the template placeholder in place
-# and shifting the real arguments right. A rendered native agent then reads
-#   [<server binary>, "__SERVER_BIN__", "serve"]
-# which launchd executes happily and the server rejects, printing its usage and
-# exiting 64 before it loads any configuration. Build the array from nothing
-# instead, so no index semantics are involved: empty it once, then append each
-# argument in order.
-set_program_arguments() {
-  local argument destination="$1"
-  shift
-  plutil -replace ProgramArguments -json '[]' "$destination"
-  for argument; do
-    plutil -insert ProgramArguments -string "$argument" -append "$destination"
-  done
-}
-
 # Substitutes reviewed template tokens as literal text, without parsing the
 # property list. The argument vector launchd executes therefore arrives straight
 # from the reviewed template instead of being rebuilt element by element.
+#
+# The previous renderer edited the installed copy in place with a sequence of
+# "plutil -replace ProgramArguments.N", which addresses an array by index. A
+# real install produced a vector launchd accepted and the server rejected: it
+# printed its usage and exited 64 on every spawn. Substituting text removes the
+# concept of an index from rendering altogether, so the vector arrives exactly
+# as reviewed. Every value the template needs is a named placeholder, which
+# makes a missing value a leftover token this refuses rather than a silently
+# wrong document.
 #
 # Bash substitution is literal on both sides, so a value containing a path
 # separator, a backslash, or an ampersand cannot reshape the surrounding XML the
@@ -627,18 +619,19 @@ require_rendered_program_arguments() {
 render_server_agent_to() {
   local destination="$1" public_origin
   public_origin="https://$IMESSAGE_PROXY_API_HOST"
-  install -m 0600 "$SOURCE_DIR/config/io.github.mglaeser.imessage-proxy.plist.in" "$destination"
-  set_program_arguments "$destination" "$SERVER_BIN" serve
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_ALLOWED_TARGETS_FILE -string "$TARGETS_FILE" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_DATABASE_PATH -string "$DATABASE_PATH" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_EXPECTED_IMSG_VERSION -string "$EXPECTED_IMSG_VERSION" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_IMSG_BIN -string "$IMSG_BIN" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_IMSG_SHA256 -string "$IMESSAGE_PROXY_IMSG_SHA256" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_MESSAGES_DATABASE_PATH -string "$MESSAGES_DATABASE_PATH" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_PUBLIC_ORIGIN -string "$public_origin" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_SOCKET_PATH -string "$SOCKET_PATH" "$destination"
-  plutil -replace StandardErrorPath -string "$SERVER_LOG" "$destination"
-  plutil -replace StandardOutPath -string "$SERVER_LOG" "$destination"
+  write_plist_from_template "$destination" \
+    "$SOURCE_DIR/config/io.github.mglaeser.imessage-proxy.plist.in" \
+    __SERVER_BIN__ "$SERVER_BIN" \
+    __TARGETS_FILE__ "$TARGETS_FILE" \
+    __DATABASE_PATH__ "$DATABASE_PATH" \
+    __EXPECTED_IMSG_VERSION__ "$EXPECTED_IMSG_VERSION" \
+    __IMSG_BIN__ "$IMSG_BIN" \
+    __IMSG_SHA256__ "$IMESSAGE_PROXY_IMSG_SHA256" \
+    __MESSAGES_DATABASE_PATH__ "$MESSAGES_DATABASE_PATH" \
+    __PUBLIC_ORIGIN__ "$public_origin" \
+    __SOCKET_PATH__ "$SOCKET_PATH" \
+    __SERVER_LOG__ "$SERVER_LOG"
+  require_no_unrendered_placeholders "$destination"
   plutil -lint "$destination" >/dev/null
   require_rendered_program_arguments "$destination" "$SERVER_BIN" serve
 }
@@ -653,20 +646,22 @@ render_server_agent() {
 
 render_edge_agent_to() {
   local destination="$1"
-  install -m 0600 "$SOURCE_DIR/config/io.github.mglaeser.imessage-proxy.edge.plist.in" "$destination"
-  set_program_arguments "$destination" \
-    "$CADDY_BIN" run --config "$CADDYFILE" --adapter caddyfile
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_ACME_EMAIL -string "$IMESSAGE_PROXY_ACME_EMAIL" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_EDGE_LOG_PATH -string "$EDGE_LOG" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_HTTP_PORT -string "${IMESSAGE_PROXY_HTTP_PORT:-8080}" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_HTTPS_PORT -string "${IMESSAGE_PROXY_HTTPS_PORT:-8443}" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_PUBLIC_BIND -string "${IMESSAGE_PROXY_PUBLIC_BIND:-0.0.0.0}" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_API_HOST -string "$IMESSAGE_PROXY_API_HOST" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_SOCKET_PATH -string "$SOCKET_PATH" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_UI_DIR -string "$UI_DIR" "$destination"
-  plutil -replace EnvironmentVariables.XDG_CONFIG_HOME -string "$CADDY_CONFIG" "$destination"
-  plutil -replace EnvironmentVariables.XDG_DATA_HOME -string "$CADDY_DATA" "$destination"
-  plutil -replace WorkingDirectory -string "$CADDY_STATE" "$destination"
+  write_plist_from_template "$destination" \
+    "$SOURCE_DIR/config/io.github.mglaeser.imessage-proxy.edge.plist.in" \
+    __CADDY_BIN__ "$CADDY_BIN" \
+    __CADDYFILE__ "$CADDYFILE" \
+    __ACME_EMAIL__ "$IMESSAGE_PROXY_ACME_EMAIL" \
+    __EDGE_LOG_PATH__ "$EDGE_LOG" \
+    __HTTP_PORT__ "${IMESSAGE_PROXY_HTTP_PORT:-8080}" \
+    __HTTPS_PORT__ "${IMESSAGE_PROXY_HTTPS_PORT:-8443}" \
+    __PUBLIC_BIND__ "${IMESSAGE_PROXY_PUBLIC_BIND:-0.0.0.0}" \
+    __API_HOST__ "$IMESSAGE_PROXY_API_HOST" \
+    __SOCKET_PATH__ "$SOCKET_PATH" \
+    __UI_DIR__ "$UI_DIR" \
+    __CADDY_CONFIG__ "$CADDY_CONFIG" \
+    __CADDY_DATA__ "$CADDY_DATA" \
+    __WORKING_DIRECTORY__ "$CADDY_STATE"
+  require_no_unrendered_placeholders "$destination"
   plutil -lint "$destination" >/dev/null
   require_rendered_program_arguments "$destination" \
     "$CADDY_BIN" run --config "$CADDYFILE" --adapter caddyfile
