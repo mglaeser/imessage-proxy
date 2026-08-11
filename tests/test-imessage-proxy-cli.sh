@@ -437,7 +437,6 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     build_host() { printf '%s\n' build-host >> "$bootstrap_log"; }
     acknowledge_full_disk_access() { printf '%s\n' full-disk-access >> "$bootstrap_log"; }
     initialize_database() { printf '%s\n' initialize-database >> "$bootstrap_log"; }
-    check_messages_read_path() { printf '%s\n' messages-read >> "$bootstrap_log"; }
     check_bootstrap_eligibility() { printf '%s\n' bootstrap-preflight >> "$bootstrap_log"; }
     check_host() { printf '%s\n' check-host >> "$bootstrap_log"; }
     server_install() { printf '%s\n' server-install >> "$bootstrap_log"; }
@@ -450,7 +449,7 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
       --expires-in-days 14 2> "$bootstrap_stderr")"
     [[ "$output" == "$bootstrap_token" ]] || fail 'bootstrap stdout was not exactly the first key'
     [[ "$(< "$bootstrap_log")" == \
-      $'config\ndoctor\nprepare\nbuild-host\nfull-disk-access\ninitialize-database\nbootstrap-preflight\ncheck-host\nmessages-read\nserver-install\nkey bootstrap-admin --name first-admin --expires-in-days 14' ]] ||
+      $'config\ndoctor\nprepare\nbuild-host\nfull-disk-access\ninitialize-database\nbootstrap-preflight\ncheck-host\nserver-install\nkey bootstrap-admin --name first-admin --expires-in-days 14' ]] ||
       fail 'bootstrap lifecycle order or final key operation changed'
     assert_not_contains 'edge-install' "$bootstrap_log"
     assert_not_contains "$bootstrap_token" "$bootstrap_stderr"
@@ -466,7 +465,6 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     build_host() { printf '%s\n' build-host >> "$bootstrap_log"; }
     acknowledge_full_disk_access() { printf '%s\n' full-disk-access >> "$bootstrap_log"; }
     initialize_database() { printf '%s\n' initialize-database >> "$bootstrap_log"; }
-    check_messages_read_path() { printf '%s\n' messages-read >> "$bootstrap_log"; }
     check_bootstrap_eligibility() { printf '%s\n' bootstrap-preflight >> "$bootstrap_log"; }
     check_host() { printf '%s\n' check-host >> "$bootstrap_log"; }
     server_install() { printf '%s\n' server-install >> "$bootstrap_log"; }
@@ -482,7 +480,7 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
       --confirm 'EXPOSE IMESSAGE PROXY PUBLICLY' 2> "$temporary/bootstrap-public.stderr")"
     [[ "$output" == "$bootstrap_token" ]] || fail 'public bootstrap did not return exactly the key'
     [[ "$(< "$bootstrap_log")" == \
-      $'doctor\nprepare\nbuild-host\nfull-disk-access\ninitialize-database\nbootstrap-preflight\ncheck-host\nmessages-read\nserver-install\nedge-install\nkey' ]] ||
+      $'doctor\nprepare\nbuild-host\nfull-disk-access\ninitialize-database\nbootstrap-preflight\ncheck-host\nserver-install\nedge-install\nkey' ]] ||
       fail 'public bootstrap lifecycle order or final key operation changed'
   )
   (
@@ -507,7 +505,11 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
       fail 'failed bootstrap wrote secret-like stdout'
   )
   (
-    bootstrap_log="$temporary/bootstrap-read-preflight-failure.log"
+    # An unreadable Messages path must not abort the install. The server is built
+    # to run and report that state through /api/status, so refusing to install it
+    # contradicted the product and stranded a correctly configured Mac after the
+    # build, the signature, and the Full Disk Access checkpoint had all succeeded.
+    bootstrap_log="$temporary/bootstrap-degraded-install.log"
     : > "$bootstrap_log"
     load_service_config() { export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no; }
     require_bootstrap_tty() { :; }
@@ -518,27 +520,26 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     initialize_database() { printf '%s\n' initialize-database >> "$bootstrap_log"; }
     check_bootstrap_eligibility() { printf '%s\n' bootstrap-preflight >> "$bootstrap_log"; }
     check_host() { printf '%s\n' check-host >> "$bootstrap_log"; }
-    check_messages_read_path() {
-      printf '%s\n' messages-read >> "$bootstrap_log"
-      return 29
+    # Recorded rather than fatal: bootstrap's stderr is captured below, so a bare
+    # failure here would be invisible. Reinstating the gate shows up as a
+    # sequence mismatch that prints what actually ran.
+    check_messages_read_path() { printf '%s\n' messages-read >> "$bootstrap_log"; }
+    server_install() {
+      printf '%s\n' server-install >> "$bootstrap_log"
+      printf 'NOTICE: the service is running, but it cannot read Messages.\n' >&2
     }
-    server_install() { fail 'bootstrap installed the server after a failed Messages read preflight'; }
-    api_key_bootstrap() { fail 'bootstrap created a key after a failed Messages read preflight'; }
-    set +e
-    (
-      set -e
-      bootstrap --config /private/service.env --admin-name first-admin
-    ) > "$temporary/bootstrap-read-preflight-failure.stdout" \
-      2> "$temporary/bootstrap-read-preflight-failure.stderr"
-    bootstrap_status=$?
-    set -e
-    [[ "$bootstrap_status" -eq 29 ]] ||
-      fail 'bootstrap did not preserve the Messages read-preflight failure status'
-    [[ ! -s "$temporary/bootstrap-read-preflight-failure.stdout" ]] ||
-      fail 'failed Messages read preflight wrote secret-like stdout'
+    api_key_bootstrap() {
+      printf '%s\n' key >> "$bootstrap_log"
+      printf '%s\n' "$bootstrap_token"
+    }
+    output="$(bootstrap --config /private/service.env --admin-name first-admin \
+      2> "$temporary/bootstrap-degraded-install.stderr")"
+    [[ "$output" == "$bootstrap_token" ]] ||
+      fail 'a degraded install did not still deliver the first administrator key'
     [[ "$(< "$bootstrap_log")" == \
-      $'initialize-database\nbootstrap-preflight\ncheck-host\nmessages-read' ]] ||
-      fail 'bootstrap continued after the Messages read preflight failed'
+      $'initialize-database\nbootstrap-preflight\ncheck-host\nserver-install\nkey' ]] ||
+      fail "bootstrap did not install a degraded service; it ran: $(tr '\n' ' ' < "$bootstrap_log")"
+    assert_contains 'cannot read Messages' "$temporary/bootstrap-degraded-install.stderr"
   )
   (
     mutation_log="$temporary/bootstrap-invalid-mutation.log"
@@ -586,7 +587,6 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     build_host() { :; }
     acknowledge_full_disk_access() { :; }
     initialize_database() { :; }
-    check_messages_read_path() { :; }
     check_bootstrap_eligibility() { :; }
     check_host() { :; }
     server_install() { :; }
@@ -617,7 +617,6 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     build_host() { :; }
     acknowledge_full_disk_access() { :; }
     initialize_database() { :; }
-    check_messages_read_path() { :; }
     check_bootstrap_eligibility() { :; }
     check_host() { :; }
     server_install() { return 23; }
