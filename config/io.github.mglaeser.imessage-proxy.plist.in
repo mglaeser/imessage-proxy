@@ -49,9 +49,9 @@
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardErrorPath</key>
-	<string>/dev/null</string>
+	<string>__SERVER_LOG__</string>
 	<key>StandardOutPath</key>
-	<string>/dev/null</string>
+	<string>__SERVER_LOG__</string>
 	<key>ThrottleInterval</key>
 	<integer>10</integer>
 </dict>

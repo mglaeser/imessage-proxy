@@ -392,19 +392,20 @@ if run_native check-messages \
 fi
 [[ ! -s "$temporary/messages-preflight-invalid.out" ]]
 grep -Fqi 'returned invalid data' "$temporary/messages-preflight-invalid.err"
+# An unavailable Messages read path is a readiness property, not a start-up
+# precondition. Exiting here produced an invisible launchd crash loop whose only
+# symptom was a socket that never appeared. The server must serve, say so on
+# stderr, and let /api/status report the degradation.
 printf '%s\n' chats-failure > "${fake_imsg}.malformed"
-if run_native serve \
-  > "$temporary/messages-startup-preflight.out" 2> "$temporary/messages-startup-preflight.err"; then
-  printf 'ERROR: native server started with an unavailable Messages read path\n' >&2
-  exit 1
-fi
-[[ ! -s "$temporary/messages-startup-preflight.out" ]]
-[[ ! -e "$socket_path" && ! -L "$socket_path" ]]
-grep -Fqi 'read-path preflight failed' "$temporary/messages-startup-preflight.err"
-if grep -Fq 'private Messages read failure detail' "$temporary/messages-startup-preflight.err"; then
+start_server
+kill -0 "$server_pid"
+[[ -S "$socket_path" ]]
+grep -Fqi 'degraded' "$server_log"
+if grep -Fq 'private Messages read failure detail' "$server_log"; then
   printf 'ERROR: native-server startup exposed private dependency diagnostics\n' >&2
   exit 1
 fi
+stop_server
 printf '%s\n' chats-timeout > "${fake_imsg}.malformed"
 if run_native check-messages \
   > "$temporary/messages-preflight-timeout.out" 2> "$temporary/messages-preflight-timeout.err"; then

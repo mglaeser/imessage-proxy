@@ -228,12 +228,20 @@ imessage-proxy bootstrap \
 The sequence is fixed: `doctor`, `prepare`, `build-host`, the interactive Full
 Disk Access checkpoint, database initialization/validation, read-only bootstrap
 eligibility preflight, `check-host`, a bounded Messages read smoke test,
-`server-install`, and finally first-administrator creation. The native server
-repeats the same read preflight from its actual LaunchAgent context before it
-creates the Unix socket; therefore socket readiness proves the pinned
-`imsg chats --limit 1` path works for the installed service identity. Returned
-chat data is parsed against the public DTO and discarded. Neither read can send
-a message or trigger Automation.
+`server-install`, and finally first-administrator creation. Returned chat data
+is parsed against the public DTO and discarded. Neither read can send a message
+or trigger Automation.
+
+Socket readiness proves that the service started and accepts requests. It does
+not prove that Messages can be read: the bootstrap smoke test runs from the
+terminal, while the LaunchAgent is a separate Full Disk Access identity, so the
+two can disagree. The native server therefore treats an unreadable Messages path
+as a readiness property rather than a precondition. It logs the reason, prints a
+warning to `logs/server.log`, and serves anyway; `GET /api/status` answers
+`503 messages-unavailable` until the read path recovers. Check status after
+installation, and see
+[Troubleshooting](troubleshooting.md#the-service-runs-but-status-reports-messages-unavailable)
+when it reports that state.
 
 The bootstrap-only administrator label is restricted to 1–80 printable ASCII
 bytes without leading or trailing spaces, allowing exact fail-fast validation
@@ -329,14 +337,18 @@ private state. It does not start either service. The default state root is:
     │   ├── data/
     │   └── ui/
     ├── logs/
-    │   └── edge.log             # private Caddy log; 10 MiB rolling cap
+    │   ├── edge.log             # private Caddy log; 10 MiB rolling cap
+    │   └── server.log           # private native-server stdout/stderr; mode 0600
     ├── io.github.mglaeser.imessage-proxy.edge.plist
     └── io.github.mglaeser.imessage-proxy.plist
 ```
 
 Inspect the rendered plists and exact executable paths. Check the server's
-signature. Native operational events use the bounded macOS unified-log store;
-the LaunchAgents do not append unbounded stdout/stderr files:
+signature. Native operational events use the bounded macOS unified-log store.
+The native LaunchAgent additionally writes its own standard output and error to
+the private `logs/server.log`, so a start failure states its reason in a file
+the operator can read; `imessage-proxy server-logs` prints the last 100 lines.
+The edge LaunchAgent still discards both streams and logs through Caddy:
 
 ```bash
 codesign --display --verbose=4 \
@@ -400,10 +412,14 @@ message content or private key material in it.
 ```bash
 imessage-proxy server-install
 imessage-proxy server-status
+imessage-proxy server-logs
 ```
 
 `server-install` installs the LaunchAgent, explicitly enables its GUI launchd
 label, and starts it as the current user. It creates only the private Unix socket.
+`server-logs` prints the last 100 lines of the private `logs/server.log`; the
+install, start, and restart actions also tail it automatically when the socket
+never appears, so a failure explains itself.
 Verify ownership and type without printing private files:
 
 ```bash
@@ -428,6 +444,13 @@ curl --fail-with-body \
   --header "Authorization: Bearer $IMESSAGE_PROXY_API_KEY" \
   http://localhost/api/status
 ```
+
+A `200` response with `"messages": {"status": "ready"}` completes this section.
+A `503 messages-unavailable` response means the service is running and
+authenticating correctly while the pinned `imsg chats --limit 1` read is failing,
+which is almost always Full Disk Access no longer covering the exact current
+binary. Read `server-logs` and follow
+[Troubleshooting](troubleshooting.md#the-service-runs-but-status-reports-messages-unavailable).
 
 If the first intentional send triggers an Automation prompt, confirm the exact
 server binary/account and approve only control of Messages. Stop if the identity

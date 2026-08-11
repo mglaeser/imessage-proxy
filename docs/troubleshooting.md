@@ -102,8 +102,10 @@ Messages database: it passes the path to the pinned dependency, which reads it
 under its own Full Disk Access grant. A `0644` file inside a `0777` directory is
 accepted, because no permission shape can make the read succeed or fail — only
 the dependency's own access can. Bootstrap proves that path for real by running
-a bounded `imsg chats --limit 1`, first directly and again inside the
-LaunchAgent before it accepts the service as ready.
+a bounded `imsg chats --limit 1`. That smoke test runs from your terminal, so it
+proves the path for the terminal's permission identity; the installed
+LaunchAgent has its own. `GET /api/status` reports the running service's actual
+result.
 
 So do not `chmod` anything under `~/Library/Messages` on this project's account.
 That directory is TCC-protected, and `sudo` does not help: TCC attributes a
@@ -129,7 +131,21 @@ an unexpected file pass. Re-obtain and review the executable.
 
 ## The native server does not start
 
-Inspect a bounded window from the native server's macOS unified-log category:
+Read the native server's own log first. The LaunchAgent writes its standard
+output and error to a private `0600` file in state, and the CLI prints the last
+100 lines:
+
+```bash
+imessage-proxy server-logs
+```
+
+`server-install`, `server-start`, and `server-restart` also tail the last 20
+lines of that file automatically when the socket never appears, so the reason
+usually travels with the failure message. An empty log means the process did not
+start at all: inspect the generated plist and the exact binary path.
+
+For older events, or for structured operational metadata that never reaches
+standard error, inspect a bounded window from the macOS unified-log category:
 
 ```bash
 /usr/bin/log show \
@@ -140,8 +156,10 @@ Inspect a bounded window from the native server's macOS unified-log category:
 ```
 
 The category contains privacy-reviewed operational metadata, not request bodies
-or dependency output. Still redact request/key IDs, addresses, hostnames, and
-private paths before sharing excerpts.
+or dependency output. The server log is mode `0600` and can contain private
+paths, including the account's home directory. Redact request/key IDs,
+addresses, hostnames, and private paths from both sources before sharing
+excerpts.
 
 Common causes:
 
@@ -160,6 +178,64 @@ re-enables the launchd label. If the staged plist or binary intentionally change
 reinstall or use the documented confirmed restart path while the edge remains
 stopped.
 
+An unreadable Messages database is not in that list. It no longer prevents the
+server from starting; see the next section.
+
+## The service runs but status reports `messages-unavailable`
+
+```json
+{
+  "type": "https://github.com/mglaeser/imessage-proxy/problems/messages-unavailable",
+  "title": "Service Unavailable",
+  "status": 503,
+  "detail": "The Messages read path is unavailable.",
+  "request_id": "1f825d86-1626-4a0c-a163-644a4cebd91b"
+}
+```
+
+`GET /api/status` answers with that problem document when the pinned
+`imsg chats --limit 1` read fails. The service itself is healthy: the socket
+exists, API keys authenticate, and key administration works. Only the routes that
+read conversations are affected. The server log records the same condition once
+at startup as a `WARNING` line, and the unified log records it as
+`messages_read_unavailable`.
+
+The cause is almost always Full Disk Access. Confirm the current binary and the
+grant that covers it:
+
+```bash
+imessage-proxy server-logs
+ls -l "$HOME/Library/Application Support/iMessage Proxy/state/bin/imessage-proxy-server"
+```
+
+In System Settings → Privacy & Security → Full Disk Access, the entry must point
+at that exact path and be enabled. Remove a stale entry and add the current
+binary rather than editing around it. Then restart the server with the edge
+stopped:
+
+```bash
+imessage-proxy edge-stop
+imessage-proxy server-restart --confirm 'RESTART IMESSAGE PROXY SERVER'
+imessage-proxy server-status
+imessage-proxy edge-start
+```
+
+Two macOS behaviors explain why a Mac can pass every interactive check and still
+land in this state.
+
+First, macOS attributes file access to the responsible process, not only to the
+binary performing the read. When `bootstrap` runs its Messages smoke test from
+your terminal, the responsible process is Terminal or iTerm, so the read can
+succeed on the strength of the terminal's own Full Disk Access. The identical
+binary started by launchd is its own responsible process and needs its own entry.
+That is why bootstrap can print a clean smoke test and the LaunchAgent can fail
+seconds later; the two are different permission identities, not a flaky check.
+
+Second, a Full Disk Access grant is keyed to the code signature. `build-host`
+re-signs the server binary, so re-running it can invalidate a grant that worked
+before. After any rebuild, re-check that the entry still refers to the current
+binary.
+
 ## Full Disk Access fails
 
 Symptoms include readiness failure, database-open errors, or empty reads despite
@@ -176,9 +252,11 @@ visible Messages conversations.
 2. In System Settings → Privacy & Security → Full Disk Access, grant that exact
    server binary access.
 3. Keep the edge stopped and restart the server with its exact confirmation. The
-   server now runs a bounded `imsg chats --limit 1` read before creating its
-   socket; a missing socket plus a `Messages read-path preflight failed` log means
-   the installed LaunchAgent identity still cannot read Messages.
+   server runs a bounded `imsg chats --limit 1` read at startup but serves
+   regardless of the outcome, so check the result rather than the socket: a
+   `503 messages-unavailable` answer from `GET /api/status`, or a `WARNING` line
+   in `imessage-proxy server-logs`, means the installed LaunchAgent identity
+   still cannot read Messages.
 4. Prove the socket and authenticated status before starting the edge again.
 
 Do not grant a shell application or Caddy broad access as a substitute, reset the

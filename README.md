@@ -254,14 +254,16 @@ the full Unicode naming contract documented in [API reference](docs/api.md).
 
 The command pauses once so macOS can grant Full Disk Access to the exact binary
 it just built. It then runs a bounded, read-only `imsg chats --limit 1` smoke
-test and repeats that same check inside the actual LaunchAgent before accepting
-socket readiness. Returned chat data is discarded. A read failure leaves no key
-and no running service. All progress goes to standard error; successful standard
-output is exactly the one-time `imp_…` administrator key, ready to move directly
-into a password manager or secret store. No key is written to a file, argument,
-environment variable, or log. Accept the printed key only when the command exits
-with status zero; if the final database commit fails after output, that candidate
-is deliberately unusable and a retry remains possible.
+test. Returned chat data is discarded. That test runs from your terminal, whose
+Full Disk Access identity differs from the installed LaunchAgent's, so Messages
+availability is reported by `GET /api/status` rather than by refusing to start;
+`imessage-proxy server-logs` prints the running service's own log. All progress
+goes to standard error; successful standard output is exactly the one-time
+`imp_…` administrator key, ready to move directly into a password manager or
+secret store. No key is written to a file, argument, environment variable, or
+log. Accept the printed key only when the command exits with status zero; if the
+final database commit fails after output, that candidate is deliberately unusable
+and a retry remains possible.
 
 For an already reviewed public hostname, DNS, IPv4 port mapping, firewall, and
 acceptance plan, set `IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=yes` in the private
@@ -317,10 +319,13 @@ LaunchAgent:
 ${EDITOR:-vi} "$HOME/Library/Application Support/iMessage Proxy/private/allowed-targets.txt"
 imessage-proxy server-install
 imessage-proxy server-status
+imessage-proxy server-logs
 ```
 
 At this point only the private Unix-socket service exists. There is no network
-listener.
+listener. `server-logs` prints the last 100 lines of the private server log, and
+the start, restart, and install actions tail it automatically when the socket
+does not appear.
 
 ## Enable public HTTPS deliberately
 

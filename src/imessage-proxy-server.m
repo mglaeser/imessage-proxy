@@ -3002,13 +3002,19 @@ static BOOL RunServer(IMPConfiguration *configuration, NSError **error) {
     signal(SIGPIPE, SIG_IGN);
     signal(SIGINT, HandleSignal);
     signal(SIGTERM, HandleSignal);
+    // Messages availability is a readiness property, not a precondition. Exiting here
+    // produced an invisible launchd crash loop whose only symptom was a socket that
+    // never appeared. Serving anyway lets /api/status name the failure and lets the
+    // operator restore Full Disk Access without reinstalling anything.
     NSError *messagesError = nil;
     if (!CheckMessagesReadPath(configuration, &messagesError)) {
-        if (error != NULL) {
-            *error = messagesError ?: ServerError(IMPServerErrorUpstream, @"Messages read-path preflight failed");
-        }
-        LogOperationalFailure("server.start", "messages_read_preflight_failed", messagesError);
-        return NO;
+        const char *detail = messagesError.localizedDescription.UTF8String;
+        LogOperationalFailure("server.start", "messages_read_unavailable", messagesError);
+        fprintf(stderr, "WARNING: the Messages read path is unavailable; serving in a degraded state.\n");
+        fprintf(stderr, "         /api/status reports messages-unavailable until it recovers.\n");
+        fprintf(stderr, "         Detail: %s\n", detail == NULL ? "unavailable" : detail);
+        fprintf(stderr, "         Most often Full Disk Access no longer covers this exact binary.\n");
+        fflush(stderr);
     }
     struct stat existing;
     if (lstat(configuration.socketPath.fileSystemRepresentation, &existing) == 0) {

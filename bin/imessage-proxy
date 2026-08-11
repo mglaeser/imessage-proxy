@@ -9,6 +9,42 @@ die() {
   exit 1
 }
 
+# A start failure used to end here with no way to see why: the LaunchAgent sent
+# both streams to /dev/null. Print the tail of the server log so the reason
+# travels with the error instead of requiring a separate log-spelunking session.
+report_server_start_failure() {
+  printf 'The native server did not open its socket. Last lines of %s:\n' "$SERVER_LOG" >&2
+  if [[ -f "$SERVER_LOG" && ! -L "$SERVER_LOG" && -s "$SERVER_LOG" ]]; then
+    tail -n 20 "$SERVER_LOG" >&2 || true
+  else
+    printf '  (the log is empty; the process may not have started at all)\n' >&2
+  fi
+  printf 'Full log: imessage-proxy server-logs\n' >&2
+}
+
+server_log_offset() {
+  if [[ -f "$SERVER_LOG" && ! -L "$SERVER_LOG" ]]; then
+    stat -f '%z' "$SERVER_LOG"
+  else
+    printf '0\n'
+  fi
+}
+
+# A service that answers requests but cannot read Messages is running, not
+# healthy. Only the lines this start appended are inspected, so an older warning
+# cannot resurface as a false alarm.
+report_degraded_start() {
+  local appended offset="$1"
+  [[ -f "$SERVER_LOG" && ! -L "$SERVER_LOG" ]] || return 0
+  appended="$(tail -c "+$((offset + 1))" "$SERVER_LOG" 2>/dev/null || true)"
+  [[ "$appended" == *degraded* ]] || return 0
+  printf '\nNOTICE: the service is running, but it cannot read Messages.\n' >&2
+  printf 'API keys work and GET /api/status reports messages-unavailable.\n' >&2
+  printf 'Grant Full Disk Access to this exact binary:\n  %s\n' "$SERVER_BIN" >&2
+  printf "Then run: imessage-proxy server-restart --confirm 'RESTART IMESSAGE PROXY SERVER'\n" >&2
+  printf 'Details: imessage-proxy server-logs\n' >&2
+}
+
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "required command is missing: $1"
 }
@@ -41,6 +77,7 @@ readonly PRIVATE="$ROOT/private"
 readonly RUN_DIR="$ROOT/run"
 readonly LOG_DIR="$STATE/logs"
 readonly EDGE_LOG="$LOG_DIR/edge.log"
+readonly SERVER_LOG="$LOG_DIR/server.log"
 readonly BIN_DIR="$STATE/bin"
 readonly SERVER_BIN="$BIN_DIR/imessage-proxy-server"
 readonly IMSG_BIN="$BIN_DIR/imsg"
@@ -126,6 +163,7 @@ usage() {
     "  server-stop --confirm 'STOP IMESSAGE PROXY SERVER'" \
     "  server-restart --confirm 'RESTART IMESSAGE PROXY SERVER'" \
     '  server-status' \
+    '  server-logs' \
     "  edge-install --confirm 'EXPOSE IMESSAGE PROXY PUBLICLY'" \
     '  edge-start' \
     '  edge-stop' \
@@ -233,6 +271,14 @@ prepare_edge_log() {
 
 require_edge_log() {
   require_private_file "$EDGE_LOG"
+}
+
+prepare_server_log() {
+  prepare_private_log "$SERVER_LOG"
+}
+
+require_server_log() {
+  require_private_file "$SERVER_LOG"
 }
 
 hostname_valid() {
@@ -500,6 +546,8 @@ render_server_agent_to() {
   plutil -replace EnvironmentVariables.IMESSAGE_PROXY_MESSAGES_DATABASE_PATH -string "$MESSAGES_DATABASE_PATH" "$destination"
   plutil -replace EnvironmentVariables.IMESSAGE_PROXY_PUBLIC_ORIGIN -string "$public_origin" "$destination"
   plutil -replace EnvironmentVariables.IMESSAGE_PROXY_SOCKET_PATH -string "$SOCKET_PATH" "$destination"
+  plutil -replace StandardErrorPath -string "$SERVER_LOG" "$destination"
+  plutil -replace StandardOutPath -string "$SERVER_LOG" "$destination"
   plutil -lint "$destination" >/dev/null
 }
 
@@ -757,6 +805,7 @@ prepare() {
   fi
   prepare_runtime_directories
   prepare_edge_log
+  prepare_server_log
   write_initial_targets
   stage_imsg_binary
   stage_caddy_binary
@@ -1076,7 +1125,7 @@ require_edge_stopped() {
 }
 
 server_install() {
-  local status
+  local log_offset status
   require_macos
   require_command curl
   require_command launchctl
@@ -1092,6 +1141,7 @@ server_install() {
   fi
   require_safe_launch_agent_target "$SERVER_PLIST_TARGET"
   install -m 600 "$SERVER_PLIST_STATE" "$SERVER_PLIST_TARGET"
+  log_offset="$(server_log_offset)"
   launchctl enable "gui/$(id -u)/$SERVER_LABEL"
   if ! launchctl bootstrap "gui/$(id -u)" "$SERVER_PLIST_TARGET"; then
     rollback_start_or_die "$SERVER_LABEL"
@@ -1100,13 +1150,15 @@ server_install() {
   if ! wait_for_socket; then
     rollback_start_or_die "$SERVER_LABEL"
     wait_for_socket_absent >/dev/null 2>&1 || true
+    report_server_start_failure
     die 'native LaunchAgent did not become ready and was disabled again'
   fi
   printf 'Loaded %s; the native server is ready on its private Unix socket.\n' "$SERVER_LABEL"
+  report_degraded_start "$log_offset"
 }
 
 server_start() {
-  local status
+  local log_offset status
   require_macos
   require_command curl
   require_command launchctl
@@ -1127,6 +1179,7 @@ server_start() {
     status=$?
     [[ "$status" -eq 1 ]] || die 'could not determine native LaunchAgent state'
   fi
+  log_offset="$(server_log_offset)"
   launchctl enable "gui/$(id -u)/$SERVER_LABEL"
   if ! launchctl bootstrap "gui/$(id -u)" "$SERVER_PLIST_TARGET"; then
     rollback_start_or_die "$SERVER_LABEL"
@@ -1135,9 +1188,11 @@ server_start() {
   if ! wait_for_socket; then
     rollback_start_or_die "$SERVER_LABEL"
     wait_for_socket_absent >/dev/null 2>&1 || true
+    report_server_start_failure
     die 'native LaunchAgent did not become ready and was disabled again'
   fi
   printf 'Loaded %s; the native server is ready on its private Unix socket.\n' "$SERVER_LABEL"
+  report_degraded_start "$log_offset"
 }
 
 server_stop() {
@@ -1166,7 +1221,7 @@ server_stop() {
 }
 
 server_restart() {
-  local confirmation="$1"
+  local confirmation="$1" log_offset
   [[ "$confirmation" == 'RESTART IMESSAGE PROXY SERVER' ]] ||
     die 'server-restart confirmation did not match'
   require_macos
@@ -1179,6 +1234,7 @@ server_restart() {
   server_loaded || die "$SERVER_LABEL is not loaded"
   require_safe_launch_agent_target "$SERVER_PLIST_TARGET"
   install -m 600 "$SERVER_PLIST_STATE" "$SERVER_PLIST_TARGET"
+  log_offset="$(server_log_offset)"
   launchctl enable "gui/$(id -u)/$SERVER_LABEL"
   if ! launchctl bootout "gui/$(id -u)/$SERVER_LABEL"; then
     launchctl disable "gui/$(id -u)/$SERVER_LABEL" >/dev/null 2>&1 || true
@@ -1193,9 +1249,11 @@ server_restart() {
   if ! wait_for_socket; then
     rollback_start_or_die "$SERVER_LABEL"
     wait_for_socket_absent >/dev/null 2>&1 || true
+    report_server_start_failure
     die 'restarted native LaunchAgent was not ready and was disabled again'
   fi
   printf 'Restarted %s. Start the edge only after validating the new socket.\n' "$SERVER_LABEL"
+  report_degraded_start "$log_offset"
 }
 
 server_status() {
@@ -1465,6 +1523,15 @@ edge_logs() {
   tail -n 100 "$EDGE_LOG"
 }
 
+server_logs() {
+  require_macos
+  require_safe_runtime_root
+  require_command tail
+  require_server_log
+  printf '%s\n' '--- bounded native server log (last 100 lines) ---'
+  tail -n 100 "$SERVER_LOG"
+}
+
 doctor() {
   local command failed=0
   require_macos
@@ -1551,6 +1618,7 @@ main() {
       server_restart "$3"
       ;;
     server-status) [[ $# -eq 1 ]] || die 'server-status takes no arguments'; server_status ;;
+    server-logs) [[ $# -eq 1 ]] || die 'server-logs takes no arguments'; server_logs ;;
     edge-install)
       [[ $# -eq 3 && "$2" == --confirm ]] || die 'edge-install requires --confirm TEXT'
       edge_install "$3"
