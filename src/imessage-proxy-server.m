@@ -261,10 +261,9 @@ static BOOL ValidateParentDirectory(NSString *path, NSError **error) {
         if (lstat(current.fileSystemRepresentation, &metadata) != 0 || !S_ISDIR(metadata.st_mode) ||
             (finalComponent && (metadata.st_uid != getuid() || (metadata.st_mode & 077) != 0))) {
             if (error != NULL) {
-                NSString *message =
-                    [NSString stringWithFormat:@"%@ must be a real user-owned directory with no group or other access",
-                                               current];
-                *error = ServerError(IMPServerErrorInvalidConfiguration, message);
+                NSString *format = @"%@ must be a private user-owned directory";
+                *error = ServerError(IMPServerErrorInvalidConfiguration,
+                                     [NSString stringWithFormat:format, current]);
             }
             return NO;
         }
@@ -293,14 +292,11 @@ static BOOL ValidateParentDirectory(NSString *path, NSError **error) {
 // `imsg chats --limit 1`, both directly and again inside the LaunchAgent.
 static BOOL ValidateMessagesDatabase(NSString *path, NSError **error) {
     struct stat metadata;
-    if (![path hasPrefix:@"/"] || lstat(path.fileSystemRepresentation, &metadata) != 0 ||
-        !S_ISREG(metadata.st_mode) || metadata.st_uid != getuid()) {
+    BOOL present = [path hasPrefix:@"/"] && lstat(path.fileSystemRepresentation, &metadata) == 0;
+    if (!present || !S_ISREG(metadata.st_mode) || metadata.st_uid != getuid()) {
         if (error != NULL) {
-            NSString *message =
-                [NSString stringWithFormat:@"%@ must be an existing user-owned Messages database; "
-                                           @"sign in to Messages if it is missing",
-                                           path];
-            *error = ServerError(IMPServerErrorInvalidConfiguration, message);
+            NSString *format = @"%@ is not an available Messages database; sign in to Messages";
+            *error = ServerError(IMPServerErrorInvalidConfiguration, [NSString stringWithFormat:format, path]);
         }
         return NO;
     }
