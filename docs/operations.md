@@ -227,19 +227,29 @@ imessage-proxy bootstrap \
 
 The sequence is fixed: `doctor`, `prepare`, `build-host`, the interactive Full
 Disk Access checkpoint, database initialization/validation, read-only bootstrap
-eligibility preflight, `check-host`, a bounded Messages read smoke test,
-`server-install`, and finally first-administrator creation. Returned chat data
-is parsed against the public DTO and discarded. Neither read can send a message
-or trigger Automation.
+eligibility preflight, `check-host`, `server-install`, and finally
+first-administrator creation. No step in the sequence can send a message or
+trigger Automation.
+
+Bootstrap does not probe the Messages read path before installing. A probe run
+from the terminal establishes only what the terminal's Full Disk Access identity
+experiences, while the installed LaunchAgent is a separate identity, so neither
+its success nor its failure said anything reliable about the service. Bootstrap
+also runs immediately after `build-host` re-signs the binary, which can
+invalidate an existing grant, so a fresh and otherwise correct installation was
+among the most likely to be refused. Refusing to install also contradicted a
+native server that is deliberately built to start and report degradation instead
+of exiting.
 
 Socket readiness proves that the service started and accepts requests. It does
-not prove that Messages can be read: the bootstrap smoke test runs from the
-terminal, while the LaunchAgent is a separate Full Disk Access identity, so the
-two can disagree. The native server therefore treats an unreadable Messages path
-as a readiness property rather than a precondition. It logs the reason, prints a
-warning to `logs/server.log`, and serves anyway; `GET /api/status` answers
-`503 messages-unavailable` until the read path recovers. Check status after
-installation, and see
+not prove that Messages can be read. The native server therefore treats an
+unreadable Messages path as a readiness property rather than a precondition. It
+logs the reason, prints a warning to `logs/server.log`, and serves anyway. That
+readiness check is a bounded `imsg chats --limit 1` whose result is parsed
+against the public DTO and discarded; `GET /api/status` repeats it and answers
+`503 messages-unavailable` until the read path recovers. When the service starts
+without that access, `server-install` prints a `NOTICE` naming the exact binary
+to grant. Check status after installation, and see
 [Troubleshooting](troubleshooting.md#the-service-runs-but-status-reports-messages-unavailable)
 when it reports that state.
 

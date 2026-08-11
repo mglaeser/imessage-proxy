@@ -253,12 +253,14 @@ without leading or trailing spaces. Additional keys created through the API keep
 the full Unicode naming contract documented in [API reference](docs/api.md).
 
 The command pauses once so macOS can grant Full Disk Access to the exact binary
-it just built. It then runs a bounded, read-only `imsg chats --limit 1` smoke
-test. Returned chat data is discarded. That test runs from your terminal, whose
-Full Disk Access identity differs from the installed LaunchAgent's, so Messages
-availability is reported by `GET /api/status` rather than by refusing to start;
-`imessage-proxy server-logs` prints the running service's own log. All progress
-goes to standard error; successful standard output is exactly the one-time
+it just built. It does not probe the Messages read path before installing: any
+such check runs under your terminal's Full Disk Access identity, which differs
+from the installed LaunchAgent's. Messages availability is therefore reported by
+`GET /api/status` rather than by refusing to install, and a service that starts
+without that access still completes the install and issues the key while
+printing a `NOTICE` naming the binary to grant. `imessage-proxy server-logs`
+prints the running service's own log. All progress goes to standard error;
+successful standard output is exactly the one-time
 `imp_…` administrator key, ready to move directly into a password manager or
 secret store. No key is written to a file, argument, environment variable, or
 log. Accept the printed key only when the command exits with status zero; if the

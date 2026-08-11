@@ -101,11 +101,10 @@ Nothing here depends on the file's permissions. This project never opens the
 Messages database: it passes the path to the pinned dependency, which reads it
 under its own Full Disk Access grant. A `0644` file inside a `0777` directory is
 accepted, because no permission shape can make the read succeed or fail — only
-the dependency's own access can. Bootstrap proves that path for real by running
-a bounded `imsg chats --limit 1`. That smoke test runs from your terminal, so it
-proves the path for the terminal's permission identity; the installed
-LaunchAgent has its own. `GET /api/status` reports the running service's actual
-result.
+the dependency's own access can. Bootstrap does not probe the read path either,
+because a probe run from your terminal proves it only for the terminal's
+permission identity and the installed LaunchAgent has its own. `GET /api/status`
+reports the running service's actual result.
 
 So do not `chmod` anything under `~/Library/Messages` on this project's account.
 That directory is TCC-protected, and `sudo` does not help: TCC attributes a
@@ -224,17 +223,24 @@ Two macOS behaviors explain why a Mac can pass every interactive check and still
 land in this state.
 
 First, macOS attributes file access to the responsible process, not only to the
-binary performing the read. When `bootstrap` runs its Messages smoke test from
-your terminal, the responsible process is Terminal or iTerm, so the read can
-succeed on the strength of the terminal's own Full Disk Access. The identical
-binary started by launchd is its own responsible process and needs its own entry.
-That is why bootstrap can print a clean smoke test and the LaunchAgent can fail
-seconds later; the two are different permission identities, not a flaky check.
+binary performing the read. Anything you run from your terminal has Terminal or
+iTerm as its responsible process, so a read can succeed on the strength of the
+terminal's own Full Disk Access. The identical binary started by launchd is its
+own responsible process and needs its own entry. The two are different
+permission identities, so a check run interactively could agree or disagree with
+the service for reasons unrelated to the service. That is why `bootstrap` no
+longer probes the read path before installing, and why the running service
+reports it instead.
 
 Second, a Full Disk Access grant is keyed to the code signature. `build-host`
 re-signs the server binary, so re-running it can invalidate a grant that worked
 before. After any rebuild, re-check that the entry still refers to the current
 binary.
+
+An install that stopped with `ERROR: Messages read-path preflight failed` came
+from an older version, which refused to install whenever that interactive probe
+failed. Reinstall from `main` to get the current behavior, in which the service
+installs, issues the key, and reports the condition through `GET /api/status`.
 
 ## Full Disk Access fails
 

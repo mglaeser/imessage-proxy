@@ -996,10 +996,6 @@ check_bootstrap_eligibility() {
   run_server check-bootstrap-admin "$1" "$2"
 }
 
-check_messages_read_path() {
-  run_server check-messages
-}
-
 bootstrap_invoke_self() {
   "$SCRIPT_DIR/imessage-proxy" "$@"
 }
@@ -1081,7 +1077,6 @@ bootstrap() {
   initialize_database >&2
   check_bootstrap_eligibility "$admin_name" "$expires_days" >&2
   check_host >&2
-  check_messages_read_path >&2
   bootstrap_server_may_be_loaded=yes
   bootstrap_edge_may_be_loaded=no
   trap bootstrap_failure_rollback EXIT
