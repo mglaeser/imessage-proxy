@@ -327,7 +327,10 @@ print_manual_steps() {
   note '    Delete the entry for imessage-proxy-server. A stale entry points at'
   note '    a binary that no longer exists and confuses a later reinstall.'
   note '  System Settings > Privacy & Security > Automation'
-  note '    Delete the Messages entry for the same binary.'
+  note '    Only if you ever sent a message: delete the Messages entry for the'
+  note '    same binary. Automation is requested at the first intentional send,'
+  note '    never during installation, so an install that never sent anything'
+  note '    leaves no entry here.'
   note "  Your shell startup file, if it adds $install_prefix/bin to PATH."
   note ''
   note "Reinstall any time: $PROJECT_URL"

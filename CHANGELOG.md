@@ -3,6 +3,25 @@
 All notable changes are documented here. Version 1.0 establishes the contract
 and operational model described below.
 
+## Unreleased
+
+### Fixed
+
+- Both LaunchAgents are rendered with the argument vector they declare. Patching
+  the array by index relied on `plutil -replace ProgramArguments.N` replacing an
+  element; where it inserts instead, the native agent shipped as
+  `[<server binary>, "__SERVER_BIN__", "serve"]` and the server exited 64 on
+  every spawn. Rendering now rebuilds the array by appending, and every render
+  asserts the exact vector, so a bad vector fails `prepare` instead of becoming
+  a crash loop behind a blind readiness wait.
+- A failed start reports only what that start wrote to the server log. The log
+  survives reinstalls and is never truncated, so an unscoped tail could present
+  an earlier crash loop as the current cause; a start that wrote nothing now
+  says so.
+- The uninstaller no longer instructs removal of a Messages Automation entry
+  that does not exist. Automation is requested at the first intentional send,
+  never during installation.
+
 ## 1.0.0 - 2026-08-09
 
 ### Added

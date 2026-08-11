@@ -12,14 +12,26 @@ die() {
 # A start failure used to end here with no way to see why: the LaunchAgent sent
 # both streams to /dev/null. Print the tail of the server log so the reason
 # travels with the error instead of requiring a separate log-spelunking session.
+# Only the lines this start appended are shown. Nothing truncates the log and it
+# survives reinstalls, so an unscoped tail can present an earlier crash loop as
+# this start's evidence - the trap report_degraded_start already avoids. "This
+# start wrote nothing" is itself a finding: the process never reached its own
+# error reporting, which points at launchd or at the readiness checks rather
+# than at the server's configuration.
 report_server_start_failure() {
-  printf 'The native server did not open its socket. Last lines of %s:\n' "$SERVER_LOG" >&2
-  if [[ -f "$SERVER_LOG" && ! -L "$SERVER_LOG" && -s "$SERVER_LOG" ]]; then
-    tail -n 20 "$SERVER_LOG" >&2 || true
-  else
-    printf '  (the log is empty; the process may not have started at all)\n' >&2
+  local appended='' offset="${1:-0}"
+  if [[ -f "$SERVER_LOG" && ! -L "$SERVER_LOG" ]]; then
+    appended="$(tail -c "+$((offset + 1))" "$SERVER_LOG" 2>/dev/null | tail -n 20 || true)"
   fi
-  printf 'Full log: imessage-proxy server-logs\n' >&2
+  if [[ -n "$appended" ]]; then
+    printf 'The native server did not open its socket. What this start wrote to %s:\n' "$SERVER_LOG" >&2
+    printf '%s\n' "$appended" >&2
+  else
+    printf 'The native server did not open its socket and wrote nothing to %s\n' "$SERVER_LOG" >&2
+    printf 'during this start. It never reached its own error reporting: either launchd\n' >&2
+    printf 'could not run it, or it ran and the readiness checks rejected it.\n' >&2
+  fi
+  printf 'Full log, including earlier attempts: imessage-proxy server-logs\n' >&2
 }
 
 server_log_offset() {
@@ -533,11 +545,90 @@ stage_imsg_binary() {
   mv -f "$temporary" "$IMSG_BIN"
 }
 
+# "plutil -replace ProgramArguments.0 -string X" is not a replacement on every
+# macOS: it can INSERT at that index, leaving the template placeholder in place
+# and shifting the real arguments right. A rendered native agent then reads
+#   [<server binary>, "__SERVER_BIN__", "serve"]
+# which launchd executes happily and the server rejects, printing its usage and
+# exiting 64 before it loads any configuration. Build the array from nothing
+# instead, so no index semantics are involved: empty it once, then append each
+# argument in order.
+set_program_arguments() {
+  local argument destination="$1"
+  shift
+  plutil -replace ProgramArguments -json '[]' "$destination"
+  for argument; do
+    plutil -insert ProgramArguments -string "$argument" -append "$destination"
+  done
+}
+
+# Substitutes reviewed template tokens as literal text, without parsing the
+# property list. The argument vector launchd executes therefore arrives straight
+# from the reviewed template instead of being rebuilt element by element.
+#
+# Bash substitution is literal on both sides, so a value containing a path
+# separator, a backslash, or an ampersand cannot reshape the surrounding XML the
+# way a sed replacement can. Values that would break the document are refused
+# outright rather than silently producing a plist that lints but misbehaves.
+write_plist_from_template() {
+  local destination="$1" rendered source="$2" token value
+  shift 2
+  [[ -f "$source" && ! -L "$source" ]] ||
+    die "reviewed LaunchAgent template must be a regular non-symlink: $source"
+  rendered="$(< "$source")"
+  while (($# >= 2)); do
+    token="$1"
+    value="$2"
+    shift 2
+    [[ "$rendered" == *"$token"* ]] ||
+      die "reviewed LaunchAgent template no longer contains $token: $source"
+    case "$value" in
+      *'<'* | *'>'* | *'&'*)
+        die "a LaunchAgent value contains XML metacharacters and was refused: $token"
+        ;;
+    esac
+    rendered="${rendered//"$token"/"$value"}"
+  done
+  printf '%s\n' "$rendered" > "$destination"
+  chmod 600 "$destination"
+}
+
+require_no_unrendered_placeholders() {
+  local destination="$1"
+  if grep -Eq '__[A-Z][A-Z0-9_]*__' "$destination"; then
+    die "rendered LaunchAgent still contains an unsubstituted placeholder: $destination"
+  fi
+}
+
+# The rendered ProgramArguments array is the one artifact that decides what
+# launchd actually executes, and it was the one artifact nothing checked.
+# "plutil -lint" proves only that the result is a well-formed property list: a
+# vector that is truncated, padded, or still carrying a placeholder lints,
+# compares equal to a second identical render in require_current_*_agent, and
+# bootstraps. The service it starts then exits 64 on every spawn, KeepAlive
+# relaunches it every ThrottleInterval, and the operator waits out a blind
+# readiness timeout. Assert the exact vector here, where the failure is one
+# sentence instead of a crash loop.
+require_rendered_program_arguments() {
+  local actual destination="$1" expected index=0
+  shift
+  for expected; do
+    actual="$(plutil -extract "ProgramArguments.$index" raw -o - "$destination" 2>/dev/null)" ||
+      die "rendered LaunchAgent lost argument $index ($expected): $destination"
+    [[ "$actual" == "$expected" ]] ||
+      die "rendered LaunchAgent argument $index is '$actual', expected '$expected': $destination"
+    index=$((index + 1))
+  done
+  if plutil -extract "ProgramArguments.$index" raw -o - "$destination" >/dev/null 2>&1; then
+    die "rendered LaunchAgent has more than $index arguments: $destination"
+  fi
+}
+
 render_server_agent_to() {
   local destination="$1" public_origin
   public_origin="https://$IMESSAGE_PROXY_API_HOST"
   install -m 0600 "$SOURCE_DIR/config/io.github.mglaeser.imessage-proxy.plist.in" "$destination"
-  plutil -replace ProgramArguments.0 -string "$SERVER_BIN" "$destination"
+  set_program_arguments "$destination" "$SERVER_BIN" serve
   plutil -replace EnvironmentVariables.IMESSAGE_PROXY_ALLOWED_TARGETS_FILE -string "$TARGETS_FILE" "$destination"
   plutil -replace EnvironmentVariables.IMESSAGE_PROXY_DATABASE_PATH -string "$DATABASE_PATH" "$destination"
   plutil -replace EnvironmentVariables.IMESSAGE_PROXY_EXPECTED_IMSG_VERSION -string "$EXPECTED_IMSG_VERSION" "$destination"
@@ -549,6 +640,7 @@ render_server_agent_to() {
   plutil -replace StandardErrorPath -string "$SERVER_LOG" "$destination"
   plutil -replace StandardOutPath -string "$SERVER_LOG" "$destination"
   plutil -lint "$destination" >/dev/null
+  require_rendered_program_arguments "$destination" "$SERVER_BIN" serve
 }
 
 render_server_agent() {
@@ -562,8 +654,8 @@ render_server_agent() {
 render_edge_agent_to() {
   local destination="$1"
   install -m 0600 "$SOURCE_DIR/config/io.github.mglaeser.imessage-proxy.edge.plist.in" "$destination"
-  plutil -replace ProgramArguments.0 -string "$CADDY_BIN" "$destination"
-  plutil -replace ProgramArguments.3 -string "$CADDYFILE" "$destination"
+  set_program_arguments "$destination" \
+    "$CADDY_BIN" run --config "$CADDYFILE" --adapter caddyfile
   plutil -replace EnvironmentVariables.IMESSAGE_PROXY_ACME_EMAIL -string "$IMESSAGE_PROXY_ACME_EMAIL" "$destination"
   plutil -replace EnvironmentVariables.IMESSAGE_PROXY_EDGE_LOG_PATH -string "$EDGE_LOG" "$destination"
   plutil -replace EnvironmentVariables.IMESSAGE_PROXY_HTTP_PORT -string "${IMESSAGE_PROXY_HTTP_PORT:-8080}" "$destination"
@@ -576,6 +668,8 @@ render_edge_agent_to() {
   plutil -replace EnvironmentVariables.XDG_DATA_HOME -string "$CADDY_DATA" "$destination"
   plutil -replace WorkingDirectory -string "$CADDY_STATE" "$destination"
   plutil -lint "$destination" >/dev/null
+  require_rendered_program_arguments "$destination" \
+    "$CADDY_BIN" run --config "$CADDYFILE" --adapter caddyfile
 }
 
 render_edge_agent() {
@@ -1169,7 +1263,7 @@ server_install() {
   if ! wait_for_socket; then
     rollback_start_or_die "$SERVER_LABEL"
     wait_for_socket_absent >/dev/null 2>&1 || true
-    report_server_start_failure
+    report_server_start_failure "$log_offset"
     die 'native LaunchAgent did not become ready and was disabled again'
   fi
   printf 'Loaded %s; the native server is ready on its private Unix socket.\n' "$SERVER_LABEL"
@@ -1207,7 +1301,7 @@ server_start() {
   if ! wait_for_socket; then
     rollback_start_or_die "$SERVER_LABEL"
     wait_for_socket_absent >/dev/null 2>&1 || true
-    report_server_start_failure
+    report_server_start_failure "$log_offset"
     die 'native LaunchAgent did not become ready and was disabled again'
   fi
   printf 'Loaded %s; the native server is ready on its private Unix socket.\n' "$SERVER_LABEL"
@@ -1268,7 +1362,7 @@ server_restart() {
   if ! wait_for_socket; then
     rollback_start_or_die "$SERVER_LABEL"
     wait_for_socket_absent >/dev/null 2>&1 || true
-    report_server_start_failure
+    report_server_start_failure "$log_offset"
     die 'restarted native LaunchAgent was not ready and was disabled again'
   fi
   printf 'Restarted %s. Start the edge only after validating the new socket.\n' "$SERVER_LABEL"

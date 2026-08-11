@@ -138,10 +138,35 @@ output and error to a private `0600` file in state, and the CLI prints the last
 imessage-proxy server-logs
 ```
 
-`server-install`, `server-start`, and `server-restart` also tail the last 20
-lines of that file automatically when the socket never appears, so the reason
-usually travels with the failure message. An empty log means the process did not
-start at all: inspect the generated plist and the exact binary path.
+`server-install`, `server-start`, and `server-restart` also print what that
+start wrote when the socket never appears, so the reason usually travels with
+the failure message. They print only the bytes appended by that start: nothing
+truncates the log and it survives reinstalls, so `server-logs` may show lines
+from earlier attempts that a failure report deliberately excludes.
+
+Read the printed lines before anything else, because they separate three very
+different faults:
+
+- `Usage: imessage-proxy-server <serve|...>` means the LaunchAgent invoked the
+  binary with the wrong arguments. The process exits 64 before it loads any
+  configuration, so this is a plist defect, not a permissions or Messages
+  problem. Confirm with the command below; the array must hold exactly the
+  server binary followed by `serve`.
+- `ERROR: ...` means configuration failed to load. The message names the
+  setting; `check-host` reproduces it without launchd.
+- `WARNING: the Messages read path is unavailable` means the server started and
+  is serving in a degraded state. That is a Full Disk Access problem, not a
+  start failure.
+
+```bash
+/usr/bin/plutil -extract ProgramArguments json -o - \
+  "$HOME/Library/LaunchAgents/io.github.mglaeser.imessage-proxy.plist"
+```
+
+"wrote nothing to ... during this start" means the process never reached its own
+error reporting. Either launchd could not run it, or it ran and the readiness
+checks rejected it: inspect the generated plist, the exact binary path, and
+`launchctl print "gui/$(id -u)/io.github.mglaeser.imessage-proxy"`.
 
 For older events, or for structured operational metadata that never reaches
 standard error, inspect a bounded window from the macOS unified-log category:
