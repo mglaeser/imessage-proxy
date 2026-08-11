@@ -292,7 +292,7 @@ if run_native check-config > "$temporary/imsg-parent.out" 2> "$temporary/imsg-pa
   exit 1
 fi
 chmod 0700 "$temporary"
-grep -Fqi 'must be a real user-owned directory' "$temporary/imsg-parent.err"
+grep -Fqi 'must be a private user-owned directory' "$temporary/imsg-parent.err"
 # The rejection must name the exact offending directory, not an anonymous class
 # of paths. An unnamed path cost a real operator a full build to diagnose.
 grep -Fq "$temporary" "$temporary/imsg-parent.err"
