@@ -440,7 +440,8 @@ require_api_settings() {
   # nobody has to invent public identity for a service reachable only through a
   # Unix socket. They are in RFC 2606's .invalid namespace, so they can never
   # resolve and can never be issued a certificate: turning the gate on rejects
-  # them, and every edge action reaches this through require_public_edge_inputs.
+  # them, and every edge action that installs or starts a listener reaches this
+  # through require_public_edge_inputs, which also requires the gate literally.
   if [[ "${IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS:-no}" == yes ]]; then
     [[ "$api_host" != "$PLACEHOLDER_API_HOST" && "$acme_email" != "$PLACEHOLDER_ACME_EMAIL" ]] ||
       die "public HTTPS needs a DNS name you control and an operator address that can receive mail.
