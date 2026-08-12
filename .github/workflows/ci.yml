@@ -68,6 +68,11 @@ jobs:
         run: make test-installer
       - name: Test the uninstaller
         run: make test-uninstaller
+      # Rendering is pure shell, and the defect it guards against is a
+      # difference between bash releases. Running it here means a regression
+      # fails on Linux rather than on an operator's Mac.
+      - name: Test LaunchAgent rendering across bash compatibility levels
+        run: make test-rendering
       - name: Validate Caddy configuration with a pinned disposable image
         shell: bash
         run: |

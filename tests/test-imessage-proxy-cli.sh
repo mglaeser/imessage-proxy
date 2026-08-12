@@ -436,23 +436,43 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
   expect_failure "rendered LaunchAgent argument 1 is '__SERVER_BIN__'" \
     require_rendered_program_arguments "$argument_fixture" "$SERVER_BIN" serve
 
-  # Rendering is literal text substitution, so the two ways it can go wrong are
-  # a value that reshapes the document and a placeholder nobody supplied. Both
-  # must fail loudly at render time rather than produce a plist that lints.
+  # Rendering is literal text substitution. tests/test-launchagent-rendering.sh
+  # covers the substitution itself on every bash release; what belongs here is
+  # what only a real property-list parser can answer: that an escaped value
+  # survives a round trip through plutil as the exact bytes that went in, and
+  # that markup in a value stays one argument instead of becoming several.
   template_fixture="$temporary/template-render.plist"
-  expect_failure 'contains XML metacharacters and was refused' \
-    write_plist_from_template "$template_fixture" \
-    "$REPOSITORY/config/io.github.mglaeser.imessage-proxy.plist.in" \
-    __SERVER_BIN__ '/tmp/server</string><string>--rogue'
+  server_template="$REPOSITORY/config/io.github.mglaeser.imessage-proxy.plist.in"
+  injected_server_bin='/tmp/server</string><string>--rogue'
+  write_plist_from_template "$template_fixture" "$server_template" \
+    __SERVER_BIN__ "$injected_server_bin"
+  plutil -lint "$template_fixture" > /dev/null ||
+    fail 'an escaped injection attempt did not produce a valid plist'
+  require_rendered_program_arguments "$template_fixture" "$injected_server_bin" serve
+
+  # An ampersand is legal in a macOS path and the CLI's own email validator
+  # accepts one, so a value carrying it must render and decode unchanged rather
+  # than abort the install.
+  ampersand_server_bin='/Users/fixture/R&D/imessage-proxy/state/bin/imessage-proxy-server'
+  write_plist_from_template "$template_fixture" "$server_template" \
+    __SERVER_BIN__ "$ampersand_server_bin"
+  assert_contains 'R&amp;D' "$template_fixture"
+  require_rendered_program_arguments "$template_fixture" "$ampersand_server_bin" serve
+
   expect_failure 'no longer contains __NO_SUCH_TOKEN__' \
-    write_plist_from_template "$template_fixture" \
-    "$REPOSITORY/config/io.github.mglaeser.imessage-proxy.plist.in" \
+    write_plist_from_template "$template_fixture" "$server_template" \
     __NO_SUCH_TOKEN__ value
-  write_plist_from_template "$template_fixture" \
-    "$REPOSITORY/config/io.github.mglaeser.imessage-proxy.plist.in" \
+  # A partially rendered document lints cleanly, so only the placeholder sweep
+  # can catch a value nobody supplied.
+  install -m 0644 "$server_template" "$template_fixture"
+  write_plist_from_template "$template_fixture" "$server_template" \
     __SERVER_BIN__ "$SERVER_BIN"
+  plutil -lint "$template_fixture" > /dev/null ||
+    fail 'a partially rendered LaunchAgent is not a valid plist'
   expect_failure 'still contains an unsubstituted placeholder' \
     require_no_unrendered_placeholders "$template_fixture"
+  # Rendered over a pre-existing world-readable file, so the mode is asserted
+  # against something the renderer had to change rather than against the umask.
   [[ "$(stat -f '%Lp' "$template_fixture")" == 600 ]] ||
     fail 'a rendered LaunchAgent is not private'
 

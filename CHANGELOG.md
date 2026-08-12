@@ -11,9 +11,21 @@ and operational model described below.
   the array by index relied on `plutil -replace ProgramArguments.N` replacing an
   element; where it inserts instead, the native agent shipped as
   `[<server binary>, "__SERVER_BIN__", "serve"]` and the server exited 64 on
-  every spawn. Rendering now rebuilds the array by appending, and every render
-  asserts the exact vector, so a bad vector fails `prepare` instead of becoming
-  a crash loop behind a blind readiness wait.
+  every spawn behind a blind readiness wait. Rendering is now literal
+  substitution of named placeholders into the reviewed template, so the vector
+  launchd executes arrives exactly as reviewed and no index is involved. Values
+  are XML-escaped rather than refused, a value containing a control character is
+  refused, a placeholder nobody supplied is caught before the agent is staged,
+  and every render asserts the resulting vector element by element, so a bad
+  vector fails `prepare` instead of becoming a crash loop.
+- Rendering no longer depends on which `bash` is first in `PATH`. The
+  substitution it used would have emitted every value wrapped in literal quote
+  characters under the `bash` 3.2 that macOS ships as `/bin/bash`, because quote
+  removal on a replacement operand arrived in 4.3, and a later spelling of the
+  same expression would have corrupted escaped ampersands under the
+  `patsub_replacement` default of 5.2. Substitution now uses no replacement
+  operand at all, and `make test-rendering` exercises it under every affected
+  compatibility level on Linux as well as macOS.
 - A failed start reports only what that start wrote to the server log. The log
   survives reinstalls and is never truncated, so an unscoped tail could present
   an earlier crash loop as the current cause; a start that wrote nothing now

@@ -558,13 +558,45 @@ stage_imsg_binary() {
 # makes a missing value a leftover token this refuses rather than a silently
 # wrong document.
 #
-# Bash substitution is literal on both sides, so a value containing a path
-# separator, a backslash, or an ampersand cannot reshape the surrounding XML the
-# way a sed replacement can. Values that would break the document are refused
-# outright rather than silently producing a plist that lints but misbehaves.
+# Substitution deliberately avoids "\${haystack//pattern/replacement}". No single
+# spelling of that operator is correct on every bash this product runs under:
+# quote removal on the replacement operand arrived in 4.3, so on the 3.2.57 that
+# macOS ships as /bin/bash a quoted replacement leaves literal quote characters
+# around every value; and 5.2 enables patsub_replacement by default, so an
+# unquoted "&" there expands to the matched text and would corrupt the entities
+# added below. Prefix and suffix removal take no replacement operand at all and
+# behave identically on 3.2 through 5.2.
+substitute_all() {
+  local haystack="$1" needle="$2" out='' replacement="$3"
+  while [[ "$haystack" == *"$needle"* ]]; do
+    out+="${haystack%%"$needle"*}$replacement"
+    haystack="${haystack#*"$needle"}"
+  done
+  printf '%s' "$out$haystack"
+}
+
+# Values arrive as XML text, so the three characters that would otherwise reshape
+# the document are escaped rather than refused. Refusing them turned inputs the
+# CLI itself validates as good into a hard failure three phases into an install:
+# email_valid accepts an operator address containing "&", and
+# require_safe_runtime_root accepts a runtime root under "~/R&D". The ampersand
+# has to go first or it would re-escape the entities introduced after it.
+xml_escaped() {
+  local text="$1"
+  text="$(substitute_all "$text" '&' '&amp;')"
+  text="$(substitute_all "$text" '<' '&lt;')"
+  text="$(substitute_all "$text" '>' '&gt;')"
+  printf '%s' "$text"
+}
+
+# A control character cannot be represented in XML 1.0 and would survive
+# unescaped into the document, so it is refused outright. Every other value is
+# escaped and rendered.
 write_plist_from_template() {
   local destination="$1" rendered source="$2" token value
   shift 2
+  (($# % 2 == 0)) ||
+    die "internal error: a LaunchAgent placeholder was passed with no value: $source"
   [[ -f "$source" && ! -L "$source" ]] ||
     die "reviewed LaunchAgent template must be a regular non-symlink: $source"
   rendered="$(< "$source")"
@@ -575,11 +607,11 @@ write_plist_from_template() {
     [[ "$rendered" == *"$token"* ]] ||
       die "reviewed LaunchAgent template no longer contains $token: $source"
     case "$value" in
-      *'<'* | *'>'* | *'&'*)
-        die "a LaunchAgent value contains XML metacharacters and was refused: $token"
+      *[[:cntrl:]]*)
+        die "a LaunchAgent value contains a control character and was refused: $token"
         ;;
     esac
-    rendered="${rendered//"$token"/"$value"}"
+    rendered="$(substitute_all "$rendered" "$token" "$(xml_escaped "$value")")"
   done
   printf '%s\n' "$rendered" > "$destination"
   chmod 600 "$destination"

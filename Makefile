@@ -59,7 +59,7 @@ SDKFLAGS := $(if $(MACOS_SDK_PATH),-isysroot "$(MACOS_SDK_PATH)",)
 FRAMEWORKS := -framework Foundation -framework Security
 LIBRARIES := -lsqlite3
 
-.PHONY: all analyze build check clean debug help install lint test test-installer test-uninstaller test-ui uninstall version
+.PHONY: all analyze build check clean debug help install lint test test-installer test-rendering test-uninstaller test-ui uninstall version
 
 all: build
 
@@ -86,13 +86,16 @@ analyze: ## Run Clang's static analyzer.
 			-Xanalyzer -analyzer-output=text -Xanalyzer -analyzer-werror "$$source"; \
 	done
 
-test: test-ui test-installer test-uninstaller ## Run UI, script, native-server, and lifecycle tests (macOS only).
+test: test-ui test-installer test-uninstaller test-rendering ## Run UI, script, native-server, and lifecycle tests (macOS only).
 	@$(MAKE) --no-print-directory _require-macos
 	bash tests/test-imessage-proxy-server.sh
 	bash tests/test-imessage-proxy-cli.sh
 
 test-installer: ## Run portable one-command installer behavior tests.
 	bash tests/test-install-script.sh
+
+test-rendering: ## Run portable LaunchAgent rendering tests across bash compatibility levels.
+	bash tests/test-launchagent-rendering.sh
 
 test-uninstaller: ## Run portable uninstaller behavior tests.
 	bash tests/test-uninstall-script.sh
