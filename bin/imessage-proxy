@@ -113,6 +113,10 @@ readonly EXPECTED_IMSG_VERSION='0.13.4'
 readonly EXPECTED_CADDY_VERSION='2.11.4'
 readonly SERVER_READ_TIMEOUT_SECONDS=30
 readonly SERVER_START_TIMEOUT_SECONDS=50
+# RFC 2606 reserves .invalid, so neither can resolve or be issued a certificate.
+# Accepted only while public HTTPS is disabled; see require_api_settings.
+readonly PLACEHOLDER_API_HOST='imessage-proxy.invalid'
+readonly PLACEHOLDER_ACME_EMAIL='operator@imessage-proxy.invalid'
 
 require_safe_runtime_root() {
   local ancestor basename
@@ -428,10 +432,29 @@ require_api_settings() {
   [[ -n "$api_host" && -n "$acme_email" ]] ||
     die "the reviewed service configuration was not found: $(service_config_path)
   run the installer, or point IMESSAGE_PROXY_CONFIG at the file you reviewed"
-  hostname_valid "$api_host" ||
-    die "IMESSAGE_PROXY_API_HOST must be an explicit lowercase public DNS hostname, not: $api_host"
-  email_valid "$acme_email" ||
-    die "IMESSAGE_PROXY_ACME_EMAIL must be a valid operator email address on a public domain, not: $acme_email"
+  # A private install publishes nothing and binds no network port, so it has no
+  # use for a DNS name the operator does not own or an address a certificate
+  # authority could contact. Both values exist only for public HTTPS: one is the
+  # ACME identity, the other the browser origin the edge answers for. While the
+  # exposure gate is closed the reserved placeholders below are accepted, so
+  # nobody has to invent public identity for a service reachable only through a
+  # Unix socket. They are in RFC 2606's .invalid namespace, so they can never
+  # resolve and can never be issued a certificate: turning the gate on rejects
+  # them, and every edge action reaches this through require_public_edge_inputs.
+  if [[ "${IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS:-no}" == yes ]]; then
+    [[ "$api_host" != "$PLACEHOLDER_API_HOST" && "$acme_email" != "$PLACEHOLDER_ACME_EMAIL" ]] ||
+      die "public HTTPS needs a DNS name you control and an operator address that can receive mail.
+  Replace the placeholders in $(service_config_path) before enabling it."
+    hostname_valid "$api_host" ||
+      die "IMESSAGE_PROXY_API_HOST must be an explicit lowercase public DNS hostname, not: $api_host"
+    email_valid "$acme_email" ||
+      die "IMESSAGE_PROXY_ACME_EMAIL must be a valid operator email address on a public domain, not: $acme_email"
+  else
+    [[ "$api_host" == "$PLACEHOLDER_API_HOST" ]] || hostname_valid "$api_host" ||
+      die "IMESSAGE_PROXY_API_HOST must be an explicit lowercase public DNS hostname, not: $api_host"
+    [[ "$acme_email" == "$PLACEHOLDER_ACME_EMAIL" ]] || email_valid "$acme_email" ||
+      die "IMESSAGE_PROXY_ACME_EMAIL must be a valid operator email address on a public domain, not: $acme_email"
+  fi
   unprivileged_port_valid "$http_port" ||
     die 'IMESSAGE_PROXY_HTTP_PORT must be canonical base-10 in the range 1024-65535'
   unprivileged_port_valid "$https_port" ||

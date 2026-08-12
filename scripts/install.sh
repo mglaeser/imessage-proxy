@@ -12,6 +12,12 @@
 # operations gate described in docs/operations.md.
 
 set -Eeuo pipefail
+# Captured before the hardened PATH below replaces it. Deciding whether the
+# install prefix is already reachable has to ask what the operator's shell has,
+# not what this script set for its own subprocesses; against the hardened value
+# the answer is always "no" for the default prefix, which would append an export
+# to a startup file that already had one.
+readonly OPERATOR_PATH="${PATH:-}"
 export PATH='/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin'
 export LC_ALL=C
 umask 077
@@ -27,6 +33,12 @@ readonly SOURCE_ARCHIVE_BASE_URL="https://codeload.github.com/${PROJECT_REPOSITO
 # and are opt-in through --tag.
 readonly SOURCE_BRANCH='main'
 readonly SERVER_LABEL='io.github.mglaeser.imessage-proxy'
+# RFC 2606 reserves .invalid, so neither can resolve or be issued a certificate.
+# The product CLI accepts them only while public HTTPS is disabled, so an install
+# that declines to name itself cannot silently become a published one. Keep these
+# identical to PLACEHOLDER_API_HOST and PLACEHOLDER_ACME_EMAIL in the CLI.
+readonly PLACEHOLDER_API_HOST='imessage-proxy.invalid'
+readonly PLACEHOLDER_ACME_EMAIL='operator@imessage-proxy.invalid'
 readonly EXPECTED_IMSG_VERSION='0.13.4'
 readonly IMSG_BASE_URL='https://github.com/openclaw/imsg/releases/download'
 readonly IMSG_ARCHIVE='imsg-macos.zip'
@@ -54,6 +66,9 @@ http_port='8080'
 https_port='8443'
 release_tag=''
 run_tests='auto'
+verbose='no'
+path_result=''
+path_profile=''
 service_email=''
 service_host=''
 source_directory=''
@@ -81,6 +96,34 @@ step() {
   printf '\n==> %s\n' "$*" >&2
 }
 
+# Compiler command lines and install manifests are the loudest thing an operator
+# sees and the least useful: they scroll the two facts that matter, the Full Disk
+# Access checkpoint and the administrator key, off the screen. Keep them, show a
+# single line instead, and print the whole log if the command fails or --verbose
+# asked for it. The log is inside the temporary root, so it is removed with it.
+run_quietly() {
+  local description="$1" log status=0
+  shift
+  if [[ "$verbose" == yes ]]; then
+    note "  $description"
+    "$@" >&2 || return 1
+    return 0
+  fi
+  log="$(mktemp "${temporary_root:-${TMPDIR:-/tmp}}/install-step.XXXXXX")"
+  printf '  %s ... ' "$description" >&2
+  "$@" > "$log" 2>&1 || status=$?
+  if ((status != 0)); then
+    printf 'failed\n' >&2
+    note ''
+    note "$description failed. Full output:"
+    cat "$log" >&2 || true
+    rm -f -- "$log"
+    return "$status"
+  fi
+  printf 'done\n' >&2
+  rm -f -- "$log"
+}
+
 usage() {
   cat >&2 <<'USAGE'
 Usage: install.sh [options]
@@ -105,6 +148,7 @@ Options:
   --attest               Additionally verify GitHub build provenance with gh
   --prefix DIR           Installation prefix (default: $HOME/.local)
   --tests, --no-tests    Force running or skipping the product test suite
+  --verbose              Show the full output of each build and install step
   --self-test            Validate this installer's own logic and exit
   -h, --help             Show this help and exit
 
@@ -256,6 +300,10 @@ parse_arguments() {
         ;;
       --no-tests)
         run_tests='no'
+        shift
+        ;;
+      --verbose)
+        verbose='yes'
         shift
         ;;
       --self-test)
@@ -550,19 +598,22 @@ build_and_install_product() {
   local cli source_tree="$1" source_is_temporary="$2" version
   version="$(< "$source_tree/VERSION")"
   step "Building iMessage Proxy $version"
-  make -C "$source_tree" build >&2 || die 'the native build failed'
+  run_quietly 'Compiling the native server' make -C "$source_tree" build ||
+    die 'the native build failed'
 
   case "$run_tests" in
     yes)
       tests_are_possible ||
         die 'the product test suite needs Node.js >=22.12.0 <23 on PATH'
       step 'Running the product test suite'
-      make -C "$source_tree" test >&2 || die 'the product test suite failed'
+      run_quietly 'Running the reviewed test suite' make -C "$source_tree" test ||
+        die 'the product test suite failed'
       ;;
     auto)
       if tests_are_possible; then
         step 'Running the product test suite'
-        make -C "$source_tree" test >&2 || die 'the product test suite failed'
+        run_quietly 'Running the reviewed test suite' make -C "$source_tree" test ||
+        die 'the product test suite failed'
       else
         note 'Skipping the product test suite: Node.js >=22.12.0 <23 was not found.'
         note 'Run "make test" from a source checkout to execute it later.'
@@ -572,7 +623,8 @@ build_and_install_product() {
   esac
 
   step "Installing the lifecycle CLI into $install_prefix"
-  make -C "$source_tree" install PREFIX="$install_prefix" >&2 ||
+  run_quietly 'Installing the CLI and reviewed assets' \
+    make -C "$source_tree" install PREFIX="$install_prefix" ||
     die 'the product installation failed'
   cli="$install_prefix/bin/imessage-proxy"
   [[ -x "$cli" && ! -L "$cli" ]] || die "the installed CLI is invalid: $cli"
@@ -748,26 +800,47 @@ resolve_real_path() {
   fi
 }
 
+# This install publishes nothing and binds no network port, so neither answer is
+# used by anything it sets up: the hostname becomes the browser origin the public
+# edge would answer for, and the address is the ACME contact. Asking for both up
+# front made every operator invent public identity for a private service, and
+# offered no way to decline. Enter accepts a reserved .invalid placeholder, which
+# can never resolve and can never be issued a certificate, so enabling public
+# HTTPS later refuses to proceed until both are replaced with real values.
 collect_service_identity() {
-  while [[ -z "$service_host" ]] || ! hostname_valid "$service_host"; do
-    if [[ -n "$service_host" ]]; then
-      note 'That is not an explicit lowercase public DNS hostname.'
-    else
-      note ''
-      note 'Name the service. Use the DNS name you would eventually publish, even'
-      note 'though this installation stays private and binds no network port.'
+  note ''
+  note 'This installation stays private: it binds no network port and publishes'
+  note 'nothing. A DNS name and an operator address are needed only if you later'
+  note 'enable public HTTPS. Press Enter to skip both and decide later.'
+  note ''
+  while [[ -z "$service_host" ]]; do
+    service_host="$(prompt_for_value 'Service hostname [Enter to skip]: ')"
+    if [[ -z "$service_host" ]]; then
+      service_host="$PLACEHOLDER_API_HOST"
+      break
     fi
-    service_host="$(prompt_for_value 'Service hostname (for example messages.yourdomain.com): ')"
+    hostname_valid "$service_host" && break
+    note 'That is not an explicit lowercase public DNS hostname. Press Enter to skip it.'
+    service_host=''
   done
-  while [[ -z "$service_email" ]] || ! email_valid "$service_email"; do
-    if [[ -n "$service_email" ]]; then
-      note 'That is not a valid operator address on a public domain.'
-    else
-      note ''
-      note 'Certificates are requested only if you later enable public HTTPS.'
+  if [[ "$service_host" == "$PLACEHOLDER_API_HOST" ]]; then
+    service_email="$PLACEHOLDER_ACME_EMAIL"
+    return 0
+  fi
+  while [[ -z "$service_email" ]]; do
+    service_email="$(prompt_for_value 'Operator email for certificates [Enter to skip]: ')"
+    if [[ -z "$service_email" ]]; then
+      service_email="$PLACEHOLDER_ACME_EMAIL"
+      break
     fi
-    service_email="$(prompt_for_value 'Operator email: ')"
+    email_valid "$service_email" && break
+    note 'That is not a valid operator address on a public domain. Press Enter to skip it.'
+    service_email=''
   done
+}
+
+identity_is_placeholder() {
+  [[ "$service_host" == "$PLACEHOLDER_API_HOST" || "$service_email" == "$PLACEHOLDER_ACME_EMAIL" ]]
 }
 
 write_service_config() {
@@ -814,46 +887,145 @@ write_service_config() {
   printf '%s\n' "$config_path"
 }
 
+banner() {
+  local version="$1"
+  note ''
+  note '      .-----------------------------------------.'
+  note '      |                                         |'
+  note '      |    i M e s s a g e   P r o x y          |'
+  printf '      |    %-37s|\n' "version $version" >&2
+  note '      |                                         |'
+  note "      '-----------------------.  .--------------'"
+  note '                               \/'
+  note ''
+  note '   Installed and running. Private by default: no network'
+  note '   port is open, and nothing left this Mac.'
+}
+
+section() {
+  note ''
+  note "  $*"
+  note '  ---------------------------------------------------------------'
+}
+
+# The key is written to stdout so it can be captured by a pipeline, and every
+# other line goes to stderr. On a terminal both land in the same scrollback, so
+# printing it twice would be the only way to also frame it - instead it is shown
+# once, inside the summary, and emitted on stdout only when stdout is redirected.
 print_next_steps() {
-  local config_path="$1"
+  local config_path="$1" runtime socket version="$2"
+  runtime="$HOME/Library/Application Support/iMessage Proxy"
+  socket="$runtime/run/server.sock"
+
+  banner "$version"
+
+  section 'ADMINISTRATOR KEY'
+  note '  The line printed just above this summary, beginning "imp_", is your'
+  note '  administrator key. It is shown once and cannot be recovered.'
+  note '  Store it in a password manager before you close this window.'
+
+  section 'WHERE THINGS ARE'
+  note "  CLI            $install_prefix/bin/imessage-proxy"
+  note "  imsg           $install_prefix/bin/imsg"
+  note "  Configuration  $config_path"
+  note "  Allowlist      $runtime/private/allowed-targets.txt"
+  note '  Logs           imessage-proxy server-logs'
+
+  section 'HOW TO REACH IT'
+  note '  The service answers on a private Unix socket. No network port is'
+  note '  open, so nothing can reach it from another machine.'
   note ''
-  note 'iMessage Proxy is running on its private Unix socket.'
-  note "  Configuration: $config_path"
-  note "  Allowlist:     $HOME/Library/Application Support/iMessage Proxy/private/allowed-targets.txt"
-  note "  CLI:           $install_prefix/bin/imessage-proxy"
-  note "  imsg:          $install_prefix/bin/imsg"
+  note "      curl --unix-socket \"$socket\" \\"
+  note "        --header \"Authorization: Bearer YOUR_KEY\" \\"
+  note '        http://localhost/api/status'
   note ''
-  note 'The administrator key above is shown once. Store it in a password manager.'
-  print_path_hint
+  note '  A browser console is served only by the public edge, which stays'
+  note "  disabled. To publish the service: $PROJECT_URL/blob/main/docs/operations.md"
+
+  section 'NEXT'
+  note '  1. Allow one exact recipient by adding a line to:'
+  note "       $runtime/private/allowed-targets.txt"
+  note '  2. Confirm the service is healthy:'
+  note '       imessage-proxy server-status'
+  note '  3. Send a test message to that recipient through the API.'
+
+  section 'UNINSTALL'
+  note "  curl -fsSL $PROJECT_URL/raw/main/scripts/uninstall.sh | bash"
+  note '  Runtime state, keys and logs are preserved unless you pass --purge.'
+
+  print_path_result
   note ''
-  note 'Next: add one exact recipient to the allowlist, then send a test message.'
-  note "Public HTTPS stays disabled. To publish the service, follow $PROJECT_URL/blob/main/docs/operations.md"
 }
 
 # The install prefix is frequently absent from an interactive shell's PATH, which
 # otherwise leaves the operator with `command not found` right after a success.
-print_path_hint() {
-  local profile
-  case ":$PATH:" in
+# Adding the line is the whole remedy, so the installer does it rather than
+# printing homework, and says exactly what it changed.
+ensure_path_entry() {
+  local line profile
+  path_result=''
+  case ":$OPERATOR_PATH:" in
     *":$install_prefix/bin:"*)
-      note "Both commands are already on your PATH."
-      return
+      path_result='already'
+      return 0
       ;;
   esac
   case "${SHELL##*/}" in
     zsh) profile="$HOME/.zshrc" ;;
     bash) profile="$HOME/.bash_profile" ;;
-    *) profile='your shell startup file' ;;
+    *)
+      path_result='unknown-shell'
+      return 0
+      ;;
   esac
-  note ''
-  note "$install_prefix/bin is not on your PATH yet, so 'imessage-proxy' will not"
-  note 'resolve by name in this shell. Add it once:'
-  note ''
-  note "  echo 'export PATH=\"$install_prefix/bin:\$PATH\"' >> $profile"
-  note "  export PATH=\"$install_prefix/bin:\$PATH\""
-  note ''
-  note 'Until then, call the CLI by its full path:'
-  note "  $install_prefix/bin/imessage-proxy server-status"
+  line="export PATH=\"$install_prefix/bin:\$PATH\""
+  if [[ -e "$profile" || -L "$profile" ]]; then
+    [[ -f "$profile" && ! -L "$profile" ]] || {
+      path_result='unsafe-profile'
+      path_profile="$profile"
+      return 0
+    }
+    if grep -Fqx -- "$line" "$profile" 2>/dev/null; then
+      path_result='pending'
+      path_profile="$profile"
+      return 0
+    fi
+  fi
+  {
+    printf '\n%s\n' '# Added by the iMessage Proxy installer.'
+    printf '%s\n' "$line"
+  } >> "$profile" || {
+    path_result='failed'
+    path_profile="$profile"
+    return 0
+  }
+  path_result='added'
+  path_profile="$profile"
+}
+
+print_path_result() {
+  section 'YOUR PATH'
+  case "$path_result" in
+    already)
+      note "  $install_prefix/bin is already on your PATH. Run: imessage-proxy server-status"
+      ;;
+    added)
+      note "  Added $install_prefix/bin to $path_profile."
+      note '  For this shell, run:'
+      note "       export PATH=\"$install_prefix/bin:\$PATH\""
+      ;;
+    pending)
+      note "  $path_profile already adds $install_prefix/bin, but this shell predates it."
+      note '  For this shell, run:'
+      note "       export PATH=\"$install_prefix/bin:\$PATH\""
+      ;;
+    *)
+      note "  $install_prefix/bin is not on your PATH, and the installer could not"
+      note '  add it safely. Add this line to your shell startup file:'
+      note "       export PATH=\"$install_prefix/bin:\$PATH\""
+      ;;
+  esac
+  note "  Until then use the full path: $install_prefix/bin/imessage-proxy"
 }
 
 report_existing_installation() {
@@ -863,7 +1035,8 @@ report_existing_installation() {
   note ''
   note 'Check it, or create more keys from the management console:'
   note "  $install_prefix/bin/imessage-proxy server-status"
-  print_path_hint
+  ensure_path_entry
+  print_path_result
   note ''
   note 'To adopt a rebuilt server binary, stop the edge and server, then run'
   note 'prepare, build-host, and server-install as described in the operations guide.'
@@ -987,11 +1160,16 @@ main() {
 
   step 'Running the guarded product bootstrap'
   note 'The bootstrap pauses once so macOS can grant Full Disk Access.'
+  # The key is written by bootstrap to stdout and is never captured, stored, or
+  # echoed here: it must stay on stdout only, so a pipeline can take it and this
+  # script can never leak it into a log or a trace. It is the last thing bootstrap
+  # emits, so the summary below opens by naming the line directly above it.
   "$cli" bootstrap \
     --config "$config_path" \
     --admin-name "$admin_name" \
     --expires-in-days "$expires_days"
-  print_next_steps "$config_path"
+  ensure_path_entry
+  print_next_steps "$config_path" "$("$cli" version)"
 }
 
 if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
