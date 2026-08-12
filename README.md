@@ -33,9 +33,11 @@ and Caddy dependencies, writes one private configuration file, starts the
 service, and prints your first API key. Every executable it downloads is
 verified against a digest recorded in the script.
 
-It asks only for the two things it cannot know: a hostname and an operator
-email. macOS then prompts once for Full Disk Access, which is the single manual
-step.
+It asks for the two things it cannot know, a hostname and an operator email, and
+both are optional: press Enter to skip them, because a private installation
+publishes nothing and uses neither. macOS then prompts once for Full Disk Access,
+which is the single manual step. On success the installer adds its own `bin`
+directory to your shell startup file, naming the file it changed.
 
 Add one recipient to the allowlist it prints, then send a message straight over
 the private socket:

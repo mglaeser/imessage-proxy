@@ -226,6 +226,19 @@ config_value_valid() {
   [[ -n "$value" && "$value" != *$'\n'* && "$value" != *$'\r'* && "$value" != *'#'* ]]
 }
 
+# A path that will be written into a shell startup file and evaluated by every
+# later shell. Refuse anything that could terminate the quoting or start an
+# expansion, rather than trying to escape it.
+prefix_is_safe() {
+  local value="$1"
+  [[ -n "$value" ]] || return 1
+  case "$value" in
+    *\'* | *\"* | *\\* | *'$'* | *'`'* | *';'* | *'&'* | *'|'* | *'<'* | *'>'* | *'('* | *')'* | *[[:cntrl:]]*)
+      return 1
+      ;;
+  esac
+}
+
 node_version_supported() {
   local version="$1"
   [[ "$version" =~ ^v22\.([0-9]+)\.([0-9]+)$ ]] || return 1
@@ -337,6 +350,13 @@ validate_arguments() {
   [[ -z "$caddy_path" || "$caddy_path" == /* ]] ||
     die '--caddy must be an absolute path'
   [[ "$install_prefix" == /* ]] || die '--prefix must be an absolute path'
+  # The prefix is written into the operator's shell startup file, where it
+  # outlives this process and is re-evaluated by every future shell. A quote or a
+  # dollar sign there stops being a path and becomes code, so the characters that
+  # could end the quoting or introduce an expansion are refused outright rather
+  # than escaped. Spaces are allowed; the emitted line quotes the path.
+  prefix_is_safe "$install_prefix" ||
+    die '--prefix must not contain quotes, backslashes, dollar signs, backticks, semicolons, or control characters'
   [[ -z "$source_directory" || -z "$archive_path" ]] ||
     die 'use either --source or --archive, not both'
 }
@@ -823,8 +843,11 @@ collect_service_identity() {
     note 'That is not an explicit lowercase public DNS hostname. Press Enter to skip it.'
     service_host=''
   done
+  # Skipping the hostname must not discard an address the operator supplied with
+  # --email. The two fields are validated independently, so a real address
+  # alongside a placeholder hostname is a coherent state.
   if [[ "$service_host" == "$PLACEHOLDER_API_HOST" ]]; then
-    service_email="$PLACEHOLDER_ACME_EMAIL"
+    [[ -n "$service_email" ]] || service_email="$PLACEHOLDER_ACME_EMAIL"
     return 0
   fi
   while [[ -z "$service_email" ]]; do
@@ -941,6 +964,15 @@ print_next_steps() {
   note ''
   note '  A browser console is served only by the public edge, which stays'
   note "  disabled. To publish the service: $PROJECT_URL/blob/main/docs/operations.md"
+  if identity_is_placeholder; then
+    note ''
+    note '  This install recorded placeholder identity, so it cannot be published'
+    note '  as it stands. Enabling public HTTPS asks you to replace these first:'
+    [[ "$service_host" == "$PLACEHOLDER_API_HOST" ]] &&
+      note "       IMESSAGE_PROXY_API_HOST   (now $PLACEHOLDER_API_HOST)"
+    [[ "$service_email" == "$PLACEHOLDER_ACME_EMAIL" ]] &&
+      note "       IMESSAGE_PROXY_ACME_EMAIL (now $PLACEHOLDER_ACME_EMAIL)"
+  fi
 
   section 'NEXT'
   note '  1. Allow one exact recipient by adding a line to:'
@@ -964,6 +996,13 @@ print_next_steps() {
 ensure_path_entry() {
   local line profile
   path_result=''
+  # Checked again here, not only in validate_arguments: this is the one place
+  # that writes a value into a file the operator's shell will evaluate forever,
+  # so it refuses rather than trusting an earlier caller to have validated.
+  if ! prefix_is_safe "$install_prefix"; then
+    path_result='unsafe-prefix'
+    return 0
+  fi
   case ":$OPERATOR_PATH:" in
     *":$install_prefix/bin:"*)
       path_result='already'
@@ -978,7 +1017,10 @@ ensure_path_entry() {
       return 0
       ;;
   esac
-  line="export PATH=\"$install_prefix/bin:\$PATH\""
+  # Single-quoted, so the path cannot introduce an expansion or end its own
+  # quoting even if prefix_is_safe is ever loosened. Only $PATH is left to expand
+  # at shell start, which is the whole point of the line.
+  line="export PATH='$install_prefix/bin':\"\$PATH\""
   if [[ -e "$profile" || -L "$profile" ]]; then
     [[ -f "$profile" && ! -L "$profile" ]] || {
       path_result='unsafe-profile'
@@ -1018,6 +1060,11 @@ print_path_result() {
       note "  $path_profile already adds $install_prefix/bin, but this shell predates it."
       note '  For this shell, run:'
       note "       export PATH=\"$install_prefix/bin:\$PATH\""
+      ;;
+    unsafe-prefix)
+      note "  $install_prefix/bin was not added to your shell startup file: the"
+      note '  path contains characters that a shell would re-interpret. Use a'
+      note '  prefix without quotes, backslashes, or expansion characters.'
       ;;
     *)
       note "  $install_prefix/bin is not on your PATH, and the installer could not"

@@ -25,6 +25,18 @@ and operational model described below.
 
 ### Fixed
 
+- The installer no longer writes an unvalidated `--prefix` into a shell startup
+  file. A prefix containing a quote ended the quoting of the emitted `export
+  PATH` line and left the remainder as code, which then ran in every later
+  interactive shell. `--prefix` is now refused at parse time if it contains
+  characters a shell would re-interpret, `ensure_path_entry` refuses one
+  independently so no future caller can bypass that, and the path is emitted
+  single-quoted. A prefix containing spaces still works.
+- An operator address supplied with `--email` is no longer discarded when the
+  hostname prompt is skipped. The two fields are validated independently, so a
+  real address alongside a placeholder hostname is a coherent state.
+- The completion summary names the placeholder values a private install
+  recorded, so the operator can see what public HTTPS will ask them to replace.
 - Every action reads the reviewed service configuration, not only `bootstrap`.
   `server-status`, `server-restart`, `check-host`, `api-key` and the `edge`
   actions read the environment alone, so on a Mac carrying the configuration the

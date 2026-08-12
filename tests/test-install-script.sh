@@ -235,6 +235,58 @@ path_output="$(INSTALLER_PATH="$INSTALLER" PROBE_HOME="$path_probe" bash -c "$pa
 # prefix and writes an export to a startup file that did not need one.
 grep -Fq 'OPERATOR_PATH' "$INSTALLER" ||
   fail 'installer does not capture the operator PATH before hardening its own'
+
+# The prefix is written into a shell startup file, where it outlives the
+# installer and is re-evaluated by every later shell. A quote there stops being a
+# path and becomes code that runs forever, so it must be refused at parse time
+# and quoted at write time.
+# These are literal injection payloads, not expressions to expand.
+# shellcheck disable=SC2016
+for unsafe_prefix in '/tmp/a";touch /tmp/pwned;"' "/tmp/a';id;'" '/tmp/a$(id)' '/tmp/a`id`' '/tmp/a;id' '/tmp/a\b'; do
+  bash -c "source '$INSTALLER'; prefix_is_safe \"\$1\"" _ "$unsafe_prefix" &&
+    fail "prefix_is_safe accepted an injectable prefix: $unsafe_prefix"
+done
+for safe_prefix in /Users/kleo/.local '/Users/first last/.local' /opt/imessage-proxy; do
+  bash -c "source '$INSTALLER'; prefix_is_safe \"\$1\"" _ "$safe_prefix" ||
+    fail "prefix_is_safe rejected a legitimate prefix: $safe_prefix"
+done
+# ensure_path_entry must refuse an injectable prefix itself, so no future caller
+# that skips validate_arguments can write one, and must leave the file untouched.
+injection_probe="$temporary/injection"
+mkdir -p "$injection_probe"
+: > "$injection_probe/.zshrc"
+injection_result="$(
+  INSTALLER_PATH="$INSTALLER" PROBE_HOME="$injection_probe" bash -c '
+    source "$INSTALLER_PATH"
+    HOME="$PROBE_HOME"
+    SHELL=/bin/zsh
+    install_prefix="/tmp/evil\";/usr/bin/touch $PROBE_HOME/PWNED;\""
+    ensure_path_entry
+    printf "%s\n" "$path_result"
+  '
+)"
+[[ "$injection_result" == unsafe-prefix ]] ||
+  fail "ensure_path_entry accepted an injectable prefix: $injection_result"
+[[ ! -s "$injection_probe/.zshrc" ]] ||
+  fail "an injectable prefix was written to a startup file: $(< "$injection_probe/.zshrc")"
+
+# A legitimate prefix containing a space must still be written, and what lands in
+# the startup file must parse as shell and expand to the intended directory.
+space_probe="$temporary/path-space"
+mkdir -p "$space_probe"
+: > "$space_probe/.zshrc"
+INSTALLER_PATH="$INSTALLER" PROBE_HOME="$space_probe" bash -c '
+  source "$INSTALLER_PATH"
+  HOME="$PROBE_HOME"
+  SHELL=/bin/zsh
+  install_prefix="/opt/first last"
+  ensure_path_entry
+' > /dev/null
+bash -n "$space_probe/.zshrc" ||
+  fail 'the PATH line written to a startup file is not valid shell'
+expanded="$(PATH=/usr/bin:/bin bash -c "source '$space_probe/.zshrc'; printf '%s' \"\$PATH\"")"
+[[ "$expanded" == '/opt/first last/bin:/usr/bin:/bin' ]] ||
+  fail "the written PATH line does not expand to the install prefix: $expanded"
 path_already_probe="$temporary/path-already"
 mkdir -p "$path_already_probe"
 : > "$path_already_probe/.zshrc"
