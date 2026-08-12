@@ -68,6 +68,11 @@ jobs:
         run: make test-installer
       - name: Test the uninstaller
         run: make test-uninstaller
+      # macOS ships bash 3.2 and the scripts run under whatever bash PATH
+      # resolves, so interpreter-dependent behaviour has to fail here rather
+      # than on an operator's Mac.
+      - name: Test bash compatibility across supported interpreters
+        run: make test-bash-compat
       - name: Validate Caddy configuration with a pinned disposable image
         shell: bash
         run: |

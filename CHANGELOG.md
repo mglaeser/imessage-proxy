@@ -7,6 +7,14 @@ and operational model described below.
 
 ### Added
 
+- `make test-bash-compat`, a portable suite that runs the shell sources under
+  every bash compatibility level from 3.2 to 5.2 and asserts the validators give
+  identical answers. macOS ships bash 3.2 as `/bin/bash` and every script starts
+  with `#!/usr/bin/env bash`, so the interpreter is whatever `PATH` resolves
+  first; nothing verified that assumption before. It also refuses syntax bash 3.2
+  lacks, and refuses a pattern substitution with a quoted replacement operand,
+  which behaves differently before and after bash 4.3.
+
 - A private install can decline to name itself. The installer's hostname and
   operator-address prompts accept Enter, which records reserved `.invalid`
   placeholders instead. Both values exist only for public HTTPS, and the CLI
@@ -22,6 +30,16 @@ and operational model described below.
   startup file rather than printing instructions, idempotently, and says what it
   changed. The administrator key is still written only to standard output and is
   never captured or echoed.
+
+### Removed
+
+- Two unused LaunchAgent rendering helpers, `write_plist_from_template` and
+  `require_no_unrendered_placeholders`. They shipped without callers, their
+  comment described a mechanism the product does not use, and one of them
+  carried a pattern substitution that would have emitted every value wrapped in
+  literal quote characters under the bash macOS ships. Rendering is unchanged:
+  it goes through `set_program_arguments`, and every render is still asserted by
+  `require_rendered_program_arguments`.
 
 ### Fixed
 
