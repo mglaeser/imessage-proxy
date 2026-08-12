@@ -254,6 +254,43 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
       fail 'optional mode demanded a complete reviewed configuration'
     load_service_config "$service_config"
 
+    # A private install has no use for a DNS name the operator does not own, so
+    # the reserved .invalid placeholders are accepted while the exposure gate is
+    # closed. That relaxation is the whole security question in this change: it
+    # must hold only while the gate is closed, must never let a placeholder
+    # reach public HTTPS, and must not weaken validation for any other value.
+    (
+      export IMESSAGE_PROXY_API_HOST="$PLACEHOLDER_API_HOST"
+      export IMESSAGE_PROXY_ACME_EMAIL="$PLACEHOLDER_ACME_EMAIL"
+      export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no
+      require_api_settings ||
+        fail 'a private install rejected the reserved placeholder identity'
+      export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=yes
+      expect_failure 'needs a DNS name you control' require_api_settings
+    )
+    (
+      # Only the exact placeholders are exempt; anything else is still validated,
+      # gate open or closed.
+      export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no
+      export IMESSAGE_PROXY_ACME_EMAIL="$PLACEHOLDER_ACME_EMAIL"
+      export IMESSAGE_PROXY_API_HOST=messages.local
+      expect_failure 'must be an explicit lowercase public DNS hostname' require_api_settings
+      export IMESSAGE_PROXY_API_HOST=other.invalid
+      expect_failure 'must be an explicit lowercase public DNS hostname' require_api_settings
+      export IMESSAGE_PROXY_API_HOST=messages.integration.dev
+      export IMESSAGE_PROXY_ACME_EMAIL='operator@example.com'
+      expect_failure 'must be a valid operator email address' require_api_settings
+    )
+    (
+      # Real identity keeps working with the gate open, so the exemption cannot
+      # be mistaken for a general relaxation.
+      export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=yes
+      export IMESSAGE_PROXY_API_HOST=messages.integration.dev
+      export IMESSAGE_PROXY_ACME_EMAIL=operator@integration.dev
+      require_api_settings ||
+        fail 'real identity was rejected once public HTTPS was enabled'
+    )
+
     expect_failure 'private file must be a regular non-symlink' \
       require_private_file "$security_dir/private-file-symlink"
     stat_links=2

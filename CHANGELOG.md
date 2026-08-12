@@ -5,6 +5,24 @@ and operational model described below.
 
 ## Unreleased
 
+### Added
+
+- A private install can decline to name itself. The installer's hostname and
+  operator-address prompts accept Enter, which records reserved `.invalid`
+  placeholders instead. Both values exist only for public HTTPS, and the CLI
+  accepts the placeholders only while the exposure gate is closed, so enabling
+  public HTTPS refuses to proceed until real values replace them.
+- `install.sh --verbose`. Compiler command lines and install manifests are
+  collapsed to one progress line each by default and printed in full when a step
+  fails or `--verbose` is given, so the Full Disk Access checkpoint and the
+  administrator key are no longer scrolled away by build output.
+- The installer finishes with a summary: where the CLI, configuration,
+  allowlist and logs are, how to reach the service over its Unix socket, what to
+  do next, and the uninstall one-liner. It adds its own prefix to the shell
+  startup file rather than printing instructions, idempotently, and says what it
+  changed. The administrator key is still written only to standard output and is
+  never captured or echoed.
+
 ### Fixed
 
 - Every action reads the reviewed service configuration, not only `bootstrap`.

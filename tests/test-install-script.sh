@@ -174,6 +174,86 @@ resolved_link="$(bash -c "source '$INSTALLER'; resolve_real_path '$temporary/ims
 [[ -n "$resolved_link" && ! -L "$resolved_link" ]] ||
   fail "symlink resolution returned an unusable path: $resolved_link"
 
+# A private install must be able to decline public identity, and the placeholder
+# it records must be the exact value the CLI accepts while the gate is closed.
+# If these two drift, the installer writes a config its own product refuses.
+for placeholder in PLACEHOLDER_API_HOST PLACEHOLDER_ACME_EMAIL; do
+  installer_value="$(bash -c "source '$INSTALLER'; printf '%s' \"\$$placeholder\"")"
+  [[ -n "$installer_value" ]] || fail "installer does not define $placeholder"
+  [[ "$installer_value" == *.invalid ]] ||
+    fail "$placeholder must sit in the reserved .invalid namespace: $installer_value"
+  grep -Fq "readonly $placeholder='$installer_value'" "$REPOSITORY/bin/imessage-proxy" ||
+    fail "installer $placeholder disagrees with the CLI"
+done
+grep -Fq 'Enter to skip' "$INSTALLER" ||
+  fail 'installer does not offer to skip the public identity prompts'
+
+# Build noise must be collapsible, and recoverable when a step fails.
+grep -Fq 'run_quietly' "$INSTALLER" ||
+  fail 'installer does not group build output behind progress lines'
+grep -Fq -- '--verbose' "$INSTALLER" ||
+  fail 'installer does not offer --verbose'
+for quiet_step in 'Compiling the native server' 'Installing the CLI and reviewed assets'; do
+  grep -Fq "$quiet_step" "$INSTALLER" || fail "installer does not announce: $quiet_step"
+done
+
+# The completion summary has to carry the facts an operator needs next.
+for summary in 'ADMINISTRATOR KEY' 'WHERE THINGS ARE' 'HOW TO REACH IT' 'NEXT' 'UNINSTALL' 'YOUR PATH'; do
+  grep -Fq "$summary" "$INSTALLER" || fail "completion summary omits: $summary"
+done
+grep -Fq 'scripts/uninstall.sh | bash' "$INSTALLER" ||
+  fail 'completion summary does not offer the uninstall one-liner'
+grep -Fq 'ensure_path_entry' "$INSTALLER" ||
+  fail 'installer does not add its own prefix to PATH'
+
+# PATH handling must be idempotent: a second install must not append again.
+path_probe="$temporary/path-probe"
+mkdir -p "$path_probe"
+printf '%s\n' '# existing profile' > "$path_probe/.zshrc"
+path_script="$(
+  cat <<'PROBE'
+source "$INSTALLER_PATH"
+HOME="$PROBE_HOME"
+SHELL=/bin/zsh
+install_prefix="$PROBE_HOME/.local"
+PATH=/usr/bin:/bin
+ensure_path_entry
+printf '%s\n' "$path_result"
+ensure_path_entry
+printf '%s\n' "$path_result"
+PROBE
+)"
+path_output="$(INSTALLER_PATH="$INSTALLER" PROBE_HOME="$path_probe" bash -c "$path_script")"
+[[ "$path_output" == $'added\npending' ]] ||
+  fail "PATH handling is not idempotent, got: ${path_output//$'\n'/ }"
+[[ "$(grep -c 'export PATH=' "$path_probe/.zshrc")" -eq 1 ]] ||
+  fail 'a second install appended a duplicate PATH line'
+
+# The installer replaces PATH with a hardened list for its own subprocesses, so
+# the prefix check has to consult the operator's inherited PATH. Reading the
+# hardened value instead makes "already on your PATH" unreachable for the default
+# prefix and writes an export to a startup file that did not need one.
+grep -Fq 'OPERATOR_PATH' "$INSTALLER" ||
+  fail 'installer does not capture the operator PATH before hardening its own'
+path_already_probe="$temporary/path-already"
+mkdir -p "$path_already_probe"
+: > "$path_already_probe/.zshrc"
+path_already_output="$(
+  INSTALLER_PATH="$INSTALLER" PROBE_HOME="$path_already_probe" \
+    PATH="$path_already_probe/.local/bin:/usr/bin:/bin" bash -c '
+      source "$INSTALLER_PATH"
+      HOME="$PROBE_HOME"
+      SHELL=/bin/zsh
+      install_prefix="$PROBE_HOME/.local"
+      ensure_path_entry
+      printf "%s\n" "$path_result"
+    '
+)"
+[[ "$path_already_output" == already ]] ||
+  fail "an operator PATH already containing the prefix reported: $path_already_output"
+[[ ! -s "$path_already_probe/.zshrc" ]] ||
+  fail 'the installer edited a startup file that already had the prefix on PATH'
+
 # README must advertise the one-liner before any manual instructions.
 readme_oneliner="$(grep -n 'scripts/install.sh | bash' "$REPOSITORY/README.md" | head -1 | cut -d: -f1)"
 readme_manual="$(grep -n '^## Install and run manually' "$REPOSITORY/README.md" | head -1 | cut -d: -f1)"
