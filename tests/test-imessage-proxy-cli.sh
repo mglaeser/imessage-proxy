@@ -218,6 +218,42 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     expect_failure 'private file must be a regular non-symlink' \
       load_service_config "$security_dir/service-link.env"
 
+    # Only bootstrap used to read the reviewed configuration, so every other
+    # action ran against an empty environment and reported a malformed hostname
+    # for one that had never been loaded. Lifecycle actions read it too now,
+    # without overriding anything the operator set explicitly, and without
+    # demanding the completeness that only a bootstrap needs.
+    (
+      export IMESSAGE_PROXY_CONFIG="$service_config"
+      [[ "$(service_config_path)" == "$service_config" ]] ||
+        fail 'IMESSAGE_PROXY_CONFIG does not redirect the configuration lookup'
+      unset IMESSAGE_PROXY_API_HOST IMESSAGE_PROXY_ACME_EMAIL
+      expect_failure 'reviewed service configuration was not found' require_api_settings
+      use_service_config
+      [[ "$IMESSAGE_PROXY_API_HOST" == messages.integration.dev ]] ||
+        fail 'a lifecycle action did not load the reviewed configuration'
+      require_api_settings ||
+        fail 'the loaded reviewed configuration was rejected'
+    )
+    (
+      export IMESSAGE_PROXY_CONFIG="$service_config"
+      export IMESSAGE_PROXY_API_HOST=explicit.integration.dev
+      unset IMESSAGE_PROXY_ACME_EMAIL
+      use_service_config
+      [[ "$IMESSAGE_PROXY_API_HOST" == explicit.integration.dev ]] ||
+        fail 'the reviewed configuration overrode an explicit environment value'
+      [[ "$IMESSAGE_PROXY_ACME_EMAIL" == operator@integration.dev ]] ||
+        fail 'the reviewed configuration did not fill in a missing value'
+    )
+    (
+      export IMESSAGE_PROXY_CONFIG="$security_dir/service-absent.env"
+      use_service_config ||
+        fail 'an absent configuration file was treated as a failure'
+    )
+    load_service_config "$missing_config" optional ||
+      fail 'optional mode demanded a complete reviewed configuration'
+    load_service_config "$service_config"
+
     expect_failure 'private file must be a regular non-symlink' \
       require_private_file "$security_dir/private-file-symlink"
     stat_links=2
