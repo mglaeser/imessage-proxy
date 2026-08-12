@@ -7,6 +7,17 @@ and operational model described below.
 
 ### Fixed
 
+- Every action reads the reviewed service configuration, not only `bootstrap`.
+  `server-status`, `server-restart`, `check-host`, `api-key` and the `edge`
+  actions read the environment alone, so on a Mac carrying the configuration the
+  installer had just written they reported
+  `IMESSAGE_PROXY_API_HOST must be an explicit lowercase public DNS hostname`
+  for a hostname that was correct and had simply never been loaded. The file at
+  `IMESSAGE_PROXY_CONFIG`, default `~/.config/imessage-proxy/service.env`, is
+  now read for those actions; values already present in the environment take
+  precedence, and a value that is missing is reported as missing rather than as
+  malformed.
+
 - Both LaunchAgents are rendered with the argument vector they declare. Patching
   the array by index relied on `plutil -replace ProgramArguments.N` replacing an
   element; where it inserts instead, the native agent shipped as

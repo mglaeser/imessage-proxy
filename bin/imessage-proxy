@@ -184,6 +184,10 @@ usage() {
     '  edge-logs' \
     '  version' \
     '' \
+    'Every action except bootstrap reads the reviewed service configuration from' \
+    'IMESSAGE_PROXY_CONFIG, default ~/.config/imessage-proxy/service.env. Values' \
+    'already present in the environment take precedence over that file.' \
+    '' \
     'There is no reset, credential-export, or runtime-state removal action.'
 }
 
@@ -350,8 +354,29 @@ service_config_key_allowed() {
   esac
 }
 
+service_config_path() {
+  printf '%s\n' "${IMESSAGE_PROXY_CONFIG:-$HOME/.config/imessage-proxy/service.env}"
+}
+
+# Every action except bootstrap used to read the environment and nothing else,
+# so a Mac carrying the configuration the installer had just written answered
+#   ERROR: IMESSAGE_PROXY_API_HOST must be an explicit lowercase public DNS hostname
+# for server-status, server-restart, check-host, api-key and every edge action:
+# a complaint about the shape of a value that had simply never been loaded. The
+# reviewed configuration is now read for those actions too. Values already
+# present in the environment win, so an explicit override still works and
+# bootstrap's own --config load is untouched.
+use_service_config() {
+  local path
+  path="$(service_config_path)"
+  [[ -e "$path" || -L "$path" ]] || return 0
+  load_service_config "$path" optional
+}
+
+# mode "required" (bootstrap) insists the reviewed configuration is complete and
+# takes precedence. mode "optional" fills in only what the environment lacks.
 load_service_config() {
-  local config_path="$1" expected key line line_number=0 seen='' value
+  local config_path="$1" expected key line line_number=0 mode="${2:-required}" seen='' value
   local -a expected_keys=(
     IMESSAGE_PROXY_API_HOST
     IMESSAGE_PROXY_ACME_EMAIL
@@ -380,8 +405,11 @@ load_service_config() {
       die "service config defines $key more than once"
     fi
     seen+="$key"$'\n'
-    export "$key=$value"
+    if [[ "$mode" == required || -z "${!key:-}" ]]; then
+      export "$key=$value"
+    fi
   done < "$config_path"
+  [[ "$mode" == required ]] || return 0
   for expected in "${expected_keys[@]}"; do
     [[ $'\n'"$seen" == *$'\n'"$expected"$'\n'* ]] ||
       die "service config is missing $expected"
@@ -394,10 +422,16 @@ require_api_settings() {
   local bind_ip="${IMESSAGE_PROXY_PUBLIC_BIND:-0.0.0.0}"
   local http_port="${IMESSAGE_PROXY_HTTP_PORT:-8080}"
   local https_port="${IMESSAGE_PROXY_HTTPS_PORT:-8443}"
+  # An unset value and a malformed one are different faults with different
+  # fixes, and reporting the second for the first sent a real operator hunting a
+  # hostname that was already correct.
+  [[ -n "$api_host" && -n "$acme_email" ]] ||
+    die "the reviewed service configuration was not found: $(service_config_path)
+  run the installer, or point IMESSAGE_PROXY_CONFIG at the file you reviewed"
   hostname_valid "$api_host" ||
-    die 'IMESSAGE_PROXY_API_HOST must be an explicit lowercase public DNS hostname'
+    die "IMESSAGE_PROXY_API_HOST must be an explicit lowercase public DNS hostname, not: $api_host"
   email_valid "$acme_email" ||
-    die 'IMESSAGE_PROXY_ACME_EMAIL must be a valid operator email address on a public domain'
+    die "IMESSAGE_PROXY_ACME_EMAIL must be a valid operator email address on a public domain, not: $acme_email"
   unprivileged_port_valid "$http_port" ||
     die 'IMESSAGE_PROXY_HTTP_PORT must be canonical base-10 in the range 1024-65535'
   unprivileged_port_valid "$https_port" ||
@@ -1713,6 +1747,13 @@ doctor() {
 
 main() {
   [[ $# -ge 1 ]] || { usage; exit 64; }
+  # bootstrap loads the configuration it was pointed at; version and help need
+  # none. Everything else operates on an installed service and reads the
+  # reviewed configuration that installed it.
+  case "$1" in
+    bootstrap | version | -h | --help) ;;
+    *) use_service_config ;;
+  esac
   case "$1" in
     doctor) [[ $# -eq 1 ]] || die 'doctor takes no arguments'; doctor ;;
     bootstrap) shift; bootstrap "$@" ;;
