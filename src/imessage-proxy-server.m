@@ -3071,6 +3071,17 @@ static BOOL RunServer(IMPConfiguration *configuration, NSError **error) {
         close(server);
         return ServerStartupFailure(error, @"could not secure socket", "socket_secure_failed");
     }
+    // A stopped listener leaves the port in TIME_WAIT for up to two minutes.
+    // Without this, every restart inside that window fails to bind and the
+    // service crash-loops on "port already in use" - which is exactly what
+    // server-restart does. SO_REUSEADDR does not permit a second live listener
+    // on the same address and port, so a genuine conflict still returns
+    // EADDRINUSE below.
+    int reuse = 1;
+    if (setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) != 0) {
+        close(server);
+        return ServerStartupFailure(error, @"could not configure the socket", "socket_option_failed");
+    }
     // Loopback is a compile-time constant, never a setting. There is no
     // environment variable that can widen it, and a second instance is refused by
     // bind() returning EADDRINUSE rather than by a check that could race.
