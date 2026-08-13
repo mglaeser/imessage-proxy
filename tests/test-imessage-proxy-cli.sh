@@ -61,9 +61,7 @@ for expected in \
   'api-key bootstrap-admin' \
   'server-install' \
   'RESTART IMESSAGE PROXY SERVER' \
-  'edge-install' \
-  'EXPOSE IMESSAGE PROXY PUBLICLY' \
-  'RESTART IMESSAGE PROXY EDGE'; do
+  'server-logs'; do
   grep -Fq "$expected" <<< "$help_text" || fail "help omits: $expected"
 done
 
@@ -98,29 +96,8 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
   export TMPDIR="$temporary/tmp"
   export IMESSAGE_PROXY_SOURCE_DIR="$REPOSITORY"
   export IMESSAGE_PROXY_HOME="$HOME/imessage-proxy"
-  export IMESSAGE_PROXY_API_HOST='messages.integration.dev'
-  export IMESSAGE_PROXY_ACME_EMAIL='operator@integration.dev'
-  export IMESSAGE_PROXY_PUBLIC_BIND='0.0.0.0'
-  export IMESSAGE_PROXY_HTTP_PORT='8080'
-  export IMESSAGE_PROXY_HTTPS_PORT='8443'
-  export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS='yes'
+  export IMESSAGE_PROXY_PORT='18765'
   mkdir -p "$HOME" "$TMPDIR" "$temporary/tools"
-
-  fake_caddy="$temporary/tools/caddy"
-  {
-    printf '%s\n' '#!/usr/bin/env bash'
-    # This writes a literal script expression.
-    # shellcheck disable=SC2016
-    printf '%s\n' 'case "${1:-}" in'
-    printf '%s\n' "  version) printf '%s\\n' 'v2.11.4 test-build' ;;"
-    printf '%s\n' '  validate) exit 0 ;;'
-    printf '%s\n' '  *) exit 64 ;;'
-    printf '%s\n' 'esac'
-  } > "$fake_caddy"
-  chmod 700 "$fake_caddy"
-  export IMESSAGE_PROXY_CADDY_BIN="$fake_caddy"
-  export IMESSAGE_PROXY_CADDY_SHA256
-  IMESSAGE_PROXY_CADDY_SHA256="$(shasum -a 256 "$fake_caddy" | awk '{print $1}')"
 
   fake_imsg="$temporary/tools/imsg"
   {
@@ -141,21 +118,10 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
   ((SERVER_START_TIMEOUT_SECONDS >= SERVER_READ_TIMEOUT_SECONDS + 10)) ||
     fail 'native startup readiness budget does not cover its Messages read preflight'
 
-  hostname_valid 'messages.integration.dev' || fail 'valid public hostname was rejected'
-  ! hostname_valid 'Messages.example.net' || fail 'mixed-case hostname was accepted'
-  ! hostname_valid 'messages.local' || fail 'local hostname was accepted'
-  ! hostname_valid 'messages.example.com' || fail 'documentation-only hostname was accepted'
-  ! hostname_valid 'messages.example.net' || fail 'reserved example hostname was accepted'
-  ! hostname_valid 'messages.integration.test' || fail 'reserved test hostname was accepted'
-  ! hostname_valid 'service.home.arpa' || fail 'private home.arpa hostname was accepted'
-  ! hostname_valid '203.0.113.10' || fail 'dotted IPv4 address was accepted as a hostname'
-  email_valid 'operator@integration.dev' || fail 'valid ACME email was rejected'
-  ! email_valid 'operator@example.com' || fail 'documentation-only ACME email was accepted'
-  ipv4_address_valid '203.0.113.10' || fail 'valid IPv4 address was rejected'
-  ! ipv4_address_valid '203.0.113.999' || fail 'invalid IPv4 address was accepted'
-  unprivileged_port_valid 8080 || fail 'valid unprivileged port was rejected'
+  unprivileged_port_valid 8765 || fail 'valid unprivileged port was rejected'
   ! unprivileged_port_valid 443 || fail 'privileged port was accepted'
-  ! unprivileged_port_valid 08080 || fail 'non-canonical port was accepted'
+  ! unprivileged_port_valid 08765 || fail 'non-canonical port was accepted'
+  ! unprivileged_port_valid 65536 || fail 'out-of-range port was accepted'
 
   security_dir="$temporary/security"
   mkdir -p "$security_dir/private-directory" "$security_dir/logs"
@@ -165,7 +131,7 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
   ln "$security_dir/private-file" "$security_dir/private-file-hardlink"
   ln -s "$security_dir/private-file" "$security_dir/private-file-symlink"
   ln -s "$security_dir/private-directory" "$security_dir/private-directory-symlink"
-  ln -s "$security_dir/private-file" "$security_dir/logs/edge-symlink.log"
+  ln -s "$security_dir/private-file" "$security_dir/logs/server-symlink.log"
   (
     stat_mode=600
     stat_owner="$(id -un)"
@@ -183,36 +149,34 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     service_config="$security_dir/service.env"
     {
       printf '%s\n' \
-        'IMESSAGE_PROXY_API_HOST=messages.integration.dev' \
-        'IMESSAGE_PROXY_ACME_EMAIL=operator@integration.dev' \
-        'IMESSAGE_PROXY_PUBLIC_BIND=0.0.0.0' \
-        'IMESSAGE_PROXY_HTTP_PORT=8080' \
-        'IMESSAGE_PROXY_HTTPS_PORT=8443' \
-        'IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no' \
+        'IMESSAGE_PROXY_PORT=18765' \
         "IMESSAGE_PROXY_IMSG_BIN=$fake_imsg" \
-        "IMESSAGE_PROXY_IMSG_SHA256=$IMESSAGE_PROXY_IMSG_SHA256" \
-        "IMESSAGE_PROXY_CADDY_BIN=$fake_caddy" \
-        "IMESSAGE_PROXY_CADDY_SHA256=$IMESSAGE_PROXY_CADDY_SHA256"
+        "IMESSAGE_PROXY_IMSG_SHA256=$IMESSAGE_PROXY_IMSG_SHA256"
     } > "$service_config"
     chmod 600 "$service_config"
     load_service_config "$service_config"
-    [[ "$IMESSAGE_PROXY_API_HOST" == messages.integration.dev &&
-      "$IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS" == no &&
+    [[ "$IMESSAGE_PROXY_PORT" == 18765 &&
       "$IMESSAGE_PROXY_IMSG_BIN" == "$fake_imsg" ]] ||
-      fail 'closed service config did not load exact values'
+      fail 'service config did not load exact values'
 
     duplicate_config="$security_dir/service-duplicate.env"
     cp "$service_config" "$duplicate_config"
-    printf '%s\n' 'IMESSAGE_PROXY_API_HOST=duplicate.integration.dev' >> "$duplicate_config"
-    expect_failure 'defines IMESSAGE_PROXY_API_HOST more than once' \
+    printf '%s\n' 'IMESSAGE_PROXY_PORT=19999' >> "$duplicate_config"
+    expect_failure 'defines IMESSAGE_PROXY_PORT more than once' \
       load_service_config "$duplicate_config"
     unknown_config="$security_dir/service-unknown.env"
     cp "$service_config" "$unknown_config"
     printf '%s\n' 'IMESSAGE_PROXY_API_KEY=must-not-load' >> "$unknown_config"
     expect_failure 'uses an unknown key' load_service_config "$unknown_config"
+    # A key that belonged to the deleted public edge must be refused outright,
+    # so a configuration left over from an older release cannot be half-honoured.
+    retired_config="$security_dir/service-retired.env"
+    cp "$service_config" "$retired_config"
+    printf '%s\n' 'IMESSAGE_PROXY_API_HOST=messages.integration.dev' >> "$retired_config"
+    expect_failure 'uses an unknown key' load_service_config "$retired_config"
     missing_config="$security_dir/service-missing.env"
-    sed '/^IMESSAGE_PROXY_CADDY_SHA256=/d' "$service_config" > "$missing_config"
-    expect_failure 'is missing IMESSAGE_PROXY_CADDY_SHA256' \
+    sed '/^IMESSAGE_PROXY_IMSG_SHA256=/d' "$service_config" > "$missing_config"
+    expect_failure 'is missing IMESSAGE_PROXY_IMSG_SHA256' \
       load_service_config "$missing_config"
     ln -s "$service_config" "$security_dir/service-link.env"
     expect_failure 'private file must be a regular non-symlink' \
@@ -227,23 +191,19 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
       export IMESSAGE_PROXY_CONFIG="$service_config"
       [[ "$(service_config_path)" == "$service_config" ]] ||
         fail 'IMESSAGE_PROXY_CONFIG does not redirect the configuration lookup'
-      unset IMESSAGE_PROXY_API_HOST IMESSAGE_PROXY_ACME_EMAIL
-      expect_failure 'reviewed service configuration was not found' require_api_settings
+      unset IMESSAGE_PROXY_PORT
       use_service_config
-      [[ "$IMESSAGE_PROXY_API_HOST" == messages.integration.dev ]] ||
+      [[ "$IMESSAGE_PROXY_PORT" == 18765 ]] ||
         fail 'a lifecycle action did not load the reviewed configuration'
       require_api_settings ||
         fail 'the loaded reviewed configuration was rejected'
     )
     (
       export IMESSAGE_PROXY_CONFIG="$service_config"
-      export IMESSAGE_PROXY_API_HOST=explicit.integration.dev
-      unset IMESSAGE_PROXY_ACME_EMAIL
+      export IMESSAGE_PROXY_PORT=19999
       use_service_config
-      [[ "$IMESSAGE_PROXY_API_HOST" == explicit.integration.dev ]] ||
+      [[ "$IMESSAGE_PROXY_PORT" == 19999 ]] ||
         fail 'the reviewed configuration overrode an explicit environment value'
-      [[ "$IMESSAGE_PROXY_ACME_EMAIL" == operator@integration.dev ]] ||
-        fail 'the reviewed configuration did not fill in a missing value'
     )
     (
       export IMESSAGE_PROXY_CONFIG="$security_dir/service-absent.env"
@@ -254,41 +214,18 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
       fail 'optional mode demanded a complete reviewed configuration'
     load_service_config "$service_config"
 
-    # A private install has no use for a DNS name the operator does not own, so
-    # the reserved .invalid placeholders are accepted while the exposure gate is
-    # closed. That relaxation is the whole security question in this change: it
-    # must hold only while the gate is closed, must never let a placeholder
-    # reach public HTTPS, and must not weaken validation for any other value.
+    # The port is the whole of require_api_settings now. It must reject what the
+    # server itself would reject, so a bad value fails in the CLI rather than in
+    # a LaunchAgent that then crash-loops.
     (
-      export IMESSAGE_PROXY_API_HOST="$PLACEHOLDER_API_HOST"
-      export IMESSAGE_PROXY_ACME_EMAIL="$PLACEHOLDER_ACME_EMAIL"
-      export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no
-      require_api_settings ||
-        fail 'a private install rejected the reserved placeholder identity'
-      export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=yes
-      expect_failure 'needs a DNS name you control' require_api_settings
-    )
-    (
-      # Only the exact placeholders are exempt; anything else is still validated,
-      # gate open or closed.
-      export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no
-      export IMESSAGE_PROXY_ACME_EMAIL="$PLACEHOLDER_ACME_EMAIL"
-      export IMESSAGE_PROXY_API_HOST=messages.local
-      expect_failure 'must be an explicit lowercase public DNS hostname' require_api_settings
-      export IMESSAGE_PROXY_API_HOST=other.invalid
-      expect_failure 'must be an explicit lowercase public DNS hostname' require_api_settings
-      export IMESSAGE_PROXY_API_HOST=messages.integration.dev
-      export IMESSAGE_PROXY_ACME_EMAIL='operator@example.com'
-      expect_failure 'must be a valid operator email address' require_api_settings
-    )
-    (
-      # Real identity keeps working with the gate open, so the exemption cannot
-      # be mistaken for a general relaxation.
-      export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=yes
-      export IMESSAGE_PROXY_API_HOST=messages.integration.dev
-      export IMESSAGE_PROXY_ACME_EMAIL=operator@integration.dev
-      require_api_settings ||
-        fail 'real identity was rejected once public HTTPS was enabled'
+      export IMESSAGE_PROXY_PORT=8765
+      require_api_settings || fail 'a valid port was rejected'
+      export IMESSAGE_PROXY_PORT=443
+      expect_failure 'must be canonical base-10 in the range 1024-65535' require_api_settings
+      export IMESSAGE_PROXY_PORT=65536
+      expect_failure 'must be canonical base-10 in the range 1024-65535' require_api_settings
+      export IMESSAGE_PROXY_PORT=08765
+      expect_failure 'must be canonical base-10 in the range 1024-65535' require_api_settings
     )
 
     expect_failure 'private file must be a regular non-symlink' \
@@ -322,7 +259,7 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
       require_private_executable "$security_dir/private-file" 'fixture executable'
 
     expect_failure 'log path must be a regular non-symlink' \
-      prepare_private_log "$security_dir/logs/edge-symlink.log"
+      prepare_private_log "$security_dir/logs/server-symlink.log"
     stat_links=2
     expect_failure 'log file must have exactly one hard link' \
       prepare_private_log "$security_dir/private-file-hardlink"
@@ -336,14 +273,6 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
       require_safe_launch_agent_target "$security_dir/private-file-symlink"
   )
 
-  wrong_caddy="$temporary/tools/caddy-wrong-version"
-  {
-    printf '%s\n' '#!/usr/bin/env bash'
-    # shellcheck disable=SC2016
-    printf '%s\n' '[[ "${1:-}" == version ]] || exit 64'
-    printf '%s\n' "printf '%s\\n' 'v2.11.3 wrong-build'"
-  } > "$wrong_caddy"
-  chmod 700 "$wrong_caddy"
   wrong_imsg="$temporary/tools/imsg-wrong-version"
   {
     printf '%s\n' '#!/usr/bin/env bash'
@@ -354,19 +283,13 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
   chmod 700 "$wrong_imsg"
   mkdir -p "$BIN_DIR"
 
-  IMESSAGE_PROXY_CADDY_SHA256='0000000000000000000000000000000000000000000000000000000000000000' \
-    expect_failure 'configured Caddy binary SHA-256 does not match' stage_caddy_binary
   IMESSAGE_PROXY_IMSG_SHA256='0000000000000000000000000000000000000000000000000000000000000000' \
     expect_failure 'configured imsg binary SHA-256 does not match' stage_imsg_binary
-  wrong_caddy_sha256="$(shasum -a 256 "$wrong_caddy" | awk '{print $1}')"
-  IMESSAGE_PROXY_CADDY_BIN="$wrong_caddy" \
-    IMESSAGE_PROXY_CADDY_SHA256="$wrong_caddy_sha256" \
-    expect_failure 'expected Caddy 2.11.4, found v2.11.3' stage_caddy_binary
   wrong_imsg_sha256="$(shasum -a 256 "$wrong_imsg" | awk '{print $1}')"
   IMESSAGE_PROXY_IMSG_BIN="$wrong_imsg" \
     IMESSAGE_PROXY_IMSG_SHA256="$wrong_imsg_sha256" \
     expect_failure 'expected imsg 0.13.4, found 0.13.3' stage_imsg_binary
-  [[ ! -e "$CADDY_BIN" && ! -e "$IMSG_BIN" ]] ||
+  [[ ! -e "$IMSG_BIN" ]] ||
     fail 'a rejected dependency version replaced a staged binary'
 
   require_macos() { :; }
@@ -386,10 +309,6 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     printf '%s\n' 'rendered native server agent' > "$SERVER_PLIST_STATE"
     chmod 600 "$SERVER_PLIST_STATE"
   }
-  render_edge_agent() {
-    printf '%s\n' 'rendered host Caddy edge agent' > "$EDGE_PLIST_STATE"
-    chmod 600 "$EDGE_PLIST_STATE"
-  }
   launchctl() {
     [[ "${1:-}" == print ]] || return 64
     printf '%s\n' 'Could not find service in domain for system' >&2
@@ -406,23 +325,9 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     server_loaded() { return 2; }
     expect_failure 'could not determine native LaunchAgent state' prepare
   )
-  (
-    prepare_runtime_directories() { fail 'prepare mutated state while the public edge was loaded'; }
-    server_loaded() { return 1; }
-    edge_loaded() { return 0; }
-    expect_failure 'stop the public edge before replacing its staged binary' prepare
-  )
-  (
-    prepare_runtime_directories() { fail 'prepare mutated state after a public-edge inventory error'; }
-    server_loaded() { return 1; }
-    edge_loaded() { return 2; }
-    expect_failure 'could not determine public-edge LaunchAgent state' prepare
-  )
 
   prepare > "$temporary/prepare.out"
   [[ -f "$TARGETS_FILE" ]] || fail 'prepare did not create the target allowlist'
-  [[ -f "$EDGE_LOG" && ! -L "$EDGE_LOG" ]] ||
-    fail 'prepare did not create the bounded edge log safely'
   # A start failure used to be undiagnosable because both LaunchAgent streams
   # went to /dev/null. The server log must exist, be private, and be rendered
   # into the plist instead.
@@ -430,16 +335,13 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     fail 'prepare did not create the bounded native server log safely'
   [[ "$(stat -f '%Lp' "$SERVER_LOG")" == 600 ]] ||
     fail 'the native server log is not private'
-  [[ -f "$CADDYFILE" && -x "$CADDY_BIN" && -x "$IMSG_BIN" ]] ||
-    fail 'prepare did not stage the pinned native dependencies'
-  [[ -f "$SERVER_PLIST_STATE" && -f "$EDGE_PLIST_STATE" ]] ||
-    fail 'prepare did not render both LaunchAgents'
+  [[ -x "$IMSG_BIN" ]] ||
+    fail 'prepare did not stage the pinned native dependency'
+  [[ -f "$SERVER_PLIST_STATE" ]] ||
+    fail 'prepare did not render the LaunchAgent'
   [[ -f "$UI_DIR/index.html" && -f "$UI_DIR/app.js" && -f "$UI_DIR/styles.css" ]] ||
-    fail 'prepare did not stage the same-origin UI'
+    fail 'prepare did not stage the console the server serves'
   assert_contains 'Wildcards are not supported.' "$TARGETS_FILE"
-  assert_contains 'IMESSAGE_PROXY_SOCKET_PATH' "$CADDYFILE"
-  assert_contains 'IMESSAGE_PROXY_UI_DIR' "$CADDYFILE"
-  assert_contains 'IMESSAGE_PROXY_EDGE_LOG_PATH' "$CADDYFILE"
 
   # The rendered ProgramArguments array is what launchd actually executes, and
   # it was the one artifact nothing verified. Rendering used to patch the array
@@ -458,14 +360,6 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     fail 'the rendered native LaunchAgent passes unexpected extra arguments'
   plutil -extract ProgramArguments json -o - "$rendered_server_agent" > "$temporary/server-argv.json"
   assert_not_contains '__' "$temporary/server-argv.json"
-  rendered_edge_agent="$temporary/rendered-edge-agent.plist"
-  render_edge_agent_to "$rendered_edge_agent"
-  [[ "$(plutil -extract ProgramArguments.0 raw -o - "$rendered_edge_agent")" == "$CADDY_BIN" ]] ||
-    fail 'the rendered edge LaunchAgent does not execute the staged Caddy binary'
-  [[ "$(plutil -extract ProgramArguments.3 raw -o - "$rendered_edge_agent")" == "$CADDYFILE" ]] ||
-    fail 'the rendered edge LaunchAgent does not point at the staged Caddyfile'
-  plutil -extract ProgramArguments json -o - "$rendered_edge_agent" > "$temporary/edge-argv.json"
-  assert_not_contains '__' "$temporary/edge-argv.json"
   # A lint-clean plist with a truncated, padded, or mistyped vector must be
   # rejected: that is exactly the shape launchd accepts and the server cannot
   # run. Each fixture is built through the same append path the renderer uses,
@@ -545,7 +439,6 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     : > "$bootstrap_log"
     load_service_config() {
       printf '%s\n' config >> "$bootstrap_log"
-      export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no
     }
     require_bootstrap_tty() { :; }
     doctor() { printf '%s\n' doctor >> "$bootstrap_log"; }
@@ -556,7 +449,6 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     check_bootstrap_eligibility() { printf '%s\n' bootstrap-preflight >> "$bootstrap_log"; }
     check_host() { printf '%s\n' check-host >> "$bootstrap_log"; }
     server_install() { printf '%s\n' server-install >> "$bootstrap_log"; }
-    edge_install() { printf '%s\n' edge-install >> "$bootstrap_log"; }
     api_key_bootstrap() {
       printf 'key %s\n' "$*" >> "$bootstrap_log"
       printf '%s\n' "$bootstrap_token"
@@ -567,42 +459,13 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     [[ "$(< "$bootstrap_log")" == \
       $'config\ndoctor\nprepare\nbuild-host\nfull-disk-access\ninitialize-database\nbootstrap-preflight\ncheck-host\nserver-install\nkey bootstrap-admin --name first-admin --expires-in-days 14' ]] ||
       fail 'bootstrap lifecycle order or final key operation changed'
-    assert_not_contains 'edge-install' "$bootstrap_log"
     assert_not_contains "$bootstrap_token" "$bootstrap_stderr"
     assert_contains 'Progress is sent to stderr; the key is stdout only.' "$bootstrap_stderr"
   )
   (
-    bootstrap_log="$temporary/bootstrap-public-sequence.log"
-    : > "$bootstrap_log"
-    load_service_config() { export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=yes; }
-    require_bootstrap_tty() { :; }
-    doctor() { printf '%s\n' doctor >> "$bootstrap_log"; }
-    prepare() { printf '%s\n' prepare >> "$bootstrap_log"; }
-    build_host() { printf '%s\n' build-host >> "$bootstrap_log"; }
-    acknowledge_full_disk_access() { printf '%s\n' full-disk-access >> "$bootstrap_log"; }
-    initialize_database() { printf '%s\n' initialize-database >> "$bootstrap_log"; }
-    check_bootstrap_eligibility() { printf '%s\n' bootstrap-preflight >> "$bootstrap_log"; }
-    check_host() { printf '%s\n' check-host >> "$bootstrap_log"; }
-    server_install() { printf '%s\n' server-install >> "$bootstrap_log"; }
-    edge_install() {
-      [[ "$1" == 'EXPOSE IMESSAGE PROXY PUBLICLY' ]] || fail 'public bootstrap changed confirmation'
-      printf '%s\n' edge-install >> "$bootstrap_log"
-    }
-    api_key_bootstrap() {
-      printf '%s\n' key >> "$bootstrap_log"
-      printf '%s\n' "$bootstrap_token"
-    }
-    output="$(bootstrap --config /private/service.env --admin-name first-admin --public \
-      --confirm 'EXPOSE IMESSAGE PROXY PUBLICLY' 2> "$temporary/bootstrap-public.stderr")"
-    [[ "$output" == "$bootstrap_token" ]] || fail 'public bootstrap did not return exactly the key'
-    [[ "$(< "$bootstrap_log")" == \
-      $'doctor\nprepare\nbuild-host\nfull-disk-access\ninitialize-database\nbootstrap-preflight\ncheck-host\nserver-install\nedge-install\nkey' ]] ||
-      fail 'public bootstrap lifecycle order or final key operation changed'
-  )
-  (
     bootstrap_log="$temporary/bootstrap-failure-sequence.log"
     : > "$bootstrap_log"
-    load_service_config() { export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no; }
+    load_service_config() { :; }
     require_bootstrap_tty() { :; }
     doctor() { :; }
     prepare() { :; }
@@ -627,7 +490,7 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     # build, the signature, and the Full Disk Access checkpoint had all succeeded.
     bootstrap_log="$temporary/bootstrap-degraded-install.log"
     : > "$bootstrap_log"
-    load_service_config() { export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no; }
+    load_service_config() { :; }
     require_bootstrap_tty() { :; }
     doctor() { :; }
     prepare() { :; }
@@ -684,7 +547,7 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
   (
     mutation_log="$temporary/bootstrap-no-tty-mutation.log"
     : > "$mutation_log"
-    load_service_config() { export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no; }
+    load_service_config() { :; }
     require_bootstrap_tty() {
       die 'bootstrap needs an interactive controlling terminal before it can change runtime state'
     }
@@ -696,7 +559,7 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
   (
     rollback_log="$temporary/bootstrap-key-failure-rollback.log"
     : > "$rollback_log"
-    load_service_config() { export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=yes; }
+    load_service_config() { :; }
     require_bootstrap_tty() { :; }
     doctor() { :; }
     prepare() { :; }
@@ -706,27 +569,25 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     check_bootstrap_eligibility() { :; }
     check_host() { :; }
     server_install() { :; }
-    edge_install() { :; }
     api_key_bootstrap() { return 9; }
     bootstrap_invoke_self() { printf '%s\n' "$*" >> "$rollback_log"; }
     set +e
     (
       set -e
-      bootstrap --config /private/service.env --admin-name first-admin --public \
-        --confirm 'EXPOSE IMESSAGE PROXY PUBLICLY'
+      bootstrap --config /private/service.env --admin-name first-admin
     ) > "$temporary/bootstrap-key-failure.stdout" 2> "$temporary/bootstrap-key-failure.stderr"
     bootstrap_status=$?
     set -e
     [[ "$bootstrap_status" -eq 9 ]] || fail 'bootstrap did not preserve final key failure status'
     [[ ! -s "$temporary/bootstrap-key-failure.stdout" ]] ||
       fail 'failed final key creation wrote stdout'
-    [[ "$(< "$rollback_log")" == $'edge-stop\nserver-stop --confirm STOP IMESSAGE PROXY SERVER' ]] ||
-      fail 'bootstrap did not contain edge then server after final key failure'
+    [[ "$(< "$rollback_log")" == 'server-stop --confirm STOP IMESSAGE PROXY SERVER' ]] ||
+      fail 'bootstrap did not contain the server after final key failure'
   )
   (
     rollback_log="$temporary/bootstrap-server-install-failure-rollback.log"
     : > "$rollback_log"
-    load_service_config() { export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no; }
+    load_service_config() { :; }
     require_bootstrap_tty() { :; }
     doctor() { :; }
     prepare() { :; }
@@ -751,28 +612,14 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     [[ "$(< "$rollback_log")" == 'server-stop --confirm STOP IMESSAGE PROXY SERVER' ]] ||
       fail 'bootstrap did not contain a possibly loaded server after install failure'
   )
-  expect_failure "public bootstrap requires --confirm 'EXPOSE IMESSAGE PROXY PUBLICLY'" \
-    bootstrap --config /private/service.env --admin-name first-admin --public
 
   (
     render_server_agent_to() { printf '%s\n' 'new server definition' > "$1"; }
     expect_failure 'staged native LaunchAgent does not match current configuration' \
       require_current_server_agent
   )
-  (
-    render_edge_agent_to() { printf '%s\n' 'new edge definition' > "$1"; }
-    expect_failure 'staged edge LaunchAgent does not match current configuration' \
-      require_current_edge_agent
-  )
-
   expect_failure 'server-stop confirmation did not match' server_stop 'not confirmed'
   expect_failure 'server-restart confirmation did not match' server_restart 'not confirmed'
-  expect_failure 'edge-install confirmation did not match' edge_install 'not confirmed'
-  expect_failure 'edge-restart confirmation did not match' edge_restart 'not confirmed'
-  (
-    export IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS='no'
-    expect_failure 'set IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=yes' require_public_edge_inputs
-  )
 
   (
     launchctl() {
@@ -860,24 +707,16 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     require_macos() { :; }
     require_safe_runtime_root() { :; }
     require_command() { :; }
-    require_edge_stopped() { :; }
     check_host() { :; }
     require_current_server_agent() { :; }
-    require_current_edge_agent() { :; }
-    require_public_edge_inputs() { :; }
     require_safe_launch_agent_target() {
       mkdir -p "$(dirname "$1")"
       [[ ! -L "$1" ]] || fail "refusing test LaunchAgent symlink: $1"
     }
-    prepare_edge_log() { :; }
-    socket_ready() { return 0; }
     server_ready() { return 0; }
     wait_for_socket() { return 0; }
     wait_for_socket_absent() { return 0; }
     wait_for_service_absent() { return 0; }
-    wait_for_edge_ready() { return 0; }
-    edge_ready() { return 0; }
-    service_running() { return 0; }
     lsof() { return 1; }
     launchctl() { mock_launchctl "$@"; }
   }
@@ -891,7 +730,6 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
 
   mkdir -p "$(dirname "$SERVER_PLIST_TARGET")"
   printf '%s\n' 'installed server drift' > "$SERVER_PLIST_TARGET"
-  printf '%s\n' 'installed edge drift' > "$EDGE_PLIST_TARGET"
   (
     setup_lifecycle_prerequisites
     reset_lifecycle_case server-installed-drift
@@ -909,21 +747,8 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     assert_not_contains 'bootout ' "$lifecycle_call_log"
     assert_contains 'already stopped' "$temporary/server-stop-absent.out"
   )
-  (
-    setup_lifecycle_prerequisites
-    reset_lifecycle_case edge-installed-drift
-    edge_loaded() { return 1; }
-    expect_failure 'installed edge LaunchAgent is stale' edge_start
-    [[ ! -s "$lifecycle_call_log" ]] ||
-      fail 'edge-start called launchctl for an installed plist drift'
-  )
   install -m 600 "$SERVER_PLIST_STATE" "$SERVER_PLIST_TARGET"
-  install -m 600 "$EDGE_PLIST_STATE" "$EDGE_PLIST_TARGET"
 
-  (
-    edge_loaded() { return 2; }
-    expect_failure 'could not determine public-edge LaunchAgent state' require_edge_stopped
-  )
   (
     setup_lifecycle_prerequisites
     reset_lifecycle_case server-state-error
@@ -931,25 +756,6 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     expect_failure 'could not determine native LaunchAgent state' server_install
     [[ ! -s "$lifecycle_call_log" ]] ||
       fail 'server-install mutated launchd after an inventory error'
-  )
-  (
-    setup_lifecycle_prerequisites
-    reset_lifecycle_case edge-state-error
-    edge_loaded() { return 2; }
-    expect_failure 'could not determine public-edge LaunchAgent state' \
-      edge_install 'EXPOSE IMESSAGE PROXY PUBLICLY'
-    [[ ! -s "$lifecycle_call_log" ]] ||
-      fail 'edge-install mutated launchd after an inventory error'
-  )
-
-  (
-    setup_lifecycle_prerequisites
-    reset_lifecycle_case edge-port-conflict
-    edge_loaded() { return 1; }
-    lsof() { return 0; }
-    expect_failure 'TCP port 8080 already has a listener' edge_start
-    [[ ! -s "$lifecycle_call_log" ]] ||
-      fail 'edge-start mutated launchd after detecting a port conflict'
   )
 
   (
@@ -1069,64 +875,6 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     expect_failure 'native LaunchAgent restart bootstrap failed and was disabled again' \
       server_restart 'RESTART IMESSAGE PROXY SERVER'
     assert_rollback "$SERVER_LABEL" "$lifecycle_call_log"
-  )
-
-  (
-    setup_lifecycle_prerequisites
-    reset_lifecycle_case edge-install-bootstrap
-    edge_loaded() { return 1; }
-    mock_bootstrap=fail
-    expect_failure 'public-edge LaunchAgent bootstrap failed and was disabled again' \
-      edge_install 'EXPOSE IMESSAGE PROXY PUBLICLY'
-    assert_rollback "$EDGE_LABEL" "$lifecycle_call_log"
-  )
-  (
-    setup_lifecycle_prerequisites
-    reset_lifecycle_case edge-start-readiness
-    edge_loaded() { return 1; }
-    wait_for_edge_ready() { return 1; }
-    expect_failure 'public edge did not become ready and was disabled' edge_start
-    assert_rollback "$EDGE_LABEL" "$lifecycle_call_log"
-  )
-  (
-    setup_lifecycle_prerequisites
-    reset_lifecycle_case edge-rollback-disable-failure
-    edge_loaded() { return 1; }
-    wait_for_edge_ready() { return 1; }
-    mock_disable=fail
-    expect_failure 'URGENT: automatic public-edge rollback could not confirm containment' \
-      edge_start
-    assert_rollback "$EDGE_LABEL" "$lifecycle_call_log"
-  )
-  (
-    setup_lifecycle_prerequisites
-    reset_lifecycle_case edge-rollback-bootout-failure
-    edge_loaded() { return 1; }
-    wait_for_edge_ready() { return 1; }
-    wait_for_service_absent() { return 1; }
-    mock_bootout=fail
-    expect_failure 'URGENT: automatic public-edge rollback could not confirm containment' \
-      edge_start
-    assert_rollback "$EDGE_LABEL" "$lifecycle_call_log"
-  )
-  (
-    setup_lifecycle_prerequisites
-    reset_lifecycle_case edge-restart-unload
-    edge_loaded() { return 0; }
-    mock_bootout=fail
-    expect_failure 'public-edge LaunchAgent could not be unloaded; its label was disabled' \
-      edge_restart 'RESTART IMESSAGE PROXY EDGE'
-    assert_contains "disable gui/$(id -u)/$EDGE_LABEL" "$lifecycle_call_log"
-    assert_not_contains 'bootstrap ' "$lifecycle_call_log"
-  )
-  (
-    setup_lifecycle_prerequisites
-    reset_lifecycle_case edge-restart-bootstrap
-    edge_loaded() { return 0; }
-    mock_bootstrap=fail
-    expect_failure 'public-edge restart bootstrap failed and was disabled again' \
-      edge_restart 'RESTART IMESSAGE PROXY EDGE'
-    assert_rollback "$EDGE_LABEL" "$lifecycle_call_log"
   )
 )
 
