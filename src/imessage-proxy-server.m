@@ -3005,6 +3005,30 @@ static BOOL WriteBootstrapToken(NSString *token) {
     return YES;
 }
 
+// Closing a TCP connection while the peer is still writing sends it a reset,
+// and the response we just wrote is discarded unread. That is how a client
+// learns nothing from the 413 and 431 the request caps exist to report: it is
+// still uploading when we answer. Half-close, then read what is already in
+// flight until the peer gives up, so the response is delivered before the
+// socket goes away. Bounded, because the point is to answer an over-limit
+// request rather than to keep reading one.
+static void CloseAfterResponse(int fileDescriptor) {
+    static const int drainMilliseconds = 250;
+    static const size_t drainLimit = 64 * 1024;
+    shutdown(fileDescriptor, SHUT_WR);
+    struct pollfd waiting = {.fd = fileDescriptor, .events = POLLIN};
+    char scratch[4096];
+    size_t drained = 0;
+    while (drained < drainLimit && poll(&waiting, 1, drainMilliseconds) > 0) {
+        ssize_t got = read(fileDescriptor, scratch, sizeof(scratch));
+        if (got <= 0) {
+            break;
+        }
+        drained += (size_t)got;
+    }
+    close(fileDescriptor);
+}
+
 static void SendResponse(int fileDescriptor, IMPHTTPResponse *response) {
     NSMutableString *headers = [NSMutableString
         // The browser-facing headers the edge used to add are emitted here now,
@@ -3178,7 +3202,7 @@ static BOOL RunServer(IMPConfiguration *configuration, NSError **error) {
                                  action:@"server.overloaded"
                                 started:NSDate.date];
             SendResponse(client, response);
-            close(client);
+            CloseAfterResponse(client);
             continue;
         }
         dispatch_group_async(clientGroup, clients, ^{
@@ -3199,7 +3223,7 @@ static BOOL RunServer(IMPConfiguration *configuration, NSError **error) {
                                           started:requestStarted]
                         : [handler responseForRequest:request requestID:requestID];
                 SendResponse(client, response);
-                close(client);
+                CloseAfterResponse(client);
                 dispatch_semaphore_signal(slots);
             }
         });
