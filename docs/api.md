@@ -17,8 +17,9 @@ Use the standard header on every example:
 Authorization: Bearer imp_REPLACE_WITH_YOUR_KEY
 ```
 
-Never disable certificate verification. Public mode uses an ordinary ACME
-certificate for the configured hostname.
+Never disable certificate verification on a proxy you put in front. This service
+itself speaks plain HTTP on loopback, so the base URL is
+`http://127.0.0.1:8765` unless you changed the port.
 
 ## Scopes
 
@@ -390,14 +391,10 @@ unified-log category:
 Unknown `/api` routes authenticate before returning `404`, so route discovery
 does not create an unauthenticated side channel.
 
-Caddy or the operating system can reject a malformed connection before the API
-route exists—for example, an over-limit request header can receive a plain
-`431`. Such pre-routing transport responses cannot carry the API problem schema
-or its complete response-header set. They perform no API operation. The supplied
-Caddy configuration still removes request objects and URIs from runtime error
-logs.
+The server can reject a malformed connection before the API route exists - for
+example, an over-limit request header receives a plain `431`. Such pre-routing
+responses cannot carry the API problem schema or its complete response-header
+set, and they perform no API operation.
 
-A routed edge failure also receives a UUID-shaped `request_id`, but the
-privacy-first edge does not emit an access/error record for that request. Treat
-that value as response correlation for the client, not as a promise that every
-edge failure appears in a log.
+If you put your own proxy in front, it may also answer before the request ever
+reaches this service. Those responses are its concern, not this API's.

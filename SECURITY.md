@@ -76,4 +76,4 @@ If compromise is suspected:
    port mappings, and public IPv4 network path.
 5. Update to a fixed release before restoring service.
 
-See [Security model](docs/security.md) for preventive controls and [Operations](docs/operations.md) for rotation and recovery procedures.
+See [Security model](docs/security.md) for preventive controls and [Install and operate](docs/install.md) for rotation and recovery procedures.

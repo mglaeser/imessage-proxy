@@ -221,7 +221,7 @@ fi
 # The uninstaller must be documented where an operator will look for it.
 grep -Fq 'scripts/uninstall.sh' "$REPOSITORY/README.md" ||
   fail 'README does not document the uninstaller'
-grep -Fq 'scripts/uninstall.sh' "$REPOSITORY/docs/operations.md" ||
-  fail 'operations guide does not document the uninstaller'
+grep -Fq 'scripts/uninstall.sh' "$REPOSITORY/docs/install.md" ||
+  fail 'install guide does not document the uninstaller'
 
 printf '%s\n' 'iMessage Proxy uninstaller tests passed.'

@@ -281,12 +281,15 @@ path_already_output="$(
 [[ ! -s "$path_already_probe/.zshrc" ]] ||
   fail 'the installer edited a startup file that already had the prefix on PATH'
 
-# README must advertise the one-liner before any manual instructions.
+# The README leads with the one-liner and delegates the long form to docs, so
+# that the front page stays short enough to actually be read.
 readme_oneliner="$(grep -n 'scripts/install.sh | bash' "$REPOSITORY/README.md" | head -1 | cut -d: -f1)"
-readme_manual="$(grep -n '^## Install and run manually' "$REPOSITORY/README.md" | head -1 | cut -d: -f1)"
 [[ -n "$readme_oneliner" ]] || fail 'README does not advertise the installer one-liner'
-[[ -n "$readme_manual" ]] || fail 'README is missing the manual installation section'
-((readme_oneliner < readme_manual)) ||
-  fail 'README must present the one-liner before the manual instructions'
+((readme_oneliner < 60)) ||
+  fail "README buries the one-liner at line $readme_oneliner"
+grep -Fq 'docs/install.md' "$REPOSITORY/README.md" ||
+  fail 'README does not link to the install guide'
+[[ "$(grep -c '' "$REPOSITORY/README.md")" -le 220 ]] ||
+  fail "README has grown back to $(grep -c '' "$REPOSITORY/README.md") lines"
 
 printf '%s\n' 'iMessage Proxy installer tests passed.'
