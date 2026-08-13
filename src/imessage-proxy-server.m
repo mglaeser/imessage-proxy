@@ -980,24 +980,12 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
     // exposure gate, a pinned Caddy - is gone, so a plist still carrying any of
     // it is a stale plist and refused here rather than silently ignored.
     NSSet<NSString *> *recognized = [NSSet setWithArray:@[
-        @"IMESSAGE_PROXY_PORT",
-        @"IMESSAGE_PROXY_DATABASE_PATH",
-        @"IMESSAGE_PROXY_MESSAGES_DATABASE_PATH",
-        @"IMESSAGE_PROXY_ALLOWED_TARGETS_FILE",
-        @"IMESSAGE_PROXY_IMSG_BIN",
-        @"IMESSAGE_PROXY_EXPECTED_IMSG_VERSION",
-        @"IMESSAGE_PROXY_IMSG_SHA256",
-        @"IMESSAGE_PROXY_MAX_CONCURRENCY",
-        @"IMESSAGE_PROXY_READ_TIMEOUT_SECONDS",
-        @"IMESSAGE_PROXY_SEND_TIMEOUT_SECONDS",
-        @"IMESSAGE_PROXY_SOCKET_TIMEOUT_SECONDS",
-        @"IMESSAGE_PROXY_API_KEY",
-        @"IMESSAGE_PROXY_CONFIG",
-        @"IMESSAGE_PROXY_HOME",
-        @"IMESSAGE_PROXY_SOURCE_DIR",
-        @"IMESSAGE_PROXY_UI_DIR",
-        @"IMESSAGE_PROXY_URL",
-        @"IMESSAGE_PROXY_VERSION"
+        @"IMESSAGE_PROXY_PORT", @"IMESSAGE_PROXY_DATABASE_PATH", @"IMESSAGE_PROXY_MESSAGES_DATABASE_PATH",
+        @"IMESSAGE_PROXY_ALLOWED_TARGETS_FILE", @"IMESSAGE_PROXY_IMSG_BIN", @"IMESSAGE_PROXY_EXPECTED_IMSG_VERSION",
+        @"IMESSAGE_PROXY_IMSG_SHA256", @"IMESSAGE_PROXY_MAX_CONCURRENCY", @"IMESSAGE_PROXY_READ_TIMEOUT_SECONDS",
+        @"IMESSAGE_PROXY_SEND_TIMEOUT_SECONDS", @"IMESSAGE_PROXY_SOCKET_TIMEOUT_SECONDS", @"IMESSAGE_PROXY_API_KEY",
+        @"IMESSAGE_PROXY_CONFIG", @"IMESSAGE_PROXY_HOME", @"IMESSAGE_PROXY_SOURCE_DIR", @"IMESSAGE_PROXY_UI_DIR",
+        @"IMESSAGE_PROXY_URL", @"IMESSAGE_PROXY_VERSION"
     ]];
     for (NSString *name in environment) {
         if ([name hasPrefix:@"IMESSAGE_PROXY_"] && ![recognized containsObject:name]) {
@@ -1045,8 +1033,8 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
 
     if (![configuration.uiDirectory hasPrefix:@"/"] || configuration.uiDirectory.length == 0) {
         if (error != NULL) {
-            *error = ServerError(IMPServerErrorInvalidConfiguration,
-                                 @"IMESSAGE_PROXY_UI_DIR must be an absolute directory");
+            *error =
+                ServerError(IMPServerErrorInvalidConfiguration, @"IMESSAGE_PROXY_UI_DIR must be an absolute directory");
         }
         return nil;
     }
@@ -3094,9 +3082,8 @@ static BOOL RunServer(IMPConfiguration *configuration, NSError **error) {
         int reason = errno;
         close(server);
         return ServerStartupFailure(error,
-                                    reason == EADDRINUSE
-                                        ? @"the configured port is already in use"
-                                        : @"could not bind the loopback port",
+                                    reason == EADDRINUSE ? @"the configured port is already in use"
+                                                         : @"could not bind the loopback port",
                                     "socket_bind_failed");
     }
     if (listen(server, 32) != 0) {
