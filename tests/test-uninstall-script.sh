@@ -202,12 +202,16 @@ for label in \
   grep -Fq "$label" "$UNINSTALLER" ||
     fail "uninstaller ignores a known launchd label: $label"
 done
-for cli_label in SERVER_LABEL EDGE_LABEL; do
-  grep -Fq "readonly $cli_label='$(awk -F"'" \
-    "/^readonly $cli_label=/ {print \$2}" "$REPOSITORY/bin/imessage-proxy")'" \
-    "$UNINSTALLER" ||
-    fail "uninstaller launchd label disagrees with the CLI: $cli_label"
-done
+# Only the native label still exists in the CLI. The edge label is now legacy, in
+# the same sense as the pre-1.0 Stella one: the product no longer creates it, but
+# an operator upgrading from a release that did would otherwise be left with a
+# public edge running and nothing to remove it, so the uninstaller keeps both.
+grep -Fq "readonly SERVER_LABEL='$(awk -F"'" \
+  '/^readonly SERVER_LABEL=/ {print $2}' "$REPOSITORY/bin/imessage-proxy")'" \
+  "$UNINSTALLER" ||
+  fail 'uninstaller launchd label disagrees with the CLI: SERVER_LABEL'
+grep -Fq "readonly EDGE_LABEL=" "$UNINSTALLER" ||
+  fail 'uninstaller no longer removes the legacy public edge, so an upgrade would leave it running'
 
 # The product CLI must keep exposing no state-removal action of its own.
 if grep -Eq '^[[:space:]]+(uninstall|purge|reset)\)' "$REPOSITORY/bin/imessage-proxy"; then

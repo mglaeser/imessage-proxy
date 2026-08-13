@@ -25,7 +25,6 @@ SHELL_SOURCES := \
 	bin/imessage-proxy \
 	scripts/install.sh \
 	scripts/uninstall.sh \
-	tests/test-caddy-edge.sh \
 	tests/test-imessage-proxy-server.sh \
 	tests/test-imessage-proxy-cli.sh \
 	tests/test-install-script.sh \
@@ -33,8 +32,6 @@ SHELL_SOURCES := \
 	tests/test-bash-compatibility.sh \
 	tests/fixtures/fake-imsg.sh
 CONFIG_FILES := \
-	config/Caddyfile \
-	config/io.github.mglaeser.imessage-proxy.edge.plist.in \
 	config/io.github.mglaeser.imessage-proxy.plist.in \
 	config/imessage-proxy.env.example
 WEB_FILES := web/index.html web/app.js web/styles.css
@@ -115,25 +112,12 @@ lint: _require-node ## Check Objective-C, shell, Markdown, JavaScript, and confi
 	@command -v npm >/dev/null 2>&1 || { printf 'error: npm is required\n' >&2; exit 127; }
 	@test -x node_modules/.bin/markdownlint-cli2 && test -x node_modules/.bin/redocly || { \
 		printf 'error: run npm ci --ignore-scripts --no-audit --no-fund to install locked validation tools\n' >&2; exit 127; }
-	@command -v caddy >/dev/null 2>&1 || { printf 'error: caddy is required\n' >&2; exit 127; }
-	@test "$$(caddy version 2>/dev/null | awk '{print $$1}')" = v2.11.4 || { printf 'error: Caddy 2.11.4 is required for validation\n' >&2; exit 1; }
 	clang-format --dry-run --Werror $(SOURCES) $(HEADERS) $(TEST_C_SOURCES)
 	shellcheck $(SHELL_SOURCES)
 	npm run --silent lint:markdown
 	npm run --silent lint:openapi
 	@for source in $(JAVASCRIPT_SOURCES); do node --check "$$source"; done
 	@if [[ "$$(uname -s)" == Darwin ]]; then plutil -lint config/*.plist.in >/dev/null; fi
-	@temporary="$$(mktemp -d)"; \
-		trap 'rm -rf -- "$$temporary"' EXIT; \
-		IMESSAGE_PROXY_API_HOST=imessage-proxy.invalid \
-		IMESSAGE_PROXY_ACME_EMAIL=ci@example.invalid \
-		IMESSAGE_PROXY_EDGE_LOG_PATH="$$temporary/edge.log" \
-		IMESSAGE_PROXY_HTTP_PORT=8080 IMESSAGE_PROXY_HTTPS_PORT=8443 \
-		IMESSAGE_PROXY_PUBLIC_BIND=127.0.0.1 \
-		IMESSAGE_PROXY_SOCKET_PATH="$$temporary/server.sock" \
-		IMESSAGE_PROXY_UI_DIR="$(CURDIR)/web" \
-		XDG_CONFIG_HOME="$$temporary/config" XDG_DATA_HOME="$$temporary/data" \
-			caddy adapt --config config/Caddyfile --adapter caddyfile --validate >/dev/null
 
 format: ## Rewrite Objective-C sources in the project's clang-format style.
 	@command -v clang-format >/dev/null 2>&1 || { printf 'error: clang-format is required\n' >&2; exit 127; }
@@ -164,8 +148,6 @@ uninstall: ## Remove only files installed by this Makefile; preserve all runtime
 		"$(INSTALL_DATADIR)/src/imessage-proxy-server.m" \
 		"$(INSTALL_DATADIR)/src/api-key-store.m" \
 		"$(INSTALL_DATADIR)/src/api-key-store.h" \
-		"$(INSTALL_DATADIR)/config/Caddyfile" \
-		"$(INSTALL_DATADIR)/config/io.github.mglaeser.imessage-proxy.edge.plist.in" \
 		"$(INSTALL_DATADIR)/config/io.github.mglaeser.imessage-proxy.plist.in" \
 		"$(INSTALL_DATADIR)/config/imessage-proxy.env.example" \
 		"$(INSTALL_DATADIR)/web/index.html" \
