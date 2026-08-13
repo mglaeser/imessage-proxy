@@ -189,7 +189,6 @@ jobs:
           test -f "$stage/usr/local/share/imessage-proxy/VERSION"
           test -f "$stage/usr/local/share/imessage-proxy/src/imessage-proxy-server.m"
           test -f "$stage/usr/local/share/imessage-proxy/src/api-key-store.h"
-          test -f "$stage/usr/local/share/imessage-proxy/config/io.github.mglaeser.imessage-proxy.edge.plist.in"
           test -f "$stage/usr/local/share/imessage-proxy/config/io.github.mglaeser.imessage-proxy.plist.in"
           test -f "$stage/usr/local/share/imessage-proxy/web/index.html"
           make uninstall DESTDIR="$stage" PREFIX=/usr/local
