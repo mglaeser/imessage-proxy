@@ -23,9 +23,48 @@ NSString *const IMPAPIKeyCreationRecordKey = @"record";
 NSString *const IMPAPIKeyCreationTokenKey = @"key";
 
 static const int kIMPApplicationID = 0x494d504b; // "IMPK"
-static const int kIMPSchemaVersion = 5;
-// SHA-256 of the ordered non-internal sqlite_master object signature; update only with a schema bump.
-static NSString *const kIMPSchemaFingerprint = @"5b38d0632f023b90edb880db5fdc0bc7db17b496ef03269d22ee7f45bcf61fb9";
+static const int kIMPSchemaVersion = 6;
+static const int kIMPMigratableSchemaVersion = 5;
+// SHA-256 of the ordered non-internal sqlite_master object signature; update only
+// with a schema bump. tests/test-schema-fingerprint.mjs recomputes this from the
+// DDL in this file and fails if the two disagree, because a stale value here
+// would refuse to open every database in the field.
+static NSString *const kIMPSchemaFingerprint = @"223b40977c9f54e55e35a65d003934c62e8376b11ccedc139b2bd212846d69e1";
+
+// The audit table and its indexes are defined once and executed by both the
+// fresh install and the version-5 migration. The fingerprint above is a hash of
+// the exact CREATE text SQLite stores, so a migrated database whose DDL differed
+// from a fresh one by a single character would refuse to open. Sharing the text
+// makes that divergence impossible rather than merely unlikely.
+static const char *const kIMPAuditRecordsDDL =
+    "CREATE TABLE audit_records ("
+    "request_uuid TEXT NOT NULL CHECK(length(request_uuid)=36),"
+    "key_uuid TEXT REFERENCES api_keys(uuid) ON DELETE SET NULL,"
+    "target_key_uuid TEXT CHECK(target_key_uuid IS NULL OR length(target_key_uuid)=36),"
+    "source TEXT NOT NULL CHECK(length(source) BETWEEN 1 AND 64),"
+    "action TEXT NOT NULL CHECK(action IN ("
+    "'request.invalid','request.rate_limited','auth.unavailable','auth.rate_limited',"
+    "'auth.reject','origin.reject','route.not_found','status.read','chats.list','chats.read','background.read',"
+    "'messages.history','scheduled.list','statistics.read','messages.send','keys.list',"
+    "'keys.read','keys.create','keys.revoke','audit.list','targets.read','targets.replace',"
+    "'server.overloaded')) ,"
+    "phase TEXT NOT NULL CHECK(phase IN ('attempted','final')) ,"
+    "status INTEGER CHECK(status IS NULL OR status BETWEEN 100 AND 599),"
+    "duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms>=0),"
+    "created_at INTEGER NOT NULL CHECK(created_at>0),"
+    "PRIMARY KEY(request_uuid,phase),"
+    "CHECK((phase='attempted' AND status IS NULL AND duration_ms IS NULL) OR "
+    "(phase='final' AND status IS NOT NULL AND duration_ms IS NOT NULL))"
+    ");";
+static const char *const kIMPAuditIndexesDDL =
+    "CREATE INDEX audit_created_idx ON audit_records(created_at DESC);"
+    "CREATE INDEX audit_key_idx ON audit_records(key_uuid,created_at DESC);"
+    "CREATE INDEX audit_target_key_idx ON audit_records(target_key_uuid,created_at DESC);";
+static const char *const kIMPAuditMigrationCopyDDL =
+    "INSERT INTO audit_records(request_uuid,key_uuid,target_key_uuid,source,action,phase,status,duration_ms,"
+    "created_at) SELECT request_uuid,key_uuid,target_key_uuid,source,action,phase,status,duration_ms,created_at "
+    "FROM audit_records_v5;"
+    "DROP TABLE audit_records_v5;";
 static const NSUInteger kIMPRawKeyLength = 32;
 static const NSUInteger kIMPRequestHashLength = 32;
 static const NSUInteger kIMPMaximumNameBytes = 80;
@@ -519,7 +558,7 @@ static BOOL IMPValidateAuditAction(NSString *action, NSError **error) {
         @"chats.list",       @"chats.read",           @"background.read",  @"messages.history",
         @"scheduled.list",   @"statistics.read",      @"messages.send",    @"keys.list",
         @"keys.read",        @"keys.create",          @"keys.revoke",      @"audit.list",
-        @"server.overloaded"
+        @"targets.read",     @"targets.replace",      @"server.overloaded"
     ]];
     if (![allowed containsObject:action]) {
         IMPSetError(error, IMPAPIKeyStoreErrorInvalidArgument, @"The audit action is invalid.");
@@ -898,7 +937,8 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
 
     BOOL fresh = applicationID == 0 && schemaVersion == 0 && userObjectCount == 0;
     BOOL current = applicationID == kIMPApplicationID && schemaVersion == kIMPSchemaVersion;
-    if (!fresh && !current) {
+    BOOL migratable = applicationID == kIMPApplicationID && schemaVersion == kIMPMigratableSchemaVersion;
+    if (!fresh && !current && !migratable) {
         IMPSetError(error, IMPAPIKeyStoreErrorSchemaMismatch, @"The API key database schema is unsupported.");
         return NO;
     }
@@ -962,31 +1002,38 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
             "(state!='in_progress' AND response_status IS NOT NULL AND response_body IS NOT NULL))"
             ");"
             "CREATE INDEX idempotency_updated_idx ON idempotency_records(updated_at);"
-            "CREATE TABLE audit_records ("
-            "request_uuid TEXT NOT NULL CHECK(length(request_uuid)=36),"
-            "key_uuid TEXT REFERENCES api_keys(uuid) ON DELETE SET NULL,"
-            "target_key_uuid TEXT CHECK(target_key_uuid IS NULL OR length(target_key_uuid)=36),"
-            "source TEXT NOT NULL CHECK(length(source) BETWEEN 1 AND 64),"
-            "action TEXT NOT NULL CHECK(action IN ("
-            "'request.invalid','request.rate_limited','auth.unavailable','auth.rate_limited',"
-            "'auth.reject','origin.reject','route.not_found','status.read','chats.list','chats.read','background.read',"
-            "'messages.history','scheduled.list','statistics.read','messages.send','keys.list',"
-            "'keys.read','keys.create','keys.revoke','audit.list','server.overloaded')) ,"
-            "phase TEXT NOT NULL CHECK(phase IN ('attempted','final')) ,"
-            "status INTEGER CHECK(status IS NULL OR status BETWEEN 100 AND 599),"
-            "duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms>=0),"
-            "created_at INTEGER NOT NULL CHECK(created_at>0),"
-            "PRIMARY KEY(request_uuid,phase),"
-            "CHECK((phase='attempted' AND status IS NULL AND duration_ms IS NULL) OR "
-            "(phase='final' AND status IS NOT NULL AND duration_ms IS NOT NULL))"
-            ");"
-            "CREATE INDEX audit_created_idx ON audit_records(created_at DESC);"
-            "CREATE INDEX audit_key_idx ON audit_records(key_uuid,created_at DESC);"
-            "CREATE INDEX audit_target_key_idx ON audit_records(target_key_uuid,created_at DESC);"
-            "PRAGMA application_id=1229803595;"
-            "PRAGMA user_version=5;",
+            "PRAGMA application_id=1229803595;",
             error);
+        created = created && IMPExecute(_database, kIMPAuditRecordsDDL, error);
+        created = created && IMPExecute(_database, kIMPAuditIndexesDDL, error);
+        created = created && IMPExecute(_database, "PRAGMA user_version=6;", error);
         if (!created || !IMPCommit(_database, error)) {
+            IMPRollback(_database);
+            return NO;
+        }
+    }
+
+    // Version 6 adds the two recipient-allowlist actions to the audit table's
+    // action constraint. Rebuilding is the only way to change a CHECK in SQLite,
+    // so the rows are copied into a new table rather than the operator being
+    // told to discard their keys and audit history for a two-word addition.
+    //
+    // The old table is renamed out of the way first and the new one created
+    // under the real name, because renaming a table INTO place makes SQLite
+    // store its name quoted, which would no longer match the fingerprint a fresh
+    // install produces. Every old action is present in the new constraint, so no
+    // row can be rejected; the whole rebuild is one transaction, so a failure
+    // leaves a version-5 database that still opens on the previous release.
+    if (migratable) {
+        if (!IMPExecute(_database, "BEGIN EXCLUSIVE", error)) {
+            return NO;
+        }
+        BOOL migrated = IMPExecute(_database, "ALTER TABLE audit_records RENAME TO audit_records_v5;", error);
+        migrated = migrated && IMPExecute(_database, kIMPAuditRecordsDDL, error);
+        migrated = migrated && IMPExecute(_database, kIMPAuditMigrationCopyDDL, error);
+        migrated = migrated && IMPExecute(_database, kIMPAuditIndexesDDL, error);
+        migrated = migrated && IMPExecute(_database, "PRAGMA user_version=6;", error);
+        if (!migrated || !IMPCommit(_database, error)) {
             IMPRollback(_database);
             return NO;
         }

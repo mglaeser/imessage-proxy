@@ -27,7 +27,7 @@ itself speaks plain HTTP on loopback, so the base URL is
 | --- | --- |
 | `messages:read` | Chats, background state, history, scheduled messages, and statistics |
 | `messages:send` | Allowlisted text sends |
-| `admin` | Audit/key administration and every read/send operation |
+| `admin` | Audit, key, and recipient-allowlist administration, and every read/send operation |
 
 `GET /api/status` accepts any valid key. A missing, malformed, expired, revoked,
 or unknown key returns the same `401` response. A valid key without the required
@@ -223,6 +223,24 @@ chat_id:42
 
 The allowlist has no wildcard. An empty file disables sending without disabling
 reads or key administration.
+
+### Managing the allowlist
+
+`GET /api/targets` returns the current list and `PUT /api/targets` replaces it.
+Both require `admin`, not `messages:send`: a credential that can send must not
+be able to widen the set of people it may send to. The same list is editable on
+the host with `imessage-proxy targets`, and in the console under **Recipients**.
+
+```json
+{"targets": ["+15551234567", "chat_id:42", "person@example.net"]}
+```
+
+`PUT` takes the whole list rather than a change to it, so two administrators
+editing at once cannot merge into a set neither approved. Up to 500 unique
+entries are accepted, each validated exactly as a send validates its target; one
+invalid entry rejects the request whole. The file is replaced atomically and
+re-read on the next send, so a change is effective immediately and no restart is
+needed.
 
 A successful command returns `202`:
 

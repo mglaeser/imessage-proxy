@@ -1272,6 +1272,106 @@ status="$(request '/api/audit-events?limit=0' --header "Authorization: Bearer $a
 assert_status 400 "$status"
 assert_problem 400
 
+# The allowlist decides who this machine may message, so reading and changing it
+# both require admin. A key that can send must not be able to widen the set of
+# people it may send to; that is the whole point of the allowlist existing.
+status="$(request /api/targets --header "Authorization: Bearer $send_key")"
+assert_status 403 "$status"
+assert_problem 403
+status="$(request /api/targets \
+  --request PUT \
+  --header "Authorization: Bearer $send_key" \
+  --header 'Content-Type: application/json' \
+  --data '{"targets":["attacker@example.test"]}')"
+assert_status 403 "$status"
+assert_problem 403
+if grep -Fq 'attacker@example.test' "$targets_path"; then
+  printf 'ERROR: a non-admin key changed the recipient allowlist\n' >&2
+  exit 1
+fi
+
+status="$(request /api/targets --header "Authorization: Bearer $admin_key")"
+assert_status 200 "$status"
+grep -Fq '"targets":[' "$response_body"
+grep -Fq '"person@example.test"' "$response_body"
+
+# Every rejected list must leave the file exactly as it was: a partially applied
+# allowlist is the one outcome an operator cannot detect by reading the console.
+install -m 0600 "$targets_path" "$temporary/allowed-targets.before-api"
+for invalid_body in \
+  '{"targets":["Alice"]}' \
+  '{"targets":["+01234567"]}' \
+  '{"targets":["chat_id:042"]}' \
+  '{"targets":["person @example.test"]}' \
+  '{"targets":["a@example.test","a@example.test"]}' \
+  '{"targets":["#person@example.test"]}' \
+  '{"targets":["a@example.test\nb@example.test"]}' \
+  '{"targets":[42]}' \
+  '{"targets":"person@example.test"}' \
+  '{"targets":[],"extra":1}' \
+  '{}'; do
+  status="$(request /api/targets \
+    --request PUT \
+    --header "Authorization: Bearer $admin_key" \
+    --header 'Content-Type: application/json' \
+    --data "$invalid_body")"
+  assert_status 400 "$status"
+  assert_problem 400
+  cmp -s "$targets_path" "$temporary/allowed-targets.before-api" || {
+    printf 'ERROR: a rejected allowlist still changed the file: %s\n' "$invalid_body" >&2
+    exit 1
+  }
+done
+
+# A replacement takes effect on the next send with no restart, in both directions.
+status="$(request /api/targets \
+  --request PUT \
+  --header "Authorization: Bearer $admin_key" \
+  --header 'Content-Type: application/json' \
+  --data '{"targets":["+15550000000"]}')"
+assert_status 200 "$status"
+grep -Fq '"+15550000000"' "$response_body"
+[[ "$(stat -f '%Lp' "$targets_path")" == 600 ]]
+sends_before="$(grep -c '^imsg send ' "$fake_imsg_log")"
+status="$(request /api/messages \
+  --header "Authorization: Bearer $send_key" \
+  --header 'Content-Type: application/json' \
+  --header 'Idempotency-Key: revoked-target-0001' \
+  --data '{"recipient":"person@example.test","text":"must not execute"}')"
+assert_status 403 "$status"
+assert_problem 403
+grep -Fq 'target-forbidden' "$response_body"
+[[ "$(grep -c '^imsg send ' "$fake_imsg_log")" == "$sends_before" ]]
+
+status="$(request /api/targets \
+  --request PUT \
+  --header "Authorization: Bearer $admin_key" \
+  --header 'Content-Type: application/json' \
+  --data '{"targets":[]}')"
+assert_status 200 "$status"
+status="$(request /api/messages \
+  --header "Authorization: Bearer $send_key" \
+  --header 'Content-Type: application/json' \
+  --header 'Idempotency-Key: empty-allowlist-0001' \
+  --data '{"recipient":"+15550000000","text":"must not execute"}')"
+assert_status 403 "$status"
+assert_problem 403
+[[ "$(grep -c '^imsg send ' "$fake_imsg_log")" == "$sends_before" ]]
+
+# The CLI and the API must agree, so a list written by one is served by the other.
+install -m 0600 "$temporary/allowed-targets.before-api" "$targets_path"
+status="$(request /api/targets --header "Authorization: Bearer $admin_key")"
+assert_status 200 "$status"
+grep -Fq '"person@example.test"' "$response_body"
+
+status="$(request /api/targets \
+  --request POST \
+  --header "Authorization: Bearer $admin_key" \
+  --header 'Content-Type: application/json' \
+  --data '{"targets":[]}')"
+assert_status 405 "$status"
+assert_problem 405
+
 # Audit persistence has request correlation and attempted/final mutation rows only.
 [[ "$(sqlite3 "$database_path" \
   "SELECT count(*) FROM audit_records WHERE request_uuid='$missing_request_id' AND action='auth.reject' AND phase='final' AND status=401;")" == 1 ]]
@@ -1287,6 +1387,15 @@ assert_problem 400
   "SELECT count(*) FROM audit_records WHERE action='keys.read' AND phase='final' AND status=200 AND target_key_uuid='$read_id';")" -ge 1 ]]
 [[ "$(sqlite3 "$database_path" \
   "SELECT count(*) FROM audit_records WHERE action='audit.list' AND phase='final' AND status=200;")" -ge 1 ]]
+# A mutation that is not audited is worse than one that is refused: these two
+# actions were added to the schema's action constraint in version 6, and a
+# missing row here means the constraint and the server disagree.
+[[ "$(sqlite3 "$database_path" \
+  "SELECT count(*) FROM audit_records WHERE action='targets.read' AND phase='final' AND status=200;")" -ge 1 ]]
+[[ "$(sqlite3 "$database_path" \
+  "SELECT count(*) FROM audit_records WHERE action='targets.replace' AND phase='final' AND status=200;")" -ge 1 ]]
+[[ "$(sqlite3 "$database_path" \
+  "SELECT count(*) FROM audit_records WHERE action='targets.read' AND phase='final' AND status=403;")" -ge 1 ]]
 
 # Plaintext credentials and request content never enter SQLite or native logs.
 for secret in "$admin_key" "$read_key" "$send_key" "$second_admin_key" "$expiring_key" "$unicode_key"; do

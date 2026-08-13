@@ -36,7 +36,7 @@ URL when it finishes.
 Allow one recipient, then send to them:
 
 ```bash
-echo 'person@example.net' >> "$HOME/Library/Application Support/iMessage Proxy/private/allowed-targets.txt"
+imessage-proxy targets add person@example.net
 
 curl --fail-with-body \
   --request POST \
@@ -72,6 +72,8 @@ analytics, third-party assets, or service worker.
 | `GET` | `/api/scheduled-messages` | `messages:read` | Future Send Later rows |
 | `GET` | `/api/statistics/messages` | `messages:read` | Message and media statistics |
 | `POST` | `/api/messages` | `messages:send` | Send an allowlisted iMessage |
+| `GET` | `/api/targets` | `admin` | List who may be messaged |
+| `PUT` | `/api/targets` | `admin` | Replace who may be messaged |
 | `GET` | `/api/audit-events` | `admin` | Bounded privacy-safe request metadata |
 | `GET` `POST` | `/api/keys` | `admin` | List keys, or create and reveal one once |
 | `GET` `DELETE` | `/api/keys/{id}` | `admin` | Read metadata, or revoke immediately |

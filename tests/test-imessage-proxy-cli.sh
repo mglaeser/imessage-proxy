@@ -59,6 +59,8 @@ help_text="$($CLI --help)"
 for expected in \
   'bootstrap --config FILE' \
   'api-key bootstrap-admin' \
+  'targets add TARGET' \
+  'targets remove TARGET' \
   'server-install' \
   'RESTART IMESSAGE PROXY SERVER' \
   'server-logs'; do
@@ -891,6 +893,82 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
       server_restart 'RESTART IMESSAGE PROXY SERVER'
     assert_rollback "$SERVER_LABEL" "$lifecycle_call_log"
   )
+)
+
+# The send allowlist is the one thing an operator edits after installing, so the
+# CLI has to behave like a tool and not like a text editor: refuse what the
+# server would refuse, never write a list the server would then reject whole, and
+# never silently treat an unreadable file as an empty one.
+# shellcheck disable=SC2030,SC2031,SC2329
+(
+  export HOME="$temporary/targets-home"
+  export IMESSAGE_PROXY_HOME="$HOME/Library/Application Support/iMessage Proxy"
+  export IMESSAGE_PROXY_SOURCE_DIR="$REPOSITORY"
+  mkdir -p "$IMESSAGE_PROXY_HOME/private"
+  chmod 700 "$HOME" "$IMESSAGE_PROXY_HOME" "$IMESSAGE_PROXY_HOME/private"
+
+  # shellcheck source=/dev/null
+  source "$CLI" >/dev/null 2>&1
+  require_macos() { return 0; }
+
+  targets_file="$IMESSAGE_PROXY_HOME/private/allowed-targets.txt"
+  printf '%s\n' '# comment' 'person@example.test' 'chat_id:42' > "$targets_file"
+  chmod 600 "$targets_file"
+
+  listed="$(targets list)"
+  [[ "$listed" == 'person@example.test
+chat_id:42' ]] || fail "targets list did not report the file: $listed"
+
+  targets add '+15551234567' >/dev/null
+  assert_contains '+15551234567' "$targets_file"
+  assert_contains 'person@example.test' "$targets_file"
+  [[ "$(stat -f '%Lp' "$targets_file")" == 600 ]] ||
+    fail 'targets add did not keep the allowlist private'
+  [[ "$(grep -c . "$targets_file")" == 7 ]] ||
+    fail 'targets add did not rewrite the file with its header and three entries'
+
+  # Nothing may be written that the server would refuse to parse.
+  for invalid in \
+    'Alice' \
+    '+01234567' \
+    'person @example.test' \
+    '-oProxyCommand@example.test' \
+    'chat_id:042' \
+    'chat_id:0' \
+    'a@b@c' \
+    '@example.test'; do
+    expect_failure 'not a valid target' targets add "$invalid"
+    assert_not_contains "$invalid" "$targets_file"
+  done
+
+  expect_failure 'already allowed' targets add 'person@example.test'
+  expect_failure 'not currently allowed' targets remove 'nobody@example.test'
+  expect_failure 'targets add requires exactly one target' targets add
+  expect_failure 'targets remove requires exactly one target' targets remove one two
+  expect_failure 'unknown targets subcommand' targets sync
+
+  targets remove 'person@example.test' >/dev/null
+  assert_not_contains 'person@example.test' "$targets_file"
+  assert_contains 'chat_id:42' "$targets_file"
+
+  # Removing the last entry must leave a valid empty allowlist, not a broken one.
+  targets remove 'chat_id:42' >/dev/null
+  targets remove '+15551234567' >/dev/null
+  if targets list | grep -Eq '@|chat_id:'; then
+    fail 'an emptied allowlist still lists entries'
+  fi
+  assert_contains 'An empty file disables sending' "$targets_file"
+  targets list | grep -Fq 'sending is disabled' ||
+    fail 'an emptied allowlist does not say that sending is disabled'
+
+  # A file this process may not safely read must stop the action, not read as an
+  # empty list that the next write would then make permanent.
+  chmod 644 "$targets_file"
+  expect_failure 'must not be group/world accessible' targets list
+  expect_failure 'must not be group/world accessible' targets add 'safe@example.test'
+  chmod 600 "$targets_file"
+  rm -f -- "$targets_file"
+  expect_failure 'recipient allowlist is missing' targets list
 )
 
 printf '%s\n' 'iMessage Proxy CLI lifecycle tests passed.'

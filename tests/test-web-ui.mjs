@@ -444,7 +444,12 @@ function enqueue(fetchMock, ...responses) {
   }
 }
 
-async function authenticate(harness, key = "admin-test-key", keys = []) {
+// Sign-in loads status, keys, and the recipient allowlist together, so every
+// authenticated test starts three responses deep. AUTHENTICATED_REQUESTS keeps
+// the index arithmetic in the tests below honest if that ever changes again.
+const AUTHENTICATED_REQUESTS = 3;
+
+async function authenticate(harness, key = "admin-test-key", keys = [], targets = []) {
   enqueue(
     harness.fetchMock,
     json(200, {
@@ -454,6 +459,7 @@ async function authenticate(harness, key = "admin-test-key", keys = []) {
       version: "1.0.0",
     }),
     json(200, { keys }),
+    json(200, { targets }),
   );
   harness.element("signin-key").value = key;
   await harness.element("signin-form").emit("submit");
@@ -495,6 +501,10 @@ test("markup and interactive controls retain their accessibility contracts", asy
   assert.match(markup, /id="toast" role="status" aria-live="polite" hidden/);
   assert.match(markup, /<dialog[^>]*id="created-key-dialog"[^>]*aria-labelledby="created-key-title"/);
   assert.match(markup, /<dialog[^>]*id="revoke-dialog"[^>]*aria-labelledby="revoke-title"/);
+  assert.match(markup, /<dialog[^>]*id="remove-target-dialog"[^>]*aria-labelledby="remove-target-title"/);
+  assert.match(markup, /id="targets-panel"[\s\S]*role="tabpanel"[\s\S]*aria-labelledby="targets-tab"/);
+  assert.match(markup, /id="allow-error" role="alert" hidden/);
+  assert.match(markup, /<label for="allow-value" id="allow-value-label">/);
   assert.match(markup, /role="tablist" aria-label="Management console"/);
   assert.match(markup, /id="overview-tab"[\s\S]*role="tab"[\s\S]*aria-controls="overview-panel"/);
   assert.match(markup, /id="playground-panel"[\s\S]*role="tabpanel"[\s\S]*aria-labelledby="playground-tab"/);
@@ -534,8 +544,9 @@ test("sign-in authenticates status and key loading and persists only in session 
     scopes: ["messages:send"],
   }]);
 
-  assert.equal(harness.fetchMock.requests.length, 2);
-  assert.deepEqual(harness.fetchMock.requests.map((request) => request.path), ["/api/status", "/api/keys"]);
+  assert.equal(harness.fetchMock.requests.length, AUTHENTICATED_REQUESTS);
+  assert.deepEqual(harness.fetchMock.requests.map((request) => request.path),
+    ["/api/status", "/api/keys", "/api/targets"]);
   for (const request of harness.fetchMock.requests) {
     assert.equal(request.options.headers.get("Authorization"), bearerValue(adminKey));
     assert.equal(request.options.headers.get("Accept"), "application/json, application/problem+json");
@@ -573,15 +584,17 @@ test("a tab-scoped session key restores authenticated state without another sign
         version: "1.0.0",
       }),
       json(200, { keys: [] }),
+      json(200, { targets: [] }),
     ],
     storedKey: adminKey,
   });
   await settle();
 
   assert.deepEqual(harness.sessionStorage.operations, [["get", storageKey]]);
-  assert.equal(harness.fetchMock.requests.length, 2);
-  assert.equal(harness.fetchMock.requests[0].options.headers.get("Authorization"), bearerValue(adminKey));
-  assert.equal(harness.fetchMock.requests[1].options.headers.get("Authorization"), bearerValue(adminKey));
+  assert.equal(harness.fetchMock.requests.length, AUTHENTICATED_REQUESTS);
+  for (const request of harness.fetchMock.requests) {
+    assert.equal(request.options.headers.get("Authorization"), bearerValue(adminKey));
+  }
   assert.equal(harness.element("signin-view").hidden, true);
   assert.equal(harness.element("console-view").hidden, false);
   assert.equal(harness.element("connection-label").textContent, "Healthy");
@@ -607,6 +620,9 @@ test("tabs expose every read endpoint through exact same-origin requests", async
   assert.equal(harness.element("playground-tab").getAttribute("aria-selected"), "true");
   const keyboardEvent = await harness.element("playground-tab").emitKey("ArrowRight");
   assert.equal(keyboardEvent.defaultPrevented, true);
+  assert.equal(harness.element("targets-panel").hidden, false);
+  assert.equal(harness.document.activeElement, harness.element("targets-tab"));
+  await harness.element("targets-tab").emitKey("ArrowRight");
   assert.equal(harness.element("keys-panel").hidden, false);
   assert.equal(harness.document.activeElement, harness.element("keys-tab"));
   await harness.element("keys-tab").emitKey("Home");
@@ -789,7 +805,7 @@ test("key creation sends the simple API payload and clears the one-time secret a
 
   await harness.element("create-form").emit("submit");
 
-  const createRequest = harness.fetchMock.requests[2];
+  const createRequest = harness.fetchMock.requests[AUTHENTICATED_REQUESTS];
   assert.equal(createRequest.path, "/api/keys");
   assert.equal(createRequest.options.method, "POST");
   assert.equal(createRequest.options.headers.get("Content-Type"), "application/json");
@@ -814,7 +830,7 @@ test("key creation sends the simple API payload and clears the one-time secret a
   assert.equal(harness.element("created-key").value, "");
   assert.equal(harness.element("copy-status").textContent, "");
   assert.equal(harness.element("copy-key-button").textContent, "Copy key");
-  assert.equal(harness.fetchMock.requests[3].path, "/api/keys");
+  assert.equal(harness.fetchMock.requests[AUTHENTICATED_REQUESTS + 1].path, "/api/keys");
   assert.equal(harness.element("key-count").textContent, "1 key");
   assert.match(harness.element("keys-body").textContent, /Notification client/);
 });
@@ -835,26 +851,130 @@ test("revocation requires confirmation, calls the encoded resource, and refreshe
   await revokeButton.emit("click");
   assert.equal(harness.element("revoke-dialog").open, true);
   assert.equal(harness.element("revoke-key-name").textContent, "Client one");
-  assert.equal(harness.fetchMock.requests.length, 2, "opening confirmation performs no request");
+  assert.equal(harness.fetchMock.requests.length, AUTHENTICATED_REQUESTS,
+    "opening confirmation performs no request");
   await harness.element("cancel-revoke").emit("click");
   assert.equal(harness.element("revoke-dialog").open, false);
-  assert.equal(harness.fetchMock.requests.length, 2);
+  assert.equal(harness.fetchMock.requests.length, AUTHENTICATED_REQUESTS);
 
   await revokeButton.emit("click");
   harness.fetchMock.enqueue(204, null, "");
   enqueue(harness.fetchMock, json(200, { keys: [] }));
   await harness.element("revoke-form").emit("submit");
 
-  const revokeRequest = harness.fetchMock.requests[2];
+  const revokeRequest = harness.fetchMock.requests[AUTHENTICATED_REQUESTS];
   assert.equal(revokeRequest.path, "/api/keys/client%2Fkey%201");
   assert.equal(revokeRequest.options.method, "DELETE");
   assert.equal(revokeRequest.options.headers.get("Authorization"), bearerValue("admin-test-key"));
-  assert.equal(harness.fetchMock.requests[3].path, "/api/keys");
+  assert.equal(harness.fetchMock.requests[AUTHENTICATED_REQUESTS + 1].path, "/api/keys");
   assert.equal(harness.element("revoke-dialog").open, false);
   assert.equal(harness.element("key-count").textContent, "0 keys");
   assert.equal(harness.element("keys-empty").hidden, false);
   assert.equal(harness.element("toast").textContent, "Client one was revoked.");
   assert.equal(harness.element("confirm-revoke").disabled, false);
+});
+
+test("the recipient allowlist is edited whole, validated locally, and confirmed before removal", async () => {
+  const harness = createHarness();
+  await authenticate(harness, "admin-test-key", [], ["chat_id:42", "+15551234567"]);
+
+  // The allowlist loads with the console and is presented in a stable order.
+  assert.equal(harness.fetchMock.requests[2].path, "/api/targets");
+  assert.equal(harness.fetchMock.requests[2].options.method, undefined, "listing is a plain GET");
+  assert.equal(harness.element("target-count").textContent, "2 recipients");
+  assert.deepEqual(
+    harness.element("targets-body").children.map((row) => row.children[0].textContent),
+    ["+15551234567", "chat_id:42"],
+  );
+  assert.deepEqual(
+    harness.element("targets-body").children.map((row) => row.children[1].textContent),
+    ["Phone number", "Chat"],
+  );
+
+  // A malformed recipient is refused in the browser, so nothing is sent.
+  const before = harness.fetchMock.requests.length;
+  for (const [candidate, fragment] of [
+    ["not-a-recipient", "exactly one @"],
+    ["+0155512345", "no leading zero"],
+    ["two@at@signs", "exactly one @"],
+    ["has space@example.net", "spaces or control characters"],
+    ["@example.net", "exactly one @"],
+  ]) {
+    harness.element("allow-value").value = candidate;
+    await harness.element("allow-form").emit("submit");
+    assert.equal(harness.element("allow-error").hidden, false, candidate);
+    assert.match(harness.element("allow-error").textContent, new RegExp(fragment), candidate);
+    assert.equal(harness.element("allow-value").getAttribute("aria-invalid"), "true", candidate);
+  }
+  harness.element("allow-value").value = "+15551234567";
+  await harness.element("allow-form").emit("submit");
+  assert.match(harness.element("allow-error").textContent, /already allowed/);
+  assert.equal(harness.fetchMock.requests.length, before, "local validation performs no request");
+
+  // Adding sends the whole list and re-renders from what the service stored.
+  enqueue(harness.fetchMock, json(200, { targets: ["chat_id:42", "+15551234567", "person@example.net"] }));
+  harness.element("allow-value").value = "  person@example.net  ";
+  await harness.element("allow-form").emit("submit");
+  await settle();
+  const addRequest = harness.fetchMock.requests.at(-1);
+  assert.equal(addRequest.path, "/api/targets");
+  assert.equal(addRequest.options.method, "PUT");
+  assert.equal(addRequest.options.headers.get("Content-Type"), "application/json");
+  assert.deepEqual(JSON.parse(addRequest.options.body), {
+    targets: ["+15551234567", "chat_id:42", "person@example.net"],
+  });
+  assert.equal(harness.element("target-count").textContent, "3 recipients");
+  assert.equal(harness.element("allow-value").value, "");
+  assert.equal(harness.element("toast").textContent, "person@example.net can now be messaged.");
+
+  // A chat is composed from the numeric id rather than typed as a prefix.
+  harness.element("allow-kind").value = "chat_id";
+  await harness.element("allow-kind").emit("change");
+  harness.element("allow-value").value = "7";
+  enqueue(harness.fetchMock, json(200, { targets: ["chat_id:7"] }));
+  await harness.element("allow-form").emit("submit");
+  await settle();
+  assert.deepEqual(JSON.parse(harness.fetchMock.requests.at(-1).options.body).targets.at(-1), "chat_id:7");
+
+  // Removal is confirmed first, and cancelling changes nothing.
+  const removeButton = harness.element("targets-body").children[0].children[2].children[0];
+  await removeButton.emit("click");
+  assert.equal(harness.element("remove-target-dialog").open, true);
+  assert.equal(harness.element("remove-target-name").textContent, "chat_id:7");
+  const beforeCancel = harness.fetchMock.requests.length;
+  await harness.element("cancel-remove-target").emit("click");
+  assert.equal(harness.element("remove-target-dialog").open, false);
+  assert.equal(harness.fetchMock.requests.length, beforeCancel, "cancelling performs no request");
+  assert.equal(harness.element("target-count").textContent, "1 recipient");
+
+  await removeButton.emit("click");
+  enqueue(harness.fetchMock, json(200, { targets: [] }));
+  await harness.element("remove-target-form").emit("submit");
+  await settle();
+  const removeRequest = harness.fetchMock.requests.at(-1);
+  assert.equal(removeRequest.options.method, "PUT");
+  assert.deepEqual(JSON.parse(removeRequest.options.body), { targets: [] });
+  assert.equal(harness.element("remove-target-dialog").open, false);
+  assert.equal(harness.element("targets-empty").hidden, false);
+  assert.equal(harness.element("target-count").textContent, "0 recipients");
+  assert.equal(harness.element("toast").textContent, "chat_id:7 can no longer be messaged.");
+  assert.equal(harness.element("confirm-remove-target").disabled, false);
+
+  // A rejected write leaves the table showing what the service still holds.
+  enqueue(harness.fetchMock, json(200, { targets: ["a@b.example"] }));
+  harness.element("allow-kind").value = "recipient";
+  await harness.element("allow-kind").emit("change");
+  harness.element("allow-value").value = "a@b.example";
+  await harness.element("allow-form").emit("submit");
+  await settle();
+  enqueue(harness.fetchMock, json(400, { detail: "Provide up to 500 unique targets." }));
+  harness.element("allow-value").value = "c@d.example";
+  await harness.element("allow-form").emit("submit");
+  await settle();
+  assert.equal(harness.element("allow-error").textContent, "Provide up to 500 unique targets.");
+  assert.equal(harness.element("target-count").textContent, "1 recipient");
+  assert.equal(harness.element("targets-body").children[0].children[0].textContent, "a@b.example");
+  assert.equal(harness.element("allow-button").disabled, false);
 });
 
 test("sign-out removes credentials, aborts the session, and clears sensitive UI state", async () => {
@@ -891,6 +1011,9 @@ test("sign-out removes credentials, aborts the session, and clears sensitive UI 
   assert.equal(harness.element("service-status").textContent, "Signed out");
   assert.equal(harness.element("key-count").textContent, "0 keys");
   assert.equal(harness.element("keys-body").children.length, 0);
+  assert.equal(harness.element("remove-target-dialog").open, false);
+  assert.equal(harness.element("target-count").textContent, "0 recipients");
+  assert.equal(harness.element("targets-body").children.length, 0);
 });
 
 test("network, API, clipboard, and authentication failures remain actionable and safe", async () => {
@@ -906,6 +1029,7 @@ test("network, API, clipboard, and authentication failures remain actionable and
     forbiddenHarness.fetchMock,
     json(200, { messages: { status: "ready" }, status: "ok" }),
     json(403, { detail: "scope denied" }),
+    json(403, { detail: "scope denied" }),
   );
   forbiddenHarness.element("signin-key").value = "read-only-key";
   await forbiddenHarness.element("signin-form").emit("submit");
@@ -915,7 +1039,7 @@ test("network, API, clipboard, and authentication failures remain actionable and
 
   const harness = createHarness();
   harness.fetchMock.enqueueFailure();
-  enqueue(harness.fetchMock, json(200, { keys: [] }));
+  enqueue(harness.fetchMock, json(200, { keys: [] }), json(200, { targets: [] }));
   harness.element("signin-key").value = "admin-test-key";
   await harness.element("signin-form").emit("submit");
   assert.equal(harness.element("console-view").hidden, false, "status failure does not hide key management");
