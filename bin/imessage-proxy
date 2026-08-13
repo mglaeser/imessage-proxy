@@ -157,7 +157,7 @@ usage() {
     '' \
     'Actions:' \
     '  doctor' \
-    '  bootstrap --config FILE --admin-name NAME [--expires-in-days 30]' \
+    '  bootstrap --config FILE --admin-name NAME [--expires-in-days 30] [--without-admin-key]' \
     '  prepare' \
     '  build-host' \
     '  check-host' \
@@ -862,7 +862,7 @@ bootstrap_failure_rollback() {
 }
 
 bootstrap() {
-  local admin_name='' config_path='' expires_days=30
+  local admin_name='' config_path='' create_admin_key=yes expires_days=30
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --config)
@@ -879,6 +879,10 @@ bootstrap() {
         [[ $# -ge 2 ]] || die '--expires-in-days requires a value'
         expires_days="$2"
         shift 2
+        ;;
+      --without-admin-key)
+        create_admin_key=no
+        shift
         ;;
       *) die "unknown bootstrap argument: $1" ;;
     esac
@@ -900,8 +904,14 @@ bootstrap() {
   bootstrap_server_may_be_loaded=yes
   trap bootstrap_failure_rollback EXIT
   server_install >&2
-  printf 'Bootstrap checks passed. Creating the first administrator as the final operation.\n' >&2
-  api_key_bootstrap bootstrap-admin --name "$admin_name" --expires-in-days "$expires_days"
+  if [[ "$create_admin_key" == yes ]]; then
+    printf 'Bootstrap checks passed. Creating the first administrator as the final operation.\n' >&2
+    api_key_bootstrap bootstrap-admin --name "$admin_name" --expires-in-days "$expires_days"
+  else
+    # The installer creates the key itself, after its summary, so the key is the
+    # last line on screen and still the only byte on stdout.
+    printf 'Bootstrap checks passed. No administrator key was created.\n' >&2
+  fi
   trap - EXIT
   bootstrap_server_may_be_loaded=no
 }

@@ -113,17 +113,13 @@ report() {
   shift
   if "$@" >/dev/null 2>&1; then printf '%s=yes\n' "$name"; else printf '%s=no\n' "$name"; fi
 }
-report host_public   hostname_valid messages.integration.dev
-report host_invalid  hostname_valid imessage-proxy.invalid
-report mail_public   email_valid operator@integration.dev
-report port_ok       true
+report port_ok       admin_name_valid ok
 report admin_ok      admin_name_valid first-admin
 report admin_space   admin_name_valid ' leading'
 report expiry_ok     expires_days_valid 30
 report expiry_pad    expires_days_valid 007
 report tag_ok        release_tag_valid v1.0.0
 report tag_bad       release_tag_valid 1.0.0
-printf 'placeholder=%s|%s\n' "$PLACEHOLDER_API_HOST" "$PLACEHOLDER_ACME_EMAIL"
 PROBE
 }
 

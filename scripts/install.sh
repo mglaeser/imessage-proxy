@@ -3,13 +3,13 @@
 # iMessage Proxy one-command installer.
 #
 # The installer verifies the Mac, obtains a pinned iMessage Proxy release,
-# builds and installs the lifecycle CLI, pins the native dependencies by
-# SHA-256, writes one private configuration file, and runs the product's own
-# guarded bootstrap. Progress goes to standard error. On success standard
-# output is exactly the first administrator API key.
+# builds and installs the lifecycle CLI, pins imsg by SHA-256, writes one private
+# configuration file, and runs the product's own guarded bootstrap. Progress goes
+# to standard error. On success standard output is exactly the first
+# administrator API key.
 #
-# It never enables public HTTPS. Public exposure stays behind the reviewed
-# operations gate described in docs/operations.md.
+# The service listens on 127.0.0.1 only. Publishing it is the operator's job,
+# with their own TLS proxy in front.
 
 set -Eeuo pipefail
 # Captured before the hardened PATH below replaces it. Deciding whether the
@@ -33,44 +33,30 @@ readonly SOURCE_ARCHIVE_BASE_URL="https://codeload.github.com/${PROJECT_REPOSITO
 # and are opt-in through --tag.
 readonly SOURCE_BRANCH='main'
 readonly SERVER_LABEL='io.github.mglaeser.imessage-proxy'
-# RFC 2606 reserves .invalid, so neither can resolve or be issued a certificate.
-# The product CLI accepts them only while public HTTPS is disabled, so an install
-# that declines to name itself cannot silently become a published one. Keep these
-# identical to PLACEHOLDER_API_HOST and PLACEHOLDER_ACME_EMAIL in the CLI.
-readonly PLACEHOLDER_API_HOST='imessage-proxy.invalid'
-readonly PLACEHOLDER_ACME_EMAIL='operator@imessage-proxy.invalid'
 readonly EXPECTED_IMSG_VERSION='0.13.4'
 readonly IMSG_BASE_URL='https://github.com/openclaw/imsg/releases/download'
 readonly IMSG_ARCHIVE='imsg-macos.zip'
 # Reviewed digest of the published imsg 0.13.4 macOS archive.
 readonly IMSG_ARCHIVE_SHA256='e2fcac341363b5d53d16d28e61df981c4585bcc6b7fa8fdc77ec41f14e87c468'
-readonly EXPECTED_CADDY_VERSION='2.11.4'
-readonly CADDY_BASE_URL='https://github.com/caddyserver/caddy/releases/download'
-# Reviewed Caddy 2.11.4 release-archive digests; identical to the pins the CI
-# workflow uses when it installs Caddy on macOS runners.
-readonly CADDY_ARM64_ARCHIVE='caddy_2.11.4_mac_arm64.tar.gz'
-readonly CADDY_ARM64_SHA512='3190ae0df98b59ab4b6021556fa35adc3c526a4f3e138776b0eaec8a037cc26121cbbb1ad53453f565551b47d37d5ba4755e2c2c3652256737fe2ce9e53c8ec0'
-readonly CADDY_AMD64_ARCHIVE='caddy_2.11.4_mac_amd64.tar.gz'
-readonly CADDY_AMD64_SHA512='e04eb10f9ce7e2e079bc9bff1bd5d3a3164888d1edbb1a49e5d15be4eab691b57e89ed36bb29c65ba43f1ba8d9279e0967b1003991c13fe4cb78384c3caf25de'
 
 action='install'
 admin_name='local-bootstrap'
 archive_path=''
 archive_sha256=''
-caddy_path=''
 expires_days='30'
 imsg_path=''
 install_prefix="${HOME:-}/.local"
-public_bind='0.0.0.0'
-http_port='8080'
-https_port='8443'
 release_tag=''
 run_tests='auto'
+service_port='8765'
+bold=''
+dim=''
+cyan=''
+green=''
+reset=''
 verbose='no'
 path_result=''
 path_profile=''
-service_email=''
-service_host=''
 source_directory=''
 temporary_root=''
 verify_attestation='no'
@@ -131,13 +117,9 @@ Usage: install.sh [options]
 Installs iMessage Proxy on this Mac and creates the first administrator key.
 
 Options:
-  --host HOSTNAME        Public DNS name the service will eventually use
-  --email ADDRESS        Operator email used for future ACME certificates
   --imsg PATH            Use this imsg 0.13.4 executable instead of installing
                          the pinned one (a symlink such as a Homebrew shim is
                          resolved to its real target)
-  --caddy PATH           Absolute path to a reviewed Caddy 2.11.4 executable
-                         (default: download and verify the pinned release)
   --admin-name NAME      First administrator label (default: local-bootstrap)
   --expires-in-days N    First administrator lifetime, 1-365 (default: 30)
   --tag vMAJOR.MINOR.PATCH
@@ -146,14 +128,15 @@ Options:
   --archive FILE         Install from an already downloaded release archive
   --sha256 HEX           Required release-archive digest for reviewed installs
   --attest               Additionally verify GitHub build provenance with gh
+  --port N               Loopback port for the service (default: 8765)
   --prefix DIR           Installation prefix (default: $HOME/.local)
   --tests, --no-tests    Force running or skipping the product test suite
   --verbose              Show the full output of each build and install step
   --self-test            Validate this installer's own logic and exit
   -h, --help             Show this help and exit
 
-Public HTTPS stays disabled. Enable it deliberately afterwards by following
-docs/operations.md.
+The service listens on 127.0.0.1 only. Put your own TLS proxy in front of it if
+you want to publish it.
 USAGE
 }
 
@@ -175,31 +158,6 @@ file_sha512() {
   else
     sha512sum "$1" | awk '{print $1}'
   fi
-}
-
-hostname_valid() {
-  local label name="$1"
-  local -a labels
-  [[ -n "$name" && "${#name}" -le 253 && "$name" != *[A-Z]* &&
-    "$name" == *.* && "$name" != .* && "$name" != *. && "$name" != *..* ]] || return 1
-  IFS=. read -r -a labels <<< "$name"
-  for label in "${labels[@]}"; do
-    [[ "${#label}" -le 63 && "$label" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || return 1
-  done
-  [[ ! "$name" =~ ^[0-9.]+$ ]] || return 1
-  case "$name" in
-    example.com | *.example.com | example.net | *.example.net | example.org | *.example.org | \
-      *.example | *.invalid | localhost | *.localhost | *.local | *.internal | \
-      *.test | home.arpa | *.home.arpa | onion | *.onion | arpa | *.arpa) return 1 ;;
-  esac
-}
-
-email_valid() {
-  local address="$1" domain
-  [[ "$address" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ &&
-    "${#address}" -le 254 ]] || return 1
-  domain="${address##*@}"
-  hostname_valid "$domain"
 }
 
 admin_name_valid() {
@@ -248,24 +206,9 @@ node_version_supported() {
 parse_arguments() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --host)
-        [[ $# -ge 2 ]] || die '--host requires a hostname'
-        service_host="$2"
-        shift 2
-        ;;
-      --email)
-        [[ $# -ge 2 ]] || die '--email requires an address'
-        service_email="$2"
-        shift 2
-        ;;
       --imsg)
         [[ $# -ge 2 ]] || die '--imsg requires a path'
         imsg_path="$2"
-        shift 2
-        ;;
-      --caddy)
-        [[ $# -ge 2 ]] || die '--caddy requires a path'
-        caddy_path="$2"
         shift 2
         ;;
       --admin-name)
@@ -301,6 +244,11 @@ parse_arguments() {
       --attest)
         verify_attestation='yes'
         shift
+        ;;
+      --port)
+        [[ $# -ge 2 ]] || die '--port requires a number'
+        service_port="$2"
+        shift 2
         ;;
       --prefix)
         [[ $# -ge 2 ]] || die '--prefix requires a directory'
@@ -341,14 +289,11 @@ validate_arguments() {
     die '--tag must have the form vMAJOR.MINOR.PATCH'
   [[ -z "$archive_sha256" ]] || sha256_valid "$archive_sha256" ||
     die '--sha256 must be a 64-character lowercase SHA-256 digest'
-  [[ -z "$service_host" ]] || hostname_valid "$service_host" ||
-    die '--host must be an explicit lowercase public DNS hostname'
-  [[ -z "$service_email" ]] || email_valid "$service_email" ||
-    die '--email must be a valid operator address on a public domain'
+  if ! [[ "$service_port" =~ ^[0-9]+$ ]] || ((service_port < 1024 || service_port > 65535)); then
+    die "--port must be in the range 1024-65535, not: $service_port"
+  fi
   [[ -z "$imsg_path" || "$imsg_path" == /* ]] ||
     die '--imsg must be an absolute path'
-  [[ -z "$caddy_path" || "$caddy_path" == /* ]] ||
-    die '--caddy must be an absolute path'
   [[ "$install_prefix" == /* ]] || die '--prefix must be an absolute path'
   # The prefix is written into the operator's shell startup file, where it
   # outlives this process and is re-evaluated by every future shell. A quote or a
@@ -384,13 +329,6 @@ require_supported_host() {
 require_terminal() {
   [[ -r /dev/tty && -w /dev/tty ]] ||
     die 'run the installer in an interactive terminal; macOS Full Disk Access must be granted interactively'
-}
-
-prompt_for_value() {
-  local answer='' label="$1"
-  printf '%s' "$label" >&2
-  IFS= read -r answer < /dev/tty || die 'could not read the answer from the terminal'
-  printf '%s\n' "$answer"
 }
 
 service_is_installed() {
@@ -665,52 +603,6 @@ verify_dependency_binary() {
     die "$label must be an executable regular non-symlink file: $candidate"
 }
 
-resolve_caddy() {
-  local archive archive_name expected_sha512 managed managed_directory
-  managed_directory="$install_prefix/libexec/imessage-proxy"
-  managed="$managed_directory/caddy"
-
-  if [[ -n "$caddy_path" ]]; then
-    verify_dependency_binary "$caddy_path" 'Caddy'
-    printf '%s\n' "$caddy_path"
-    return
-  fi
-  if [[ -x "$managed" && ! -L "$managed" ]] &&
-    [[ "$("$managed" version 2>/dev/null | awk '{print $1}')" == "v$EXPECTED_CADDY_VERSION" ]]; then
-    note "Reusing the pinned Caddy $EXPECTED_CADDY_VERSION at $managed"
-    printf '%s\n' "$managed"
-    return
-  fi
-
-  case "$(uname -m)" in
-    arm64)
-      archive_name="$CADDY_ARM64_ARCHIVE"
-      expected_sha512="$CADDY_ARM64_SHA512"
-      ;;
-    x86_64)
-      archive_name="$CADDY_AMD64_ARCHIVE"
-      expected_sha512="$CADDY_AMD64_SHA512"
-      ;;
-    *) die "unsupported macOS architecture: $(uname -m)" ;;
-  esac
-
-  step "Fetching the pinned Caddy $EXPECTED_CADDY_VERSION edge"
-  archive="$temporary_root/$archive_name"
-  require_download "$CADDY_BASE_URL/v$EXPECTED_CADDY_VERSION/$archive_name" "$archive"
-  [[ "$(file_sha512 "$archive")" == "$expected_sha512" ]] ||
-    die 'the downloaded Caddy archive does not match the reviewed SHA-512 digest'
-  mkdir -m 700 "$temporary_root/caddy"
-  tar -xzf "$archive" -C "$temporary_root/caddy" caddy ||
-    die 'could not extract the Caddy executable'
-  install -d -m 700 "$managed_directory"
-  install -m 500 "$temporary_root/caddy/caddy" "$managed" ||
-    die "could not install the pinned Caddy executable at $managed"
-  [[ "$("$managed" version 2>/dev/null | awk '{print $1}')" == "v$EXPECTED_CADDY_VERSION" ]] ||
-    die "the installed Caddy executable is not $EXPECTED_CADDY_VERSION"
-  note "Installed the pinned Caddy $EXPECTED_CADDY_VERSION at $managed"
-  printf '%s\n' "$managed"
-}
-
 imsg_reports_expected_version() {
   [[ "$("$1" --version 2>/dev/null || true)" == "$EXPECTED_IMSG_VERSION" ]]
 }
@@ -820,55 +712,9 @@ resolve_real_path() {
   fi
 }
 
-# This install publishes nothing and binds no network port, so neither answer is
-# used by anything it sets up: the hostname becomes the browser origin the public
-# edge would answer for, and the address is the ACME contact. Asking for both up
-# front made every operator invent public identity for a private service, and
-# offered no way to decline. Enter accepts a reserved .invalid placeholder, which
-# can never resolve and can never be issued a certificate, so enabling public
-# HTTPS later refuses to proceed until both are replaced with real values.
-collect_service_identity() {
-  note ''
-  note 'This installation stays private: it binds no network port and publishes'
-  note 'nothing. A DNS name and an operator address are needed only if you later'
-  note 'enable public HTTPS. Press Enter to skip both and decide later.'
-  note ''
-  while [[ -z "$service_host" ]]; do
-    service_host="$(prompt_for_value 'Service hostname [Enter to skip]: ')"
-    if [[ -z "$service_host" ]]; then
-      service_host="$PLACEHOLDER_API_HOST"
-      break
-    fi
-    hostname_valid "$service_host" && break
-    note 'That is not an explicit lowercase public DNS hostname. Press Enter to skip it.'
-    service_host=''
-  done
-  # Skipping the hostname must not discard an address the operator supplied with
-  # --email. The two fields are validated independently, so a real address
-  # alongside a placeholder hostname is a coherent state.
-  if [[ "$service_host" == "$PLACEHOLDER_API_HOST" ]]; then
-    [[ -n "$service_email" ]] || service_email="$PLACEHOLDER_ACME_EMAIL"
-    return 0
-  fi
-  while [[ -z "$service_email" ]]; do
-    service_email="$(prompt_for_value 'Operator email for certificates [Enter to skip]: ')"
-    if [[ -z "$service_email" ]]; then
-      service_email="$PLACEHOLDER_ACME_EMAIL"
-      break
-    fi
-    email_valid "$service_email" && break
-    note 'That is not a valid operator address on a public domain. Press Enter to skip it.'
-    service_email=''
-  done
-}
-
-identity_is_placeholder() {
-  [[ "$service_host" == "$PLACEHOLDER_API_HOST" || "$service_email" == "$PLACEHOLDER_ACME_EMAIL" ]]
-}
-
 write_service_config() {
-  local caddy_binary="$1" caddy_digest config_directory config_path
-  local imsg_binary="$2" imsg_digest temporary
+  local config_directory config_path
+  local imsg_binary="$1" imsg_digest temporary
   config_directory="$HOME/.config/imessage-proxy"
   config_path="$config_directory/service.env"
 
@@ -883,26 +729,17 @@ write_service_config() {
     return
   fi
 
-  caddy_digest="$(file_sha256 "$caddy_binary")"
   imsg_digest="$(file_sha256 "$imsg_binary")"
-  sha256_valid "$caddy_digest" || die 'could not compute the Caddy SHA-256 digest'
   sha256_valid "$imsg_digest" || die 'could not compute the imsg SHA-256 digest'
-  config_value_valid "$caddy_binary" || die 'the Caddy path cannot be stored as configuration'
   config_value_valid "$imsg_binary" || die 'the imsg path cannot be stored as configuration'
 
   install -d -m 700 "$config_directory"
   temporary="$(mktemp "$config_directory/service.env.XXXXXX")"
+  # Three keys: the one an operator might change, and the two that pin imsg.
   {
-    printf '%s\n' "IMESSAGE_PROXY_API_HOST=$service_host"
-    printf '%s\n' "IMESSAGE_PROXY_ACME_EMAIL=$service_email"
-    printf '%s\n' "IMESSAGE_PROXY_PUBLIC_BIND=$public_bind"
-    printf '%s\n' "IMESSAGE_PROXY_HTTP_PORT=$http_port"
-    printf '%s\n' "IMESSAGE_PROXY_HTTPS_PORT=$https_port"
-    printf '%s\n' 'IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no'
+    printf '%s\n' "IMESSAGE_PROXY_PORT=$service_port"
     printf '%s\n' "IMESSAGE_PROXY_IMSG_BIN=$imsg_binary"
     printf '%s\n' "IMESSAGE_PROXY_IMSG_SHA256=$imsg_digest"
-    printf '%s\n' "IMESSAGE_PROXY_CADDY_BIN=$caddy_binary"
-    printf '%s\n' "IMESSAGE_PROXY_CADDY_SHA256=$caddy_digest"
   } > "$temporary"
   chmod 600 "$temporary"
   mv "$temporary" "$config_path"
@@ -910,82 +747,58 @@ write_service_config() {
   printf '%s\n' "$config_path"
 }
 
+# and a redirect because a log file full of escape sequences helps nobody.
+setup_colour() {
+  bold='' dim='' cyan='' green='' reset=''
+  [[ -t 2 ]] || return 0
+  [[ -z "${NO_COLOR:-}" ]] || return 0
+  [[ "${TERM:-dumb}" != dumb ]] || return 0
+  bold=$'\033[1m'
+  dim=$'\033[2m'
+  cyan=$'\033[36m'
+  green=$'\033[32m'
+  reset=$'\033[0m'
+}
+
 banner() {
   local version="$1"
   note ''
-  note '      .-----------------------------------------.'
-  note '      |                                         |'
-  note '      |    i M e s s a g e   P r o x y          |'
-  printf '      |    %-37s|\n' "version $version" >&2
-  note '      |                                         |'
-  note "      '-----------------------.  .--------------'"
-  note '                               \/'
+  note "  ${green}    ___ ${reset}"
+  note "  ${green}   |   |    ${bold}iMessage Proxy${reset}"
+  note "  ${green}   |   |__  ${dim}version ${version} - running on this Mac${reset}"
+  note "  ${green}   |______| ${reset}"
   note ''
-  note '   Installed and running. Private by default: no network'
-  note '   port is open, and nothing left this Mac.'
 }
 
-section() {
-  note ''
-  note "  $*"
-  note '  ---------------------------------------------------------------'
+heading() {
+  note "  ${bold}$*${reset}"
 }
 
-# The key is written to stdout so it can be captured by a pipeline, and every
-# other line goes to stderr. On a terminal both land in the same scrollback, so
-# printing it twice would be the only way to also frame it - instead it is shown
-# once, inside the summary, and emitted on stdout only when stdout is redirected.
+# Four facts and nothing else: where the console is, how to call the API, the
+# key, and how to remove it all. Everything an operator needed the old six
+# sections for is either unnecessary now or one command away.
 print_next_steps() {
-  local config_path="$1" runtime socket version="$2"
-  runtime="$HOME/Library/Application Support/iMessage Proxy"
-  socket="$runtime/run/server.sock"
+  local port="$1" version="$2"
 
   banner "$version"
 
-  section 'ADMINISTRATOR KEY'
-  note '  The line printed just above this summary, beginning "imp_", is your'
-  note '  administrator key. It is shown once and cannot be recovered.'
-  note '  Store it in a password manager before you close this window.'
-
-  section 'WHERE THINGS ARE'
-  note "  CLI            $install_prefix/bin/imessage-proxy"
-  note "  imsg           $install_prefix/bin/imsg"
-  note "  Configuration  $config_path"
-  note "  Allowlist      $runtime/private/allowed-targets.txt"
-  note '  Logs           imessage-proxy server-logs'
-
-  section 'HOW TO REACH IT'
-  note '  The service answers on a private Unix socket. No network port is'
-  note '  open, so nothing can reach it from another machine.'
+  heading 'OPEN THE CONSOLE'
+  note "     ${cyan}http://127.0.0.1:${port}${reset}"
   note ''
-  note "      curl --unix-socket \"$socket\" \\"
-  note "        --header \"Authorization: Bearer YOUR_KEY\" \\"
-  note '        http://localhost/api/status'
+
+  heading 'OR CALL THE API'
+  note "     ${dim}curl -H \"Authorization: Bearer KEY\" \\${reset}"
+  note "     ${dim}  http://127.0.0.1:${port}/api/status${reset}"
   note ''
-  note '  A browser console is served only by the public edge, which stays'
-  note "  disabled. To publish the service: $PROJECT_URL/blob/main/docs/operations.md"
-  if identity_is_placeholder; then
-    note ''
-    note '  This install recorded placeholder identity, so it cannot be published'
-    note '  as it stands. Enabling public HTTPS asks you to replace these first:'
-    [[ "$service_host" == "$PLACEHOLDER_API_HOST" ]] &&
-      note "       IMESSAGE_PROXY_API_HOST   (now $PLACEHOLDER_API_HOST)"
-    [[ "$service_email" == "$PLACEHOLDER_ACME_EMAIL" ]] &&
-      note "       IMESSAGE_PROXY_ACME_EMAIL (now $PLACEHOLDER_ACME_EMAIL)"
-  fi
 
-  section 'NEXT'
-  note '  1. Allow one exact recipient by adding a line to:'
-  note "       $runtime/private/allowed-targets.txt"
-  note '  2. Confirm the service is healthy:'
-  note '       imessage-proxy server-status'
-  note '  3. Send a test message to that recipient through the API.'
-
-  section 'UNINSTALL'
-  note "  curl -fsSL $PROJECT_URL/raw/main/scripts/uninstall.sh | bash"
-  note '  Runtime state, keys and logs are preserved unless you pass --purge.'
+  heading 'UNINSTALL'
+  note "     ${dim}curl -fsSL ${PROJECT_URL}/raw/main/scripts/uninstall.sh | bash${reset}"
+  note ''
 
   print_path_result
+  note ''
+  heading 'YOUR ADMINISTRATOR KEY'
+  note "  ${dim}Shown once, on the line below. Store it in a password manager.${reset}"
   note ''
 }
 
@@ -1046,7 +859,7 @@ ensure_path_entry() {
 }
 
 print_path_result() {
-  section 'YOUR PATH'
+  heading 'YOUR PATH'
   case "$path_result" in
     already)
       note "  $install_prefix/bin is already on your PATH. Run: imessage-proxy server-status"
@@ -1091,20 +904,6 @@ report_existing_installation() {
 
 self_test() {
   local candidate long_name
-  hostname_valid messages.acme-corp.com || die 'self-test rejected a valid hostname'
-  hostname_valid a.b.c.example-host.io || die 'self-test rejected a valid nested hostname'
-  for candidate in '' localhost messages.local messages.example.com MESSAGES.acme.com \
-    'messages..acme.com' '.acme.com' 'acme.com.' 192.168.1.10 'messages.acme .com' \
-    messages.home.arpa messages.invalid messages.test; do
-    ! hostname_valid "$candidate" ||
-      die "self-test accepted an invalid hostname: ${candidate:-<empty>}"
-  done
-  email_valid operator@acme-corp.com || die 'self-test rejected a valid email address'
-  for candidate in '' operator operator@localhost operator@acme.invalid \
-    'operator @acme.com' operator@example.com; do
-    ! email_valid "$candidate" ||
-      die "self-test accepted an invalid email address: ${candidate:-<empty>}"
-  done
   admin_name_valid local-bootstrap || die 'self-test rejected a valid administrator name'
   long_name="$(printf 'a%.0s' {1..80})"
   admin_name_valid "$long_name" || die 'self-test rejected an 80-byte administrator name'
@@ -1118,8 +917,6 @@ self_test() {
     ! expires_days_valid "$candidate" ||
       die "self-test accepted an invalid expiry: ${candidate:-<empty>}"
   done
-  ! sha256_valid "$CADDY_ARM64_SHA512" ||
-    die 'self-test accepted a SHA-512 digest as SHA-256'
   sha256_valid "$(printf '0%.0s' {1..64})" || die 'self-test rejected a valid SHA-256 digest'
   for candidate in '' abc "$(printf 'A%.0s' {1..64})" "$(printf '0%.0s' {1..63})"; do
     ! sha256_valid "$candidate" ||
@@ -1181,9 +978,10 @@ main() {
   require_terminal
   make_temporary_root
 
-  local caddy_binary cli config_path imsg_binary source_is_temporary source_tree
+  local cli config_path imsg_binary source_is_temporary source_tree
+  setup_colour
   note 'iMessage Proxy installer'
-  note 'Everything stays on this Mac. Public HTTPS is not enabled.'
+  note 'Everything stays on this Mac.'
 
   step 'Obtaining the reviewed source'
   source_tree="$(resolve_source_tree)"
@@ -1198,25 +996,25 @@ main() {
     return 0
   fi
 
-  step 'Collecting service identity and native dependencies'
-  collect_service_identity
+  step 'Installing the native dependency'
   imsg_binary="$(resolve_imsg)"
   link_imsg "$imsg_binary"
-  caddy_binary="$(resolve_caddy)"
-  config_path="$(write_service_config "$caddy_binary" "$imsg_binary")"
+  config_path="$(write_service_config "$imsg_binary")"
 
-  step 'Running the guarded product bootstrap'
-  note 'The bootstrap pauses once so macOS can grant Full Disk Access.'
-  # The key is written by bootstrap to stdout and is never captured, stored, or
-  # echoed here: it must stay on stdout only, so a pipeline can take it and this
-  # script can never leak it into a log or a trace. It is the last thing bootstrap
-  # emits, so the summary below opens by naming the line directly above it.
+  step 'Starting the service'
+  note 'macOS asks once for Full Disk Access. That is the only manual step.'
   "$cli" bootstrap \
     --config "$config_path" \
     --admin-name "$admin_name" \
-    --expires-in-days "$expires_days"
+    --expires-in-days "$expires_days" \
+    --without-admin-key
   ensure_path_entry
-  print_next_steps "$config_path" "$("$cli" version)"
+  print_next_steps "$service_port" "$("$cli" version)"
+  # Deliberately the last command, uncaptured and unredirected. The key is the
+  # only thing this script ever writes to stdout, so a pipeline can take it and
+  # nothing here can leak it into a log or a trace - and because it runs last it
+  # lands directly under the heading printed above.
+  "$cli" api-key bootstrap-admin --name "$admin_name" --expires-in-days "$expires_days"
 }
 
 if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
