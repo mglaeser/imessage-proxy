@@ -1024,18 +1024,28 @@ assert_status 504 "$status"
 assert_problem 504
 rm -f -- "${fake_imsg}.malformed"
 
-# The same origin is accepted but the native boundary never emits ACAO headers.
-status="$(request /api/status \
-  --header "Authorization: Bearer $read_key" \
-  --header 'Origin: https://messages.example.test')"
-assert_status 200 "$status"
-assert_no_cors_header
-status="$(request /api/status \
-  --header "Authorization: Bearer $read_key" \
-  --header 'Origin: https://evil.example.test')"
-assert_status 403 "$status"
-assert_problem 403
-assert_no_cors_header
+# The allowed origin is derived from the port the server bound, not configured,
+# so the console's origin and the check cannot drift apart. Both loopback
+# spellings are accepted; nothing else is, and no ACAO header is ever emitted.
+for allowed_origin in "http://127.0.0.1:$server_port" "http://localhost:$server_port"; do
+  status="$(request /api/status \
+    --header "Authorization: Bearer $read_key" \
+    --header "Origin: $allowed_origin")"
+  assert_status 200 "$status"
+  assert_no_cors_header
+done
+for refused_origin in \
+  'https://evil.example.test' \
+  "http://127.0.0.1:$((server_port + 1))" \
+  "https://127.0.0.1:$server_port" \
+  "http://127.0.0.1.evil.example.test:$server_port"; do
+  status="$(request /api/status \
+    --header "Authorization: Bearer $read_key" \
+    --header "Origin: $refused_origin")"
+  assert_status 403 "$status"
+  assert_problem 403
+  assert_no_cors_header
+done
 
 # last_used_at is useful metadata without forcing a SQLite write on every request.
 last_used_before="$(sqlite3 "$database_path" \
