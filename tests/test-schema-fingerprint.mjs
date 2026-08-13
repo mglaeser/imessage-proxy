@@ -60,13 +60,18 @@ function stringConstant(name) {
   return sql;
 }
 
-// The literal run inside one IMPExecute call, identified by its first line.
-function inlineStatement(firstLine) {
-  const start = source.indexOf(firstLine);
-  assert.ok(start >= 0, `could not find ${firstLine.slice(0, 48)}`);
-  const end = source.indexOf("            error);", start);
-  assert.ok(end > start, "could not find the end of the statement");
-  return joinLiterals(source.slice(start, end));
+// The literal run inside one IMPExecute call, from its first literal to the
+// argument that follows. Matched on content rather than indentation, because
+// clang-format chooses the indentation and may change it.
+function inlineStatement(firstLiteral, lastLiteral) {
+  const start = source.indexOf(firstLiteral);
+  assert.ok(start >= 0, `could not find ${firstLiteral.slice(0, 48)}`);
+  const last = source.indexOf(lastLiteral, start);
+  assert.ok(last > start, `could not find ${lastLiteral.slice(0, 48)}`);
+  const sql = joinLiterals(source.slice(start, last + lastLiteral.length));
+  assert.ok(sql.startsWith("CREATE TABLE"), "the extracted statement must begin with a CREATE");
+  assert.ok(sql.endsWith(";"), "the extracted statement must be complete");
+  return sql;
 }
 
 const schemaVersion = constant("kIMPSchemaVersion");
@@ -79,7 +84,7 @@ const auditCopyDDL = stringConstant("kIMPAuditMigrationCopyDDL");
 // The order these run in inside configureAndValidateDatabase, for a fresh
 // install and for an upgrade from the previous schema.
 const freshDDL =
-  inlineStatement('            "CREATE TABLE api_keys ("') +
+  inlineStatement('"CREATE TABLE api_keys ("', '"PRAGMA application_id=1229803595;"') +
   auditRecordsDDL +
   auditIndexesDDL +
   `PRAGMA user_version=${schemaVersion};`;

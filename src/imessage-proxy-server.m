@@ -2769,13 +2769,13 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
                         BOOL targetsLoaded = [self loadCurrentTargets:&currentRecipients
                                                               chatIDs:&currentChatIDs
                                                                 error:&targetsError];
-                        BOOL targetAllowed = targetsLoaded &&
-                                             (validChat ? [currentChatIDs containsObject:chatID.stringValue]
+                        BOOL targetAllowed =
+                            targetsLoaded && (validChat ? [currentChatIDs containsObject:chatID.stringValue]
                                                         : [currentRecipients containsObject:recipient]);
                         if (!targetsLoaded) {
                             LogOperationalFailure("messages.send", "allowlist_unreadable", targetsError);
-                            response = Problem(503, @"allowlist-unavailable",
-                                               @"The recipient allowlist could not be read.");
+                            response =
+                                Problem(503, @"allowlist-unavailable", @"The recipient allowlist could not be read.");
                         } else if (!targetAllowed) {
                             response = Problem(403, @"target-forbidden", @"The message target is not allowed.");
                         } else {

@@ -553,12 +553,12 @@ static BOOL IMPValidateAuditAction(NSString *action, NSError **error) {
         return NO;
     }
     NSSet<NSString *> *allowed = [NSSet setWithArray:@[
-        @"request.invalid",  @"request.rate_limited", @"auth.unavailable", @"auth.rate_limited",
-        @"auth.reject",      @"origin.reject",        @"route.not_found",  @"status.read",
-        @"chats.list",       @"chats.read",           @"background.read",  @"messages.history",
-        @"scheduled.list",   @"statistics.read",      @"messages.send",    @"keys.list",
-        @"keys.read",        @"keys.create",          @"keys.revoke",      @"audit.list",
-        @"targets.read",     @"targets.replace",      @"server.overloaded"
+        @"request.invalid", @"request.rate_limited", @"auth.unavailable", @"auth.rate_limited",
+        @"auth.reject",     @"origin.reject",        @"route.not_found",  @"status.read",
+        @"chats.list",      @"chats.read",           @"background.read",  @"messages.history",
+        @"scheduled.list",  @"statistics.read",      @"messages.send",    @"keys.list",
+        @"keys.read",       @"keys.create",          @"keys.revoke",      @"audit.list",
+        @"targets.read",    @"targets.replace",      @"server.overloaded"
     ]];
     if (![allowed containsObject:action]) {
         IMPSetError(error, IMPAPIKeyStoreErrorInvalidArgument, @"The audit action is invalid.");
@@ -970,40 +970,40 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
         if (!IMPExecute(_database, "BEGIN EXCLUSIVE", error)) {
             return NO;
         }
-        BOOL created = IMPExecute(
-            _database,
-            "CREATE TABLE api_keys ("
-            "uuid TEXT PRIMARY KEY CHECK(length(uuid)=36),"
-            "name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 80),"
-            "key_prefix TEXT NOT NULL UNIQUE CHECK(length(key_prefix)=12),"
-            "key_hash BLOB NOT NULL UNIQUE CHECK(length(key_hash)=32),"
-            "scopes TEXT NOT NULL CHECK(scopes IN ("
-            "'messages:read','messages:send','admin',"
-            "'messages:read,messages:send','messages:read,admin',"
-            "'messages:send,admin','messages:read,messages:send,admin')) ,"
-            "created_at INTEGER NOT NULL CHECK(created_at > 0),"
-            "expires_at INTEGER CHECK(expires_at IS NULL OR expires_at > created_at),"
-            "revoked_at INTEGER CHECK(revoked_at IS NULL OR revoked_at >= created_at),"
-            "last_used_at INTEGER CHECK(last_used_at IS NULL OR last_used_at >= created_at)"
-            ");"
-            "CREATE INDEX api_keys_active_idx ON api_keys(revoked_at, expires_at);"
-            "CREATE TABLE idempotency_records ("
-            "principal_uuid TEXT NOT NULL REFERENCES api_keys(uuid) ON DELETE RESTRICT,"
-            "idempotency_key TEXT NOT NULL CHECK(length(idempotency_key) BETWEEN 8 AND 128),"
-            "operation_uuid TEXT NOT NULL UNIQUE CHECK(length(operation_uuid)=36),"
-            "request_hash BLOB NOT NULL CHECK(length(request_hash)=32),"
-            "state TEXT NOT NULL CHECK(state IN ('in_progress','succeeded','ambiguous','failed')) ,"
-            "response_status INTEGER CHECK(response_status IS NULL OR response_status BETWEEN 100 AND 599),"
-            "response_body BLOB,"
-            "created_at INTEGER NOT NULL CHECK(created_at > 0),"
-            "updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),"
-            "PRIMARY KEY(principal_uuid, idempotency_key),"
-            "CHECK((state='in_progress' AND response_status IS NULL AND response_body IS NULL) OR "
-            "(state!='in_progress' AND response_status IS NOT NULL AND response_body IS NOT NULL))"
-            ");"
-            "CREATE INDEX idempotency_updated_idx ON idempotency_records(updated_at);"
-            "PRAGMA application_id=1229803595;",
-            error);
+        BOOL created =
+            IMPExecute(_database,
+                       "CREATE TABLE api_keys ("
+                       "uuid TEXT PRIMARY KEY CHECK(length(uuid)=36),"
+                       "name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 80),"
+                       "key_prefix TEXT NOT NULL UNIQUE CHECK(length(key_prefix)=12),"
+                       "key_hash BLOB NOT NULL UNIQUE CHECK(length(key_hash)=32),"
+                       "scopes TEXT NOT NULL CHECK(scopes IN ("
+                       "'messages:read','messages:send','admin',"
+                       "'messages:read,messages:send','messages:read,admin',"
+                       "'messages:send,admin','messages:read,messages:send,admin')) ,"
+                       "created_at INTEGER NOT NULL CHECK(created_at > 0),"
+                       "expires_at INTEGER CHECK(expires_at IS NULL OR expires_at > created_at),"
+                       "revoked_at INTEGER CHECK(revoked_at IS NULL OR revoked_at >= created_at),"
+                       "last_used_at INTEGER CHECK(last_used_at IS NULL OR last_used_at >= created_at)"
+                       ");"
+                       "CREATE INDEX api_keys_active_idx ON api_keys(revoked_at, expires_at);"
+                       "CREATE TABLE idempotency_records ("
+                       "principal_uuid TEXT NOT NULL REFERENCES api_keys(uuid) ON DELETE RESTRICT,"
+                       "idempotency_key TEXT NOT NULL CHECK(length(idempotency_key) BETWEEN 8 AND 128),"
+                       "operation_uuid TEXT NOT NULL UNIQUE CHECK(length(operation_uuid)=36),"
+                       "request_hash BLOB NOT NULL CHECK(length(request_hash)=32),"
+                       "state TEXT NOT NULL CHECK(state IN ('in_progress','succeeded','ambiguous','failed')) ,"
+                       "response_status INTEGER CHECK(response_status IS NULL OR response_status BETWEEN 100 AND 599),"
+                       "response_body BLOB,"
+                       "created_at INTEGER NOT NULL CHECK(created_at > 0),"
+                       "updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),"
+                       "PRIMARY KEY(principal_uuid, idempotency_key),"
+                       "CHECK((state='in_progress' AND response_status IS NULL AND response_body IS NULL) OR "
+                       "(state!='in_progress' AND response_status IS NOT NULL AND response_body IS NOT NULL))"
+                       ");"
+                       "CREATE INDEX idempotency_updated_idx ON idempotency_records(updated_at);"
+                       "PRAGMA application_id=1229803595;",
+                       error);
         created = created && IMPExecute(_database, kIMPAuditRecordsDDL, error);
         created = created && IMPExecute(_database, kIMPAuditIndexesDDL, error);
         created = created && IMPExecute(_database, "PRAGMA user_version=6;", error);
