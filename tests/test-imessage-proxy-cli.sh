@@ -912,6 +912,18 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
   require_macos() { return 0; }
 
   targets_file="$IMESSAGE_PROXY_HOME/private/allowed-targets.txt"
+
+  # Entries are matched whole-line. The header this file carries names
+  # "chat_id:42" as an example, and "@example.test" is a substring of the
+  # legitimate "person@example.test", so substring checks pass vacuously.
+  assert_allowed() {
+    grep -Fqx -- "$1" "$targets_file" || fail "allowlist is missing the entry: $1"
+  }
+  assert_not_allowed() {
+    if grep -Fqx -- "$1" "$targets_file"; then
+      fail "allowlist still contains the entry: $1"
+    fi
+  }
   printf '%s\n' '# comment' 'person@example.test' 'chat_id:42' > "$targets_file"
   chmod 600 "$targets_file"
 
@@ -920,8 +932,8 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
 chat_id:42' ]] || fail "targets list did not report the file: $listed"
 
   targets add '+15551234567' >/dev/null
-  assert_contains '+15551234567' "$targets_file"
-  assert_contains 'person@example.test' "$targets_file"
+  assert_allowed '+15551234567'
+  assert_allowed 'person@example.test'
   [[ "$(stat -f '%Lp' "$targets_file")" == 600 ]] ||
     fail 'targets add did not keep the allowlist private'
   [[ "$(grep -c . "$targets_file")" == 7 ]] ||
@@ -938,7 +950,7 @@ chat_id:42' ]] || fail "targets list did not report the file: $listed"
     'a@b@c' \
     '@example.test'; do
     expect_failure 'not a valid target' targets add "$invalid"
-    assert_not_contains "$invalid" "$targets_file"
+    assert_not_allowed "$invalid"
   done
 
   expect_failure 'already allowed' targets add 'person@example.test'
@@ -948,8 +960,8 @@ chat_id:42' ]] || fail "targets list did not report the file: $listed"
   expect_failure 'unknown targets subcommand' targets sync
 
   targets remove 'person@example.test' >/dev/null
-  assert_not_contains 'person@example.test' "$targets_file"
-  assert_contains 'chat_id:42' "$targets_file"
+  assert_not_allowed 'person@example.test'
+  assert_allowed 'chat_id:42'
 
   # Removing the last entry must leave a valid empty allowlist, not a broken one.
   targets remove 'chat_id:42' >/dev/null
