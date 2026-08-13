@@ -653,13 +653,28 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
 
   (
     lsof() {
-      printf '%s\n' p123 f7u "n$SOCKET_PATH"
+      printf '%s\n' p123 f7u "n127.0.0.1:$IMESSAGE_PROXY_PORT"
     }
-    server_socket_owned_by_pid 123 || fail 'the exact server Unix socket was not attributed to its PID'
+    server_socket_owned_by_pid 123 ||
+      fail 'the exact loopback listener was not attributed to its PID'
     lsof() {
-      printf '%s\n' p123 f7u "n${SOCKET_PATH}.stale"
+      printf '%s\n' p123 f7u "n127.0.0.1:$((IMESSAGE_PROXY_PORT + 1))"
     }
-    ! server_socket_owned_by_pid 123 || fail 'a different Unix socket was attributed to the server PID'
+    ! server_socket_owned_by_pid 123 ||
+      fail 'a listener on another port was attributed to the server PID'
+    # The same check carries the loopback guarantee: a wildcard bind would make
+    # the service reachable from the network, so it must fail readiness rather
+    # than be reported healthy.
+    lsof() {
+      printf '%s\n' p123 f7u "n*:$IMESSAGE_PROXY_PORT"
+    }
+    ! server_socket_owned_by_pid 123 ||
+      fail 'a wildcard bind was accepted as the loopback listener'
+    lsof() {
+      printf '%s\n' p123 f7u "n0.0.0.0:$IMESSAGE_PROXY_PORT"
+    }
+    ! server_socket_owned_by_pid 123 ||
+      fail 'a 0.0.0.0 bind was accepted as the loopback listener'
   )
   (
     service_pid() { printf '%s\n' 123; }
