@@ -9,7 +9,7 @@ iMessage Proxy is community-maintained security-sensitive software. Support is b
 - **Feature proposals:** use the [feature request form](https://github.com/mglaeser/imessage-proxy/issues/new?template=feature_request.yml).
 - **Security vulnerabilities:** follow [SECURITY.md](SECURITY.md) and report privately.
 
-Please search existing issues, discussions, [Operations](docs/operations.md), and [Troubleshooting](docs/troubleshooting.md) first.
+Please search existing issues, discussions, [Install and operate](docs/install.md), and [Troubleshooting](docs/troubleshooting.md) first.
 
 ## Information to include
 

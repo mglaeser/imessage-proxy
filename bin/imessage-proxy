@@ -88,7 +88,6 @@ readonly STATE="$ROOT/state"
 readonly PRIVATE="$ROOT/private"
 readonly RUN_DIR="$ROOT/run"
 readonly LOG_DIR="$STATE/logs"
-readonly EDGE_LOG="$LOG_DIR/edge.log"
 readonly SERVER_LOG="$LOG_DIR/server.log"
 readonly BIN_DIR="$STATE/bin"
 readonly SERVER_BIN="$BIN_DIR/imessage-proxy-server"
@@ -96,27 +95,16 @@ readonly IMSG_BIN="$BIN_DIR/imsg"
 readonly DATABASE_PATH="$PRIVATE/api-keys.sqlite3"
 readonly MESSAGES_DATABASE_PATH="$HOME/Library/Messages/chat.db"
 readonly TARGETS_FILE="$PRIVATE/allowed-targets.txt"
-readonly SOCKET_PATH="$RUN_DIR/server.sock"
-readonly CADDY_STATE="$STATE/caddy"
-readonly CADDY_DATA="$CADDY_STATE/data"
-readonly CADDY_CONFIG="$CADDY_STATE/config"
-readonly CADDYFILE="$CADDY_STATE/Caddyfile"
-readonly UI_DIR="$CADDY_STATE/ui"
-readonly CADDY_BIN="$BIN_DIR/caddy"
+# The single network setting. Loopback is not configurable: the server binds
+# INADDR_LOOPBACK as a compile-time constant and asserts it after listen().
+IMESSAGE_PROXY_PORT="${IMESSAGE_PROXY_PORT:-8765}"
+readonly UI_DIR="$STATE/ui"
 readonly SERVER_LABEL='io.github.mglaeser.imessage-proxy'
 readonly SERVER_PLIST_STATE="$STATE/io.github.mglaeser.imessage-proxy.plist"
 readonly SERVER_PLIST_TARGET="$HOME/Library/LaunchAgents/io.github.mglaeser.imessage-proxy.plist"
-readonly EDGE_LABEL='io.github.mglaeser.imessage-proxy.edge'
-readonly EDGE_PLIST_STATE="$STATE/io.github.mglaeser.imessage-proxy.edge.plist"
-readonly EDGE_PLIST_TARGET="$HOME/Library/LaunchAgents/io.github.mglaeser.imessage-proxy.edge.plist"
 readonly EXPECTED_IMSG_VERSION='0.13.4'
-readonly EXPECTED_CADDY_VERSION='2.11.4'
 readonly SERVER_READ_TIMEOUT_SECONDS=30
 readonly SERVER_START_TIMEOUT_SECONDS=50
-# RFC 2606 reserves .invalid, so neither can resolve or be issued a certificate.
-# Accepted only while public HTTPS is disabled; see require_api_settings.
-readonly PLACEHOLDER_API_HOST='imessage-proxy.invalid'
-readonly PLACEHOLDER_ACME_EMAIL='operator@imessage-proxy.invalid'
 
 require_safe_runtime_root() {
   local ancestor basename
@@ -147,7 +135,7 @@ prepare_runtime_directories() {
   local path
   local -a paths=(
     "$ROOT" "$STATE" "$PRIVATE" "$RUN_DIR" "$LOG_DIR" "$BIN_DIR"
-    "$CADDY_STATE" "$CADDY_DATA" "$CADDY_CONFIG" "$UI_DIR"
+    "$UI_DIR"
   )
   require_safe_runtime_root
   for path in "${paths[@]}"; do
@@ -169,7 +157,7 @@ usage() {
     '' \
     'Actions:' \
     '  doctor' \
-    "  bootstrap --config FILE --admin-name NAME [--expires-in-days 30] [--public --confirm 'EXPOSE IMESSAGE PROXY PUBLICLY']" \
+    '  bootstrap --config FILE --admin-name NAME [--expires-in-days 30] [--without-admin-key]' \
     '  prepare' \
     '  build-host' \
     '  check-host' \
@@ -180,12 +168,6 @@ usage() {
     "  server-restart --confirm 'RESTART IMESSAGE PROXY SERVER'" \
     '  server-status' \
     '  server-logs' \
-    "  edge-install --confirm 'EXPOSE IMESSAGE PROXY PUBLICLY'" \
-    '  edge-start' \
-    '  edge-stop' \
-    "  edge-restart --confirm 'RESTART IMESSAGE PROXY EDGE'" \
-    '  edge-status' \
-    '  edge-logs' \
     '  version' \
     '' \
     'Every action except bootstrap reads the reviewed service configuration from' \
@@ -201,8 +183,6 @@ require_sources() {
     "$SOURCE_DIR/src/imessage-proxy-server.m" \
     "$SOURCE_DIR/src/api-key-store.m" \
     "$SOURCE_DIR/src/api-key-store.h" \
-    "$SOURCE_DIR/config/Caddyfile" \
-    "$SOURCE_DIR/config/io.github.mglaeser.imessage-proxy.edge.plist.in" \
     "$SOURCE_DIR/config/io.github.mglaeser.imessage-proxy.plist.in" \
     "$SOURCE_DIR/web/index.html" \
     "$SOURCE_DIR/web/app.js" \
@@ -285,14 +265,6 @@ prepare_private_log() {
   require_private_file "$destination"
 }
 
-prepare_edge_log() {
-  prepare_private_log "$EDGE_LOG"
-}
-
-require_edge_log() {
-  require_private_file "$EDGE_LOG"
-}
-
 prepare_server_log() {
   prepare_private_log "$SERVER_LOG"
 }
@@ -301,41 +273,6 @@ require_server_log() {
   require_private_file "$SERVER_LOG"
 }
 
-hostname_valid() {
-  local LC_ALL=C label name="$1"
-  local -a labels
-  [[ -n "$name" && "${#name}" -le 253 && "$name" != *[A-Z]* &&
-    "$name" == *.* && "$name" != .* && "$name" != *. && "$name" != *..* ]] || return 1
-  IFS=. read -r -a labels <<< "$name"
-  for label in "${labels[@]}"; do
-    [[ "${#label}" -le 63 && "$label" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || return 1
-  done
-  [[ ! "$name" =~ ^[0-9.]+$ ]] || return 1
-  case "$name" in
-    example.com | *.example.com | example.net | *.example.net | example.org | *.example.org | \
-      *.example | *.invalid | localhost | *.localhost | *.local | *.internal | \
-      *.test | home.arpa | *.home.arpa | onion | *.onion | arpa | *.arpa) return 1 ;;
-  esac
-}
-
-email_valid() {
-  local LC_ALL=C address="$1" domain
-  [[ "$address" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ &&
-    "${#address}" -le 254 ]] || return 1
-  domain="${address##*@}"
-  hostname_valid "$domain"
-}
-
-ipv4_address_valid() {
-  local LC_ALL=C octet value="$1"
-  local -a octets
-  [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
-  IFS=. read -r -a octets <<< "$value"
-  for octet in "${octets[@]}"; do
-    [[ "$octet" =~ ^(0|[1-9][0-9]{0,2})$ ]] || return 1
-    ((10#$octet <= 255)) || return 1
-  done
-}
 
 unprivileged_port_valid() {
   local LC_ALL=C
@@ -344,16 +281,9 @@ unprivileged_port_valid() {
 
 service_config_key_allowed() {
   case "$1" in
-    IMESSAGE_PROXY_API_HOST | \
-      IMESSAGE_PROXY_ACME_EMAIL | \
-      IMESSAGE_PROXY_PUBLIC_BIND | \
-      IMESSAGE_PROXY_HTTP_PORT | \
-      IMESSAGE_PROXY_HTTPS_PORT | \
-      IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS | \
+    IMESSAGE_PROXY_PORT | \
       IMESSAGE_PROXY_IMSG_BIN | \
-      IMESSAGE_PROXY_IMSG_SHA256 | \
-      IMESSAGE_PROXY_CADDY_BIN | \
-      IMESSAGE_PROXY_CADDY_SHA256) return 0 ;;
+      IMESSAGE_PROXY_IMSG_SHA256) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -364,9 +294,8 @@ service_config_path() {
 
 # Every action except bootstrap used to read the environment and nothing else,
 # so a Mac carrying the configuration the installer had just written answered
-#   ERROR: IMESSAGE_PROXY_API_HOST must be an explicit lowercase public DNS hostname
-# for server-status, server-restart, check-host, api-key and every edge action:
-# a complaint about the shape of a value that had simply never been loaded. The
+# a complaint about a setting that had simply never been loaded, for every
+# action other than bootstrap. The
 # reviewed configuration is now read for those actions too. Values already
 # present in the environment win, so an explicit override still works and
 # bootstrap's own --config load is untouched.
@@ -382,16 +311,8 @@ use_service_config() {
 load_service_config() {
   local config_path="$1" expected key line line_number=0 mode="${2:-required}" seen='' value
   local -a expected_keys=(
-    IMESSAGE_PROXY_API_HOST
-    IMESSAGE_PROXY_ACME_EMAIL
-    IMESSAGE_PROXY_PUBLIC_BIND
-    IMESSAGE_PROXY_HTTP_PORT
-    IMESSAGE_PROXY_HTTPS_PORT
-    IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS
     IMESSAGE_PROXY_IMSG_BIN
     IMESSAGE_PROXY_IMSG_SHA256
-    IMESSAGE_PROXY_CADDY_BIN
-    IMESSAGE_PROXY_CADDY_SHA256
   )
   require_macos
   require_private_file "$config_path"
@@ -420,72 +341,12 @@ load_service_config() {
   done
 }
 
+# One process, one loopback listener, one setting. The DNS name, ACME contact,
+# bind address, second port and exposure gate all belonged to an edge that no
+# longer exists.
 require_api_settings() {
-  local api_host="${IMESSAGE_PROXY_API_HOST:-}"
-  local acme_email="${IMESSAGE_PROXY_ACME_EMAIL:-}"
-  local bind_ip="${IMESSAGE_PROXY_PUBLIC_BIND:-0.0.0.0}"
-  local http_port="${IMESSAGE_PROXY_HTTP_PORT:-8080}"
-  local https_port="${IMESSAGE_PROXY_HTTPS_PORT:-8443}"
-  # An unset value and a malformed one are different faults with different
-  # fixes, and reporting the second for the first sent a real operator hunting a
-  # hostname that was already correct.
-  [[ -n "$api_host" && -n "$acme_email" ]] ||
-    die "the reviewed service configuration was not found: $(service_config_path)
-  run the installer, or point IMESSAGE_PROXY_CONFIG at the file you reviewed"
-  # A private install publishes nothing and binds no network port, so it has no
-  # use for a DNS name the operator does not own or an address a certificate
-  # authority could contact. Both values exist only for public HTTPS: one is the
-  # ACME identity, the other the browser origin the edge answers for. While the
-  # exposure gate is closed the reserved placeholders below are accepted, so
-  # nobody has to invent public identity for a service reachable only through a
-  # Unix socket. They are in RFC 2606's .invalid namespace, so they can never
-  # resolve and can never be issued a certificate: turning the gate on rejects
-  # them, and every edge action that installs or starts a listener reaches this
-  # through require_public_edge_inputs, which also requires the gate literally.
-  if [[ "${IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS:-no}" == yes ]]; then
-    [[ "$api_host" != "$PLACEHOLDER_API_HOST" && "$acme_email" != "$PLACEHOLDER_ACME_EMAIL" ]] ||
-      die "public HTTPS needs a DNS name you control and an operator address that can receive mail.
-  Replace the placeholders in $(service_config_path) before enabling it."
-    hostname_valid "$api_host" ||
-      die "IMESSAGE_PROXY_API_HOST must be an explicit lowercase public DNS hostname, not: $api_host"
-    email_valid "$acme_email" ||
-      die "IMESSAGE_PROXY_ACME_EMAIL must be a valid operator email address on a public domain, not: $acme_email"
-  else
-    [[ "$api_host" == "$PLACEHOLDER_API_HOST" ]] || hostname_valid "$api_host" ||
-      die "IMESSAGE_PROXY_API_HOST must be an explicit lowercase public DNS hostname, not: $api_host"
-    [[ "$acme_email" == "$PLACEHOLDER_ACME_EMAIL" ]] || email_valid "$acme_email" ||
-      die "IMESSAGE_PROXY_ACME_EMAIL must be a valid operator email address on a public domain, not: $acme_email"
-  fi
-  unprivileged_port_valid "$http_port" ||
-    die 'IMESSAGE_PROXY_HTTP_PORT must be canonical base-10 in the range 1024-65535'
-  unprivileged_port_valid "$https_port" ||
-    die 'IMESSAGE_PROXY_HTTPS_PORT must be canonical base-10 in the range 1024-65535'
-  [[ "$http_port" != "$https_port" ]] ||
-    die 'IMESSAGE_PROXY_HTTP_PORT and IMESSAGE_PROXY_HTTPS_PORT must differ'
-  if [[ "$bind_ip" != 0.0.0.0 ]]; then
-    ipv4_address_valid "$bind_ip" ||
-      die 'IMESSAGE_PROXY_PUBLIC_BIND must be 0.0.0.0 or a canonical IPv4 address'
-    ifconfig | grep -F "inet $bind_ip " >/dev/null 2>&1 ||
-      die "IMESSAGE_PROXY_PUBLIC_BIND $bind_ip is not assigned to this Mac"
-  fi
-}
-
-require_caddy_source() {
-  local actual digest source version_output
-  source="${IMESSAGE_PROXY_CADDY_BIN:-$(command -v caddy || true)}"
-  digest="${IMESSAGE_PROXY_CADDY_SHA256:-}"
-  [[ -n "$source" && -f "$source" && ! -L "$source" && -x "$source" ]] ||
-    die 'IMESSAGE_PROXY_CADDY_BIN must name an executable, regular, non-symlink Caddy binary'
-  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] ||
-    die 'IMESSAGE_PROXY_CADDY_SHA256 must be an independently reviewed SHA-256 digest'
-  actual="$(shasum -a 256 "$source" | awk '{print $1}')"
-  [[ "$actual" == "$digest" ]] ||
-    die 'the configured Caddy binary SHA-256 does not match the reviewed digest'
-  version_output="$("$source" version 2>/dev/null)" ||
-    die 'the configured Caddy binary did not report a version'
-  [[ "${version_output%% *}" == "v$EXPECTED_CADDY_VERSION" ]] ||
-    die "expected Caddy $EXPECTED_CADDY_VERSION, found ${version_output%% *}"
-  printf '%s\n' "$source"
+  unprivileged_port_valid "$IMESSAGE_PROXY_PORT" ||
+    die "IMESSAGE_PROXY_PORT must be canonical base-10 in the range 1024-65535, not: $IMESSAGE_PROXY_PORT"
 }
 
 require_imsg_source() {
@@ -575,20 +436,6 @@ install_prepared_asset() {
   mv -f "$temporary" "$destination"
 }
 
-stage_caddy_binary() {
-  local source temporary version_output
-  source="$(require_caddy_source)"
-  temporary="$(mktemp "$BIN_DIR/caddy.XXXXXX")"
-  install -m 0500 "$source" "$temporary"
-  [[ "$(shasum -a 256 "$temporary" | awk '{print $1}')" == "$IMESSAGE_PROXY_CADDY_SHA256" ]] ||
-    die 'the staged Caddy binary changed while being copied'
-  version_output="$("$temporary" version 2>/dev/null)" ||
-    die 'the staged Caddy binary did not report a version'
-  [[ "${version_output%% *}" == "v$EXPECTED_CADDY_VERSION" ]] ||
-    die "expected Caddy $EXPECTED_CADDY_VERSION, found ${version_output%% *}"
-  mv -f "$temporary" "$CADDY_BIN"
-}
-
 stage_imsg_binary() {
   local source temporary version_output
   source="$(require_imsg_source)"
@@ -645,8 +492,8 @@ require_rendered_program_arguments() {
 }
 
 render_server_agent_to() {
-  local destination="$1" public_origin
-  public_origin="https://$IMESSAGE_PROXY_API_HOST"
+  local destination="$1"
+  : "${IMESSAGE_PROXY_PORT:?the service port must be set}"
   install -m 0600 "$SOURCE_DIR/config/io.github.mglaeser.imessage-proxy.plist.in" "$destination"
   set_program_arguments "$destination" "$SERVER_BIN" serve
   plutil -replace EnvironmentVariables.IMESSAGE_PROXY_ALLOWED_TARGETS_FILE -string "$TARGETS_FILE" "$destination"
@@ -655,8 +502,8 @@ render_server_agent_to() {
   plutil -replace EnvironmentVariables.IMESSAGE_PROXY_IMSG_BIN -string "$IMSG_BIN" "$destination"
   plutil -replace EnvironmentVariables.IMESSAGE_PROXY_IMSG_SHA256 -string "$IMESSAGE_PROXY_IMSG_SHA256" "$destination"
   plutil -replace EnvironmentVariables.IMESSAGE_PROXY_MESSAGES_DATABASE_PATH -string "$MESSAGES_DATABASE_PATH" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_PUBLIC_ORIGIN -string "$public_origin" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_SOCKET_PATH -string "$SOCKET_PATH" "$destination"
+  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_PORT -string "$IMESSAGE_PROXY_PORT" "$destination"
+  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_UI_DIR -string "$UI_DIR" "$destination"
   plutil -replace StandardErrorPath -string "$SERVER_LOG" "$destination"
   plutil -replace StandardOutPath -string "$SERVER_LOG" "$destination"
   plutil -lint "$destination" >/dev/null
@@ -669,35 +516,6 @@ render_server_agent() {
   render_server_agent_to "$temporary"
   mv -f "$temporary" "$SERVER_PLIST_STATE"
   chmod 600 "$SERVER_PLIST_STATE"
-}
-
-render_edge_agent_to() {
-  local destination="$1"
-  install -m 0600 "$SOURCE_DIR/config/io.github.mglaeser.imessage-proxy.edge.plist.in" "$destination"
-  set_program_arguments "$destination" \
-    "$CADDY_BIN" run --config "$CADDYFILE" --adapter caddyfile
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_ACME_EMAIL -string "$IMESSAGE_PROXY_ACME_EMAIL" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_EDGE_LOG_PATH -string "$EDGE_LOG" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_HTTP_PORT -string "${IMESSAGE_PROXY_HTTP_PORT:-8080}" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_HTTPS_PORT -string "${IMESSAGE_PROXY_HTTPS_PORT:-8443}" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_PUBLIC_BIND -string "${IMESSAGE_PROXY_PUBLIC_BIND:-0.0.0.0}" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_API_HOST -string "$IMESSAGE_PROXY_API_HOST" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_SOCKET_PATH -string "$SOCKET_PATH" "$destination"
-  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_UI_DIR -string "$UI_DIR" "$destination"
-  plutil -replace EnvironmentVariables.XDG_CONFIG_HOME -string "$CADDY_CONFIG" "$destination"
-  plutil -replace EnvironmentVariables.XDG_DATA_HOME -string "$CADDY_DATA" "$destination"
-  plutil -replace WorkingDirectory -string "$CADDY_STATE" "$destination"
-  plutil -lint "$destination" >/dev/null
-  require_rendered_program_arguments "$destination" \
-    "$CADDY_BIN" run --config "$CADDYFILE" --adapter caddyfile
-}
-
-render_edge_agent() {
-  local temporary
-  temporary="$(mktemp "$STATE/edge-agent.XXXXXX")"
-  render_edge_agent_to "$temporary"
-  mv -f "$temporary" "$EDGE_PLIST_STATE"
-  chmod 600 "$EDGE_PLIST_STATE"
 }
 
 require_current_server_agent() {
@@ -713,21 +531,6 @@ require_current_server_agent() {
   rm -f -- "$temporary"
   [[ "$status" -eq 0 ]] ||
     die 'the staged native LaunchAgent does not match current configuration; stop both services and run prepare'
-}
-
-require_current_edge_agent() {
-  local status temporary
-  require_command plutil
-  require_private_file "$EDGE_PLIST_STATE"
-  temporary="$(mktemp "$STATE/edge-agent-check.XXXXXX")"
-  if render_edge_agent_to "$temporary" && cmp -s "$temporary" "$EDGE_PLIST_STATE"; then
-    status=0
-  else
-    status=$?
-  fi
-  rm -f -- "$temporary"
-  [[ "$status" -eq 0 ]] ||
-    die 'the staged edge LaunchAgent does not match current configuration; stop both services and run prepare'
 }
 
 prepare_ui() {
@@ -779,10 +582,6 @@ server_loaded() {
   service_loaded "$SERVER_LABEL"
 }
 
-edge_loaded() {
-  service_loaded "$EDGE_LABEL"
-}
-
 service_pid() {
   local label="$1" pid snapshot
   snapshot="$(launchctl_snapshot "$label")" || return $?
@@ -801,61 +600,12 @@ listener_owned_by_pid() {
   fi
 }
 
+# Asserts both that the listener belongs to the agent's own process and that it
+# is bound to loopback specifically. A wildcard bind would not match 127.0.0.1
+# exactly, so an accidentally exposed listener fails readiness rather than being
+# reported healthy.
 server_socket_owned_by_pid() {
-  local names pid="$1"
-  names="$(lsof -nP -a -p "$pid" -U -Fn 2>/dev/null)" || return 1
-  grep -Fqx "n$SOCKET_PATH" <<< "$names"
-}
-
-edge_listeners_ready() {
-  local bind_ip="${IMESSAGE_PROXY_PUBLIC_BIND:-0.0.0.0}" current_pid pid
-  pid="$(service_pid "$EDGE_LABEL")" || return 1
-  service_running "$EDGE_LABEL" || return 1
-  listener_owned_by_pid "$pid" "$bind_ip" "${IMESSAGE_PROXY_HTTP_PORT:-8080}" || return 1
-  listener_owned_by_pid "$pid" "$bind_ip" "${IMESSAGE_PROXY_HTTPS_PORT:-8443}" || return 1
-  current_pid="$(service_pid "$EDGE_LABEL")" || return 1
-  [[ "$current_pid" == "$pid" ]]
-}
-
-edge_http_ready() {
-  local bind_ip="${IMESSAGE_PROXY_PUBLIC_BIND:-0.0.0.0}" host="$IMESSAGE_PROXY_API_HOST"
-  local http_port="${IMESSAGE_PROXY_HTTP_PORT:-8080}" https_port="${IMESSAGE_PROXY_HTTPS_PORT:-8443}"
-  local http_result https_status probe_ip
-  probe_ip="$bind_ip"
-  [[ "$probe_ip" != 0.0.0.0 ]] || probe_ip=127.0.0.1
-  http_result="$(curl --silent --show-error --output /dev/null --noproxy '*' --proto '=http' \
-    --connect-timeout 1 --max-time 2 \
-    --resolve "$host:$http_port:$probe_ip" \
-    --write-out '%{http_code} %{redirect_url}' \
-    "http://$host:$http_port/" 2>/dev/null)" || return 1
-  [[ "$http_result" == "308 https://$host/" ]] || return 1
-  https_status="$(curl --silent --show-error --output /dev/null --noproxy '*' --proto '=https' \
-    --connect-timeout 1 --max-time 2 --tlsv1.2 \
-    --resolve "$host:$https_port:$probe_ip" \
-    --write-out '%{http_code}' \
-    "https://$host:$https_port/" 2>/dev/null)" || return 1
-  [[ "$https_status" == 200 ]]
-}
-
-edge_ready() {
-  edge_listeners_ready && edge_http_ready
-}
-
-wait_for_edge_ready() {
-  local _
-  for _ in {1..40}; do
-    edge_listeners_ready && break
-    sleep 0.25
-  done
-  edge_listeners_ready || return 1
-  for _ in {1..60}; do
-    if edge_http_ready; then
-      sleep 1
-      edge_ready && return 0
-    fi
-    sleep 1
-  done
-  return 1
+  listener_owned_by_pid "$1" 127.0.0.1 "$IMESSAGE_PROXY_PORT"
 }
 
 wait_for_service_absent() {
@@ -882,17 +632,11 @@ rollback_service_start() {
     service_absent=no
   fi
   [[ "$disable_succeeded" == yes && "$service_absent" == yes ]] || return 1
-  if [[ "$label" == "$EDGE_LABEL" ]]; then
-    edge_ports_free || return 1
-  fi
 }
 
 rollback_start_or_die() {
   local label="$1"
   rollback_service_start "$label" && return
-  if [[ "$label" == "$EDGE_LABEL" ]]; then
-    die 'URGENT: automatic public-edge rollback could not confirm containment; disconnect public forwarding and inspect launchctl and lsof immediately'
-  fi
   die 'URGENT: automatic native-service rollback could not confirm a disabled and absent LaunchAgent; inspect launchctl immediately'
 }
 
@@ -911,25 +655,15 @@ prepare() {
     status=$?
     [[ "$status" -eq 1 ]] || die 'could not determine native LaunchAgent state'
   fi
-  if edge_loaded; then
-    die 'stop the public edge before replacing its staged binary or configuration'
-  else
-    status=$?
-    [[ "$status" -eq 1 ]] || die 'could not determine public-edge LaunchAgent state'
-  fi
   prepare_runtime_directories
-  prepare_edge_log
   prepare_server_log
   write_initial_targets
   stage_imsg_binary
-  stage_caddy_binary
-  install_prepared_asset "$SOURCE_DIR/config/Caddyfile" "$CADDYFILE"
   prepare_ui
   render_server_agent
-  render_edge_agent
   printf 'Prepared fresh 1.0 state at %s\n' "$ROOT"
-  printf 'Review %s, %s, and %s before starting anything.\n' \
-    "$TARGETS_FILE" "$SERVER_PLIST_STATE" "$EDGE_PLIST_STATE"
+  printf 'Review %s and %s before starting anything.\n' \
+    "$TARGETS_FILE" "$SERVER_PLIST_STATE"
 }
 
 build_host() {
@@ -973,11 +707,11 @@ run_server() {
     IMESSAGE_PROXY_IMSG_SHA256="$IMESSAGE_PROXY_IMSG_SHA256" \
     IMESSAGE_PROXY_MAX_CONCURRENCY=8 \
     IMESSAGE_PROXY_MESSAGES_DATABASE_PATH="$MESSAGES_DATABASE_PATH" \
-    IMESSAGE_PROXY_PUBLIC_ORIGIN="https://${IMESSAGE_PROXY_API_HOST:-invalid.invalid}" \
+    IMESSAGE_PROXY_PORT="$IMESSAGE_PROXY_PORT" \
     IMESSAGE_PROXY_READ_TIMEOUT_SECONDS="$SERVER_READ_TIMEOUT_SECONDS" \
     IMESSAGE_PROXY_SEND_TIMEOUT_SECONDS=180 \
-    IMESSAGE_PROXY_SOCKET_PATH="$SOCKET_PATH" \
     IMESSAGE_PROXY_SOCKET_TIMEOUT_SECONDS=10 \
+    IMESSAGE_PROXY_UI_DIR="$UI_DIR" \
     "$SERVER_BIN" "$@"
 }
 
@@ -1068,7 +802,7 @@ acknowledge_full_disk_access() {
     die 'bootstrap needs an interactive terminal for the Full Disk Access checkpoint'
   printf '\nFull Disk Access is the one required manual macOS step.\n' >&2
   printf 'Grant it to this exact freshly built binary:\n  %s\n' "$SERVER_BIN" >&2
-  printf 'Keep System Integrity Protection enabled. Do not grant access to Caddy.\n' >&2
+  printf 'Keep System Integrity Protection enabled.\n' >&2
   # A typo here used to discard a completed build, download, and install. The
   # checkpoint exists so a human reads the sentence, not to test typing, so a
   # mistyped answer is retried rather than treated as a refusal. Case and
@@ -1119,11 +853,6 @@ bootstrap_failure_rollback() {
   trap - EXIT
   set +e
   printf 'Bootstrap failed after service installation began; containing newly started services.\n' >&2
-  if [[ "${bootstrap_edge_may_be_loaded:-no}" == yes ]]; then
-    if ! bootstrap_invoke_self edge-stop >&2; then
-      printf 'URGENT: bootstrap could not confirm that the public edge is stopped. Disconnect public forwarding and inspect launchctl.\n' >&2
-    fi
-  fi
   if [[ "${bootstrap_server_may_be_loaded:-no}" == yes ]]; then
     if ! bootstrap_invoke_self server-stop --confirm 'STOP IMESSAGE PROXY SERVER' >&2; then
       printf 'URGENT: bootstrap could not confirm that the native service is stopped. Inspect launchctl and the private socket.\n' >&2
@@ -1133,7 +862,7 @@ bootstrap_failure_rollback() {
 }
 
 bootstrap() {
-  local admin_name='' config_path='' confirmation='' expires_days=30 public=no
+  local admin_name='' config_path='' create_admin_key=yes expires_days=30
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --config)
@@ -1151,14 +880,9 @@ bootstrap() {
         expires_days="$2"
         shift 2
         ;;
-      --public)
-        public=yes
+      --without-admin-key)
+        create_admin_key=no
         shift
-        ;;
-      --confirm)
-        [[ $# -ge 2 ]] || die '--confirm requires a value'
-        confirmation="$2"
-        shift 2
         ;;
       *) die "unknown bootstrap argument: $1" ;;
     esac
@@ -1166,21 +890,7 @@ bootstrap() {
   [[ -n "$config_path" ]] || die 'bootstrap requires --config FILE'
   [[ -n "$admin_name" ]] || die 'bootstrap requires --admin-name NAME'
   validate_bootstrap_key_arguments "$admin_name" "$expires_days"
-  [[ "$public" == yes || -z "$confirmation" ]] ||
-    die '--confirm is accepted only together with --public'
-  if [[ "$public" == yes ]]; then
-    [[ "$confirmation" == 'EXPOSE IMESSAGE PROXY PUBLICLY' ]] ||
-      die "public bootstrap requires --confirm 'EXPOSE IMESSAGE PROXY PUBLICLY'"
-  fi
-
   load_service_config "$config_path"
-  if [[ "$public" == yes ]]; then
-    [[ "$IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS" == yes ]] ||
-      die 'public bootstrap requires IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=yes in the reviewed config'
-  else
-    [[ "$IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS" == no ]] ||
-      die 'non-public bootstrap requires IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no in the reviewed config'
-  fi
   require_bootstrap_tty
 
   printf 'Running the reviewed iMessage Proxy bootstrap. Progress is sent to stderr; the key is stdout only.\n' >&2
@@ -1192,28 +902,28 @@ bootstrap() {
   check_bootstrap_eligibility "$admin_name" "$expires_days" >&2
   check_host >&2
   bootstrap_server_may_be_loaded=yes
-  bootstrap_edge_may_be_loaded=no
   trap bootstrap_failure_rollback EXIT
   server_install >&2
-  if [[ "$public" == yes ]]; then
-    bootstrap_edge_may_be_loaded=yes
-    edge_install 'EXPOSE IMESSAGE PROXY PUBLICLY' >&2
+  if [[ "$create_admin_key" == yes ]]; then
+    printf 'Bootstrap checks passed. Creating the first administrator as the final operation.\n' >&2
+    api_key_bootstrap bootstrap-admin --name "$admin_name" --expires-in-days "$expires_days"
+  else
+    # The installer creates the key itself, after its summary, so the key is the
+    # last line on screen and still the only byte on stdout.
+    printf 'Bootstrap checks passed. No administrator key was created.\n' >&2
   fi
-  printf 'Bootstrap checks passed. Creating the first administrator as the final operation.\n' >&2
-  api_key_bootstrap bootstrap-admin --name "$admin_name" --expires-in-days "$expires_days"
   trap - EXIT
   bootstrap_server_may_be_loaded=no
-  bootstrap_edge_may_be_loaded=no
 }
 
+# Readiness is still "answers 401 on /api/status", which proves the process
+# parsed a request and consulted its key store. Only the transport changed.
 socket_ready() {
   local status
-  [[ -S "$SOCKET_PATH" && ! -L "$SOCKET_PATH" ]] || return 1
   status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
     --connect-timeout 0.5 \
     --max-time 1 \
-    --unix-socket "$SOCKET_PATH" \
-    http://localhost/api/status 2>/dev/null || true)"
+    "http://127.0.0.1:$IMESSAGE_PROXY_PORT/api/status" 2>/dev/null || true)"
   [[ "$status" == 401 ]]
 }
 
@@ -1238,23 +948,19 @@ wait_for_socket() {
   return 1
 }
 
+# A TCP listener leaves no filesystem artifact, so "gone" means nothing is
+# listening on the port any more.
+server_port_free() {
+  ! lsof -nP -iTCP:"$IMESSAGE_PROXY_PORT" -sTCP:LISTEN >/dev/null 2>&1
+}
+
 wait_for_socket_absent() {
   local _
   for _ in {1..40}; do
-    [[ ! -e "$SOCKET_PATH" && ! -L "$SOCKET_PATH" ]] && return 0
+    server_port_free && return 0
     sleep 0.25
   done
   return 1
-}
-
-require_edge_stopped() {
-  local status
-  if edge_loaded; then
-    die 'stop the public edge before changing the native socket owner'
-  else
-    status=$?
-    [[ "$status" -eq 1 ]] || die 'could not determine public-edge LaunchAgent state'
-  fi
 }
 
 server_install() {
@@ -1263,11 +969,10 @@ server_install() {
   require_command curl
   require_command launchctl
   require_command lsof
-  require_edge_stopped
   check_host
   require_current_server_agent
   if server_loaded; then
-    die "$SERVER_LABEL is already loaded; use server-restart after stopping the edge"
+    die "$SERVER_LABEL is already loaded; use server-restart"
   else
     status=$?
     [[ "$status" -eq 1 ]] || die 'could not determine native LaunchAgent state'
@@ -1296,7 +1001,6 @@ server_start() {
   require_command curl
   require_command launchctl
   require_command lsof
-  require_edge_stopped
   check_host
   require_current_server_agent
   require_safe_launch_agent_target "$SERVER_PLIST_TARGET"
@@ -1335,20 +1039,19 @@ server_stop() {
   require_macos
   require_safe_runtime_root
   require_command launchctl
-  require_edge_stopped
   if server_loaded; then
     launchctl disable "gui/$(id -u)/$SERVER_LABEL"
     launchctl bootout "gui/$(id -u)/$SERVER_LABEL"
     wait_for_service_absent "$SERVER_LABEL" || die 'native LaunchAgent did not unload cleanly'
     wait_for_socket_absent ||
-      die "native LaunchAgent stopped but its socket remains; inspect before continuing: $SOCKET_PATH"
+      die "native LaunchAgent stopped but port $IMESSAGE_PROXY_PORT is still in use; inspect before continuing"
     printf 'Stopped %s. Its installed plist and all runtime state were preserved.\n' "$SERVER_LABEL"
   else
     status=$?
     [[ "$status" -eq 1 ]] || die 'could not determine native LaunchAgent state'
     launchctl disable "gui/$(id -u)/$SERVER_LABEL"
-    [[ ! -e "$SOCKET_PATH" && ! -L "$SOCKET_PATH" ]] ||
-      die "native LaunchAgent is absent but its socket remains; inspect before continuing: $SOCKET_PATH"
+    server_port_free ||
+      die "native LaunchAgent is absent but port $IMESSAGE_PROXY_PORT is still in use; inspect before continuing"
     printf '%s is already stopped.\n' "$SERVER_LABEL"
   fi
 }
@@ -1361,7 +1064,6 @@ server_restart() {
   require_command curl
   require_command launchctl
   require_command lsof
-  require_edge_stopped
   check_host
   require_current_server_agent
   server_loaded || die "$SERVER_LABEL is not loaded"
@@ -1385,7 +1087,7 @@ server_restart() {
     report_server_start_failure "$log_offset"
     die 'restarted native LaunchAgent was not ready and was disabled again'
   fi
-  printf 'Restarted %s. Start the edge only after validating the new socket.\n' "$SERVER_LABEL"
+  printf 'Restarted %s on http://127.0.0.1:%s\n' "$SERVER_LABEL" "$IMESSAGE_PROXY_PORT"
   report_degraded_start "$log_offset"
 }
 
@@ -1418,28 +1120,6 @@ require_port_free() {
   port_is_free "$port" || die "TCP port $port already has a listener"
 }
 
-port_is_free() {
-  local port="$1"
-  ! lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
-}
-
-edge_ports_free() {
-  port_is_free "${IMESSAGE_PROXY_HTTP_PORT:-8080}" &&
-    port_is_free "${IMESSAGE_PROXY_HTTPS_PORT:-8443}"
-}
-
-require_staged_caddy() {
-  local actual version_output
-  require_private_executable "$CADDY_BIN" 'staged Caddy binary'
-  actual="$(shasum -a 256 "$CADDY_BIN" | awk '{print $1}')"
-  [[ "$actual" == "${IMESSAGE_PROXY_CADDY_SHA256:-}" ]] ||
-    die 'the staged Caddy binary digest is not the reviewed digest'
-  version_output="$("$CADDY_BIN" version 2>/dev/null)" ||
-    die 'the staged Caddy binary did not report a version'
-  [[ "${version_output%% *}" == "v$EXPECTED_CADDY_VERSION" ]] ||
-    die 'the staged Caddy version is not the reviewed version'
-}
-
 require_staged_imsg() {
   local actual version_output
   require_private_executable "$IMSG_BIN" 'staged imsg binary'
@@ -1452,208 +1132,6 @@ require_staged_imsg() {
     die 'the staged imsg binary did not report a version'
   [[ "$version_output" == "$EXPECTED_IMSG_VERSION" ]] ||
     die 'the staged imsg version is not the reviewed version'
-}
-
-require_prepared_edge() {
-  local asset
-  require_safe_runtime_root
-  require_staged_caddy
-  require_private_file "$CADDYFILE"
-  require_edge_log
-  require_current_edge_agent
-  require_private_directory "$UI_DIR"
-  require_private_directory "$CADDY_DATA"
-  require_private_directory "$CADDY_CONFIG"
-  cmp -s "$SOURCE_DIR/config/Caddyfile" "$CADDYFILE" ||
-    die 'prepared Caddyfile is stale; run prepare'
-  for asset in index.html app.js styles.css; do
-    [[ -f "$UI_DIR/$asset" && ! -L "$UI_DIR/$asset" ]] ||
-      die "prepared UI asset is missing: $asset"
-    cmp -s "$SOURCE_DIR/web/$asset" "$UI_DIR/$asset" ||
-      die "prepared UI asset is stale: $asset"
-  done
-}
-
-validate_edge_config() {
-  IMESSAGE_PROXY_ACME_EMAIL="$IMESSAGE_PROXY_ACME_EMAIL" \
-    IMESSAGE_PROXY_EDGE_LOG_PATH="$EDGE_LOG" \
-    IMESSAGE_PROXY_HTTP_PORT="${IMESSAGE_PROXY_HTTP_PORT:-8080}" \
-    IMESSAGE_PROXY_HTTPS_PORT="${IMESSAGE_PROXY_HTTPS_PORT:-8443}" \
-    IMESSAGE_PROXY_PUBLIC_BIND="${IMESSAGE_PROXY_PUBLIC_BIND:-0.0.0.0}" \
-    IMESSAGE_PROXY_API_HOST="$IMESSAGE_PROXY_API_HOST" \
-    IMESSAGE_PROXY_SOCKET_PATH="$SOCKET_PATH" \
-    IMESSAGE_PROXY_UI_DIR="$UI_DIR" \
-    XDG_CONFIG_HOME="$CADDY_CONFIG" \
-    XDG_DATA_HOME="$CADDY_DATA" \
-    "$CADDY_BIN" validate --config "$CADDYFILE" --adapter caddyfile >/dev/null
-}
-
-require_public_edge_inputs() {
-  require_api_settings
-  [[ "${IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS:-no}" == yes ]] ||
-    die 'set IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=yes only after completing the public-exposure checklist'
-  require_prepared_edge
-  require_private_file "$TARGETS_FILE"
-  require_private_file "$DATABASE_PATH"
-  server_ready || die 'the native LaunchAgent does not own a ready Unix socket; start or repair it first'
-  validate_edge_config || die 'the staged public-edge configuration is invalid'
-}
-
-edge_install() {
-  local confirmation="$1" status
-  [[ "$confirmation" == 'EXPOSE IMESSAGE PROXY PUBLICLY' ]] ||
-    die 'edge-install confirmation did not match'
-  require_macos
-  require_command curl
-  require_command launchctl
-  require_command lsof
-  require_command shasum
-  require_public_edge_inputs
-  if edge_loaded; then
-    die "$EDGE_LABEL is already loaded; use edge-restart"
-  else
-    status=$?
-    [[ "$status" -eq 1 ]] || die 'could not determine public-edge LaunchAgent state'
-  fi
-  require_port_free "${IMESSAGE_PROXY_HTTP_PORT:-8080}"
-  require_port_free "${IMESSAGE_PROXY_HTTPS_PORT:-8443}"
-  require_safe_launch_agent_target "$EDGE_PLIST_TARGET"
-  prepare_edge_log
-  install -m 600 "$EDGE_PLIST_STATE" "$EDGE_PLIST_TARGET"
-  launchctl enable "gui/$(id -u)/$EDGE_LABEL"
-  if ! launchctl bootstrap "gui/$(id -u)" "$EDGE_PLIST_TARGET"; then
-    rollback_start_or_die "$EDGE_LABEL"
-    die 'public-edge LaunchAgent bootstrap failed and was disabled again'
-  fi
-  if ! wait_for_edge_ready; then
-    rollback_start_or_die "$EDGE_LABEL"
-    die 'the public edge did not become ready and was disabled; run edge-logs for bounded diagnostics'
-  fi
-  printf 'Started the HTTPS edge for https://%s/.\n' "$IMESSAGE_PROXY_API_HOST"
-  printf 'External TCP 80/443 must map exactly to host TCP %s/%s before acceptance.\n' \
-    "${IMESSAGE_PROXY_HTTP_PORT:-8080}" "${IMESSAGE_PROXY_HTTPS_PORT:-8443}"
-}
-
-edge_start() {
-  local status
-  require_macos
-  require_command curl
-  require_command launchctl
-  require_command lsof
-  require_command shasum
-  require_public_edge_inputs
-  require_safe_launch_agent_target "$EDGE_PLIST_TARGET"
-  [[ -f "$EDGE_PLIST_TARGET" ]] ||
-    die "the installed edge LaunchAgent is missing; run edge-install first: $EDGE_PLIST_TARGET"
-  cmp -s "$EDGE_PLIST_STATE" "$EDGE_PLIST_TARGET" ||
-    die 'the installed edge LaunchAgent is stale; run edge-install while it is stopped'
-  if edge_loaded; then
-    edge_ready || die 'the edge LaunchAgent is loaded but its listeners or HTTPS endpoint are not ready'
-    printf '%s is already loaded and ready.\n' "$EDGE_LABEL"
-    return
-  else
-    status=$?
-    [[ "$status" -eq 1 ]] || die 'could not determine public-edge LaunchAgent state'
-  fi
-  require_port_free "${IMESSAGE_PROXY_HTTP_PORT:-8080}"
-  require_port_free "${IMESSAGE_PROXY_HTTPS_PORT:-8443}"
-  prepare_edge_log
-  launchctl enable "gui/$(id -u)/$EDGE_LABEL"
-  if ! launchctl bootstrap "gui/$(id -u)" "$EDGE_PLIST_TARGET"; then
-    rollback_start_or_die "$EDGE_LABEL"
-    die 'public-edge LaunchAgent bootstrap failed and was disabled again'
-  fi
-  if ! wait_for_edge_ready; then
-    rollback_start_or_die "$EDGE_LABEL"
-    die 'the public edge did not become ready and was disabled; run edge-logs for bounded diagnostics'
-  fi
-  printf 'Started %s.\n' "$EDGE_LABEL"
-}
-
-edge_stop() {
-  local status
-  require_macos
-  require_safe_runtime_root
-  require_command launchctl
-  if edge_loaded; then
-    launchctl disable "gui/$(id -u)/$EDGE_LABEL"
-    launchctl bootout "gui/$(id -u)/$EDGE_LABEL"
-    wait_for_service_absent "$EDGE_LABEL" || die 'public-edge LaunchAgent did not unload cleanly'
-    printf 'Stopped %s. Certificates, configuration, and all runtime state were preserved.\n' \
-      "$EDGE_LABEL"
-  else
-    status=$?
-    [[ "$status" -eq 1 ]] || die 'could not determine public-edge LaunchAgent state'
-    launchctl disable "gui/$(id -u)/$EDGE_LABEL"
-    printf '%s is already stopped.\n' "$EDGE_LABEL"
-  fi
-}
-
-edge_restart() {
-  local confirmation="$1"
-  [[ "$confirmation" == 'RESTART IMESSAGE PROXY EDGE' ]] ||
-    die 'edge-restart confirmation did not match'
-  require_macos
-  require_command curl
-  require_command launchctl
-  require_command lsof
-  require_command shasum
-  require_public_edge_inputs
-  edge_loaded || die "$EDGE_LABEL is not loaded"
-  require_safe_launch_agent_target "$EDGE_PLIST_TARGET"
-  prepare_edge_log
-  install -m 600 "$EDGE_PLIST_STATE" "$EDGE_PLIST_TARGET"
-  launchctl enable "gui/$(id -u)/$EDGE_LABEL"
-  if ! launchctl bootout "gui/$(id -u)/$EDGE_LABEL"; then
-    launchctl disable "gui/$(id -u)/$EDGE_LABEL" >/dev/null 2>&1 || true
-    die 'public-edge LaunchAgent could not be unloaded; its label was disabled for recovery'
-  fi
-  wait_for_service_absent "$EDGE_LABEL" || die 'public-edge LaunchAgent did not unload cleanly'
-  require_port_free "${IMESSAGE_PROXY_HTTP_PORT:-8080}"
-  require_port_free "${IMESSAGE_PROXY_HTTPS_PORT:-8443}"
-  if ! launchctl bootstrap "gui/$(id -u)" "$EDGE_PLIST_TARGET"; then
-    rollback_start_or_die "$EDGE_LABEL"
-    die 'public-edge restart bootstrap failed and was disabled again'
-  fi
-  if ! wait_for_edge_ready; then
-    rollback_start_or_die "$EDGE_LABEL"
-    die 'the restarted public edge did not become ready and was disabled; run edge-logs for bounded diagnostics'
-  fi
-  printf 'Restarted %s.\n' "$EDGE_LABEL"
-}
-
-edge_status() {
-  local snapshot status
-  require_macos
-  require_command curl
-  require_command launchctl
-  require_command shasum
-  require_api_settings
-  require_prepared_edge
-  require_safe_launch_agent_target "$EDGE_PLIST_TARGET"
-  [[ -f "$EDGE_PLIST_TARGET" ]] ||
-    die "the installed edge LaunchAgent is missing: $EDGE_PLIST_TARGET"
-  require_edge_log
-  cmp -s "$EDGE_PLIST_STATE" "$EDGE_PLIST_TARGET" ||
-    die 'the installed edge LaunchAgent does not match current staged configuration'
-  validate_edge_config || die 'the staged public-edge configuration is invalid'
-  if snapshot="$(launchctl_snapshot "$EDGE_LABEL")"; then
-    printf '%s\n' "$snapshot"
-    edge_ready || die 'the edge LaunchAgent is loaded but its listeners or HTTPS endpoint are not ready'
-  else
-    status=$?
-    [[ "$status" -eq 1 ]] && die "$EDGE_LABEL is not loaded"
-    die 'could not inventory public-edge LaunchAgent state'
-  fi
-}
-
-edge_logs() {
-  require_macos
-  require_safe_runtime_root
-  require_command tail
-  require_edge_log
-  printf '%s\n' '--- bounded Caddy runtime log (last 100 lines) ---'
-  tail -n 100 "$EDGE_LOG"
 }
 
 server_logs() {
@@ -1690,23 +1168,10 @@ doctor() {
     failed=1
   fi
   if (require_api_settings); then
-    printf 'OK   public hostname, ACME email, bind address, and host ports\n'
+    printf 'OK   service port %s\n' "$IMESSAGE_PROXY_PORT"
   else
     failed=1
   fi
-  if (require_caddy_source >/dev/null); then
-    printf 'OK   Caddy %s binary and SHA-256 pin\n' "$EXPECTED_CADDY_VERSION"
-  else
-    failed=1
-  fi
-  case "${IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS:-no}" in
-    yes) printf 'WARN public-exposure gate is enabled\n' >&2 ;;
-    no) printf 'OK   public-exposure gate is disabled\n' ;;
-    *)
-      printf 'FAIL IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS must be yes or no\n' >&2
-      failed=1
-      ;;
-  esac
   case "$(messages_database_status)" in
     ok) printf 'OK   Messages database: %s\n' "$MESSAGES_DATABASE_PATH" ;;
     missing)
@@ -1759,18 +1224,6 @@ main() {
       ;;
     server-status) [[ $# -eq 1 ]] || die 'server-status takes no arguments'; server_status ;;
     server-logs) [[ $# -eq 1 ]] || die 'server-logs takes no arguments'; server_logs ;;
-    edge-install)
-      [[ $# -eq 3 && "$2" == --confirm ]] || die 'edge-install requires --confirm TEXT'
-      edge_install "$3"
-      ;;
-    edge-start) [[ $# -eq 1 ]] || die 'edge-start takes no arguments'; edge_start ;;
-    edge-stop) [[ $# -eq 1 ]] || die 'edge-stop takes no arguments'; edge_stop ;;
-    edge-restart)
-      [[ $# -eq 3 && "$2" == --confirm ]] || die 'edge-restart requires --confirm TEXT'
-      edge_restart "$3"
-      ;;
-    edge-status) [[ $# -eq 1 ]] || die 'edge-status takes no arguments'; edge_status ;;
-    edge-logs) [[ $# -eq 1 ]] || die 'edge-logs takes no arguments'; edge_logs ;;
     version) [[ $# -eq 1 ]] || die 'version takes no arguments'; printf '%s\n' "$VERSION" ;;
     -h | --help) usage ;;
     *) usage >&2; exit 64 ;;

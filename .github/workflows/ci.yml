@@ -73,45 +73,6 @@ jobs:
       # than on an operator's Mac.
       - name: Test bash compatibility across supported interpreters
         run: make test-bash-compat
-      - name: Validate Caddy configuration with a pinned disposable image
-        shell: bash
-        run: |
-          caddy_image='docker.io/library/caddy@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648'
-          temporary="$(mktemp -d)"
-          trap 'rm -rf -- "$temporary"' EXIT
-          docker pull "$caddy_image"
-          docker run --rm \
-            --entrypoint caddy \
-            --env IMESSAGE_PROXY_API_HOST=imessage-proxy.invalid \
-            --env IMESSAGE_PROXY_ACME_EMAIL=ci@example.invalid \
-            --env IMESSAGE_PROXY_EDGE_LOG_PATH=/tmp/caddy-edge.log \
-            --env IMESSAGE_PROXY_HTTP_PORT=8080 \
-            --env IMESSAGE_PROXY_HTTPS_PORT=8443 \
-            --env IMESSAGE_PROXY_PUBLIC_BIND=127.0.0.1 \
-            --env IMESSAGE_PROXY_SOCKET_PATH="$temporary/server.sock" \
-            --env IMESSAGE_PROXY_UI_DIR="$PWD/web" \
-            --mount "type=bind,source=$PWD/config/Caddyfile,target=/etc/caddy/Caddyfile,readonly" \
-            --tmpfs /config \
-            --tmpfs /data \
-            "$caddy_image" \
-            adapt --config /etc/caddy/Caddyfile --adapter caddyfile --validate
-
-  caddy-edge:
-    name: Caddy Unix-socket edge (ARM64)
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 15
-    steps:
-      - name: Harden runner
-        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
-        with:
-          egress-policy: audit
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Test the host-edge configuration
-        shell: bash
-        run: bash tests/test-caddy-edge.sh
 
   check:
     name: Build, lint, analyze, and test
@@ -179,42 +140,6 @@ jobs:
         run: |
           test "$(shellcheck --version | awk '/^version:/ {print $2}')" = 0.11.0
           clang-format --version | grep -F 'clang-format version 18.1.8'
-      - name: Install verified Caddy
-        shell: bash
-        run: |
-          case "$(uname -m)" in
-            arm64)
-              archive_name='caddy_2.11.4_mac_arm64.tar.gz'
-              archive_sha512='3190ae0df98b59ab4b6021556fa35adc3c526a4f3e138776b0eaec8a037cc26121cbbb1ad53453f565551b47d37d5ba4755e2c2c3652256737fe2ce9e53c8ec0'
-              ;;
-            x86_64)
-              archive_name='caddy_2.11.4_mac_amd64.tar.gz'
-              archive_sha512='e04eb10f9ce7e2e079bc9bff1bd5d3a3164888d1edbb1a49e5d15be4eab691b57e89ed36bb29c65ba43f1ba8d9279e0967b1003991c13fe4cb78384c3caf25de'
-              ;;
-            *)
-              printf 'Unsupported macOS architecture: %s\n' "$(uname -m)" >&2
-              exit 1
-              ;;
-          esac
-          archive="$RUNNER_TEMP/$archive_name"
-          curl \
-            --fail \
-            --location \
-            --proto '=https' \
-            --retry 3 \
-            --retry-all-errors \
-            --silent \
-            --show-error \
-            --tlsv1.2 \
-            "https://github.com/caddyserver/caddy/releases/download/v2.11.4/$archive_name" \
-            --output "$archive"
-          printf '%s  %s\n' "$archive_sha512" "$archive" |
-            shasum -a 512 --check --status
-          tar -xzf "$archive" -C "$RUNNER_TEMP" caddy
-          chmod 0755 "$RUNNER_TEMP/caddy"
-          printf '%s\n' "$RUNNER_TEMP" >> "$GITHUB_PATH"
-      - name: Verify the product edge version
-        run: test "$(caddy version | awk '{print $1}')" = v2.11.4
       - name: Show toolchain
         run: |
           xcodebuild -version
@@ -252,7 +177,6 @@ jobs:
           test -x bin/imessage-proxy
           test -x scripts/install.sh
           test -x scripts/uninstall.sh
-          test -x tests/test-caddy-edge.sh
           test -x tests/test-imessage-proxy-server.sh
           test -x tests/test-imessage-proxy-cli.sh
           test -x tests/test-install-script.sh
@@ -265,8 +189,6 @@ jobs:
           test -f "$stage/usr/local/share/imessage-proxy/VERSION"
           test -f "$stage/usr/local/share/imessage-proxy/src/imessage-proxy-server.m"
           test -f "$stage/usr/local/share/imessage-proxy/src/api-key-store.h"
-          test -f "$stage/usr/local/share/imessage-proxy/config/Caddyfile"
-          test -f "$stage/usr/local/share/imessage-proxy/config/io.github.mglaeser.imessage-proxy.edge.plist.in"
           test -f "$stage/usr/local/share/imessage-proxy/config/io.github.mglaeser.imessage-proxy.plist.in"
           test -f "$stage/usr/local/share/imessage-proxy/web/index.html"
           make uninstall DESTDIR="$stage" PREFIX=/usr/local

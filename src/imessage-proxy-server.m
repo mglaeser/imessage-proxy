@@ -6,6 +6,7 @@
 #import <fcntl.h>
 #import <limits.h>
 #import <math.h>
+#import <netinet/in.h>
 #import <os/log.h>
 #import <poll.h>
 #import <signal.h>
@@ -16,7 +17,6 @@
 #import <sys/socket.h>
 #import <sys/stat.h>
 #import <sys/types.h>
-#import <sys/un.h>
 #import <sys/wait.h>
 #import <time.h>
 #import <unistd.h>
@@ -352,7 +352,8 @@ static BOOL IsDirectMessageRecipient(NSString *value) {
 }
 
 @interface IMPConfiguration : NSObject
-@property (nonatomic, copy) NSString *socketPath;
+@property (nonatomic) uint16_t port;
+@property (nonatomic, copy) NSString *uiDirectory;
 @property (nonatomic, copy) NSString *databasePath;
 @property (nonatomic, copy) NSString *messagesDatabasePath;
 @property (nonatomic, copy) NSString *allowedTargetsPath;
@@ -361,7 +362,7 @@ static BOOL IsDirectMessageRecipient(NSString *value) {
 @property (nonatomic, copy) NSSet<NSString *> *allowedChatIDs;
 @property (nonatomic, copy) NSString *imsgPath;
 @property (nonatomic, copy) NSString *imsgSHA256;
-@property (nonatomic, copy) NSString *publicOrigin;
+@property (nonatomic, copy) NSString *localOrigin;
 @property (nonatomic) NSTimeInterval readTimeout;
 @property (nonatomic) NSTimeInterval sendTimeout;
 @property (nonatomic) NSTimeInterval socketTimeout;
@@ -974,33 +975,17 @@ static BOOL ValidatePinnedExecutable(NSString *path, NSString *expectedDigest, N
 
 static IMPConfiguration *LoadConfiguration(NSError **error) {
     NSDictionary<NSString *, NSString *> *environment = NSProcessInfo.processInfo.environment;
+    // One process, one listener, one port. Everything that existed to describe a
+    // public edge - a DNS name, an ACME contact, a bind address, two ports, an
+    // exposure gate, a pinned Caddy - is gone, so a plist still carrying any of
+    // it is a stale plist and refused here rather than silently ignored.
     NSSet<NSString *> *recognized = [NSSet setWithArray:@[
-        @"IMESSAGE_PROXY_SOCKET_PATH",
-        @"IMESSAGE_PROXY_DATABASE_PATH",
-        @"IMESSAGE_PROXY_MESSAGES_DATABASE_PATH",
-        @"IMESSAGE_PROXY_ALLOWED_TARGETS_FILE",
-        @"IMESSAGE_PROXY_IMSG_BIN",
-        @"IMESSAGE_PROXY_PUBLIC_ORIGIN",
-        @"IMESSAGE_PROXY_EXPECTED_IMSG_VERSION",
-        @"IMESSAGE_PROXY_IMSG_SHA256",
-        @"IMESSAGE_PROXY_MAX_CONCURRENCY",
-        @"IMESSAGE_PROXY_READ_TIMEOUT_SECONDS",
-        @"IMESSAGE_PROXY_SEND_TIMEOUT_SECONDS",
-        @"IMESSAGE_PROXY_SOCKET_TIMEOUT_SECONDS",
-        @"IMESSAGE_PROXY_ACME_EMAIL",
-        @"IMESSAGE_PROXY_API_HOST",
-        @"IMESSAGE_PROXY_API_KEY",
-        @"IMESSAGE_PROXY_CADDY_BIN",
-        @"IMESSAGE_PROXY_CADDY_SHA256",
-        @"IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS",
-        @"IMESSAGE_PROXY_HOME",
-        @"IMESSAGE_PROXY_HTTPS_PORT",
-        @"IMESSAGE_PROXY_HTTP_PORT",
-        @"IMESSAGE_PROXY_PUBLIC_BIND",
-        @"IMESSAGE_PROXY_SOURCE_DIR",
-        @"IMESSAGE_PROXY_UI_DIR",
-        @"IMESSAGE_PROXY_URL",
-        @"IMESSAGE_PROXY_VERSION"
+        @"IMESSAGE_PROXY_PORT", @"IMESSAGE_PROXY_DATABASE_PATH", @"IMESSAGE_PROXY_MESSAGES_DATABASE_PATH",
+        @"IMESSAGE_PROXY_ALLOWED_TARGETS_FILE", @"IMESSAGE_PROXY_IMSG_BIN", @"IMESSAGE_PROXY_EXPECTED_IMSG_VERSION",
+        @"IMESSAGE_PROXY_IMSG_SHA256", @"IMESSAGE_PROXY_MAX_CONCURRENCY", @"IMESSAGE_PROXY_READ_TIMEOUT_SECONDS",
+        @"IMESSAGE_PROXY_SEND_TIMEOUT_SECONDS", @"IMESSAGE_PROXY_SOCKET_TIMEOUT_SECONDS", @"IMESSAGE_PROXY_API_KEY",
+        @"IMESSAGE_PROXY_CONFIG", @"IMESSAGE_PROXY_HOME", @"IMESSAGE_PROXY_SOURCE_DIR", @"IMESSAGE_PROXY_UI_DIR",
+        @"IMESSAGE_PROXY_URL", @"IMESSAGE_PROXY_VERSION"
     ]];
     for (NSString *name in environment) {
         if ([name hasPrefix:@"IMESSAGE_PROXY_"] && ![recognized containsObject:name]) {
@@ -1013,7 +998,7 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
     }
 
     IMPConfiguration *configuration = [IMPConfiguration new];
-    configuration.socketPath = environment[@"IMESSAGE_PROXY_SOCKET_PATH"] ?: @"";
+    configuration.uiDirectory = environment[@"IMESSAGE_PROXY_UI_DIR"] ?: @"";
     configuration.databasePath = environment[@"IMESSAGE_PROXY_DATABASE_PATH"] ?: @"";
     configuration.allowedTargetsPath = environment[@"IMESSAGE_PROXY_ALLOWED_TARGETS_FILE"] ?: @"";
     configuration.imsgPath = environment[@"IMESSAGE_PROXY_IMSG_BIN"] ?: @"/opt/homebrew/bin/imsg";
@@ -1021,7 +1006,20 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
     configuration.messagesDatabasePath =
         environment[@"IMESSAGE_PROXY_MESSAGES_DATABASE_PATH"]
             ?: [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Messages/chat.db"];
-    configuration.publicOrigin = environment[@"IMESSAGE_PROXY_PUBLIC_ORIGIN"] ?: @"";
+    // The listener is loopback-only and its port is the single network setting,
+    // so the browser origin the console is served from is derived rather than
+    // configured. Nothing an operator can set makes these disagree.
+    NSString *portText = environment[@"IMESSAGE_PROXY_PORT"] ?: @"8765";
+    NSUInteger parsedPort = 0;
+    if (!ParsePositiveInteger(portText, 65535, &parsedPort) || parsedPort < 1024) {
+        if (error != NULL) {
+            *error = ServerError(IMPServerErrorInvalidConfiguration,
+                                 @"IMESSAGE_PROXY_PORT must be a canonical base-10 port in the range 1024-65535");
+        }
+        return nil;
+    }
+    configuration.port = (uint16_t)parsedPort;
+    configuration.localOrigin = [NSString stringWithFormat:@"http://127.0.0.1:%lu", (unsigned long)parsedPort];
 
     NSString *expectedVersion = environment[@"IMESSAGE_PROXY_EXPECTED_IMSG_VERSION"] ?: RequiredIMSGVersion;
     if (![expectedVersion isEqualToString:RequiredIMSGVersion]) {
@@ -1033,16 +1031,14 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
         return nil;
     }
 
-    if (![configuration.socketPath hasPrefix:@"/"] || configuration.socketPath.length == 0 ||
-        [configuration.socketPath fileSystemRepresentation] == NULL ||
-        strlen(configuration.socketPath.fileSystemRepresentation) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
+    if (![configuration.uiDirectory hasPrefix:@"/"] || configuration.uiDirectory.length == 0) {
         if (error != NULL) {
-            *error = ServerError(IMPServerErrorInvalidConfiguration, @"IMESSAGE_PROXY_SOCKET_PATH is invalid");
+            *error =
+                ServerError(IMPServerErrorInvalidConfiguration, @"IMESSAGE_PROXY_UI_DIR must be an absolute directory");
         }
         return nil;
     }
     if (![configuration.databasePath hasPrefix:@"/"] || configuration.databasePath.length == 0 ||
-        !ValidateParentDirectory(configuration.socketPath, error) ||
         !ValidateParentDirectory(configuration.databasePath, error)) {
         if (error != NULL && *error == nil) {
             *error = ServerError(IMPServerErrorInvalidConfiguration, @"IMESSAGE_PROXY_DATABASE_PATH is invalid");
@@ -1140,16 +1136,6 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
     }
     configuration.maximumConcurrency = maximumConcurrency;
 
-    if (configuration.publicOrigin.length > 0) {
-        NSURLComponents *origin = [NSURLComponents componentsWithString:configuration.publicOrigin];
-        if (![origin.scheme isEqualToString:@"https"] || origin.host.length == 0 || origin.user != nil ||
-            origin.password != nil || origin.query != nil || origin.fragment != nil || origin.path.length > 0) {
-            if (error != NULL) {
-                *error = ServerError(IMPServerErrorInvalidConfiguration, @"IMESSAGE_PROXY_PUBLIC_ORIGIN is invalid");
-            }
-            return nil;
-        }
-    }
     if (DependencyVersion(configuration, error) == nil) {
         return nil;
     }
@@ -1160,7 +1146,8 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
     (void)store;
 
     NSDictionary *fingerprintObject = @{
-        @"socket_path": configuration.socketPath,
+        @"port": @(configuration.port),
+        @"ui_directory": configuration.uiDirectory,
         @"database_path": configuration.databasePath,
         @"messages_database_path": configuration.messagesDatabasePath,
         @"allowed_targets_path": configuration.allowedTargetsPath,
@@ -1168,7 +1155,7 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
         @"imsg_path": configuration.imsgPath,
         @"imsg_sha256": configuration.imsgSHA256,
         @"imsg_version": RequiredIMSGVersion,
-        @"public_origin": configuration.publicOrigin,
+        @"local_origin": configuration.localOrigin,
         @"read_timeout": @(configuration.readTimeout),
         @"send_timeout": @(configuration.sendTimeout),
         @"socket_timeout": @(configuration.socketTimeout),
@@ -2076,20 +2063,18 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
     }
 }
 
+// The x-api-client-ip header used to be trustworthy only because the edge
+// stripped every X-API-* header a client sent and re-added this one itself. With
+// the edge gone nothing can vouch for it, and it keyed both the rate-limit
+// bucket and the audit source column - so a caller could split its own bucket or
+// forge another party's identity in the audit trail simply by sending it. Every
+// connection now arrives on loopback from this machine, which is exactly what
+// "local" already meant, so the header is ignored rather than trusted.
 - (NSString *)sourceForRequest:(IMPHTTPRequest *)request valid:(BOOL *)valid {
-    NSString *source = request.headers[@"x-api-client-ip"];
-    if (source.length == 0) {
-        if (valid != NULL)
-            *valid = YES;
-        return @"local";
-    }
-    struct in_addr ipv4;
-    struct in6_addr ipv6;
-    BOOL isAddress = source.length <= INET6_ADDRSTRLEN && (inet_pton(AF_INET, source.UTF8String, &ipv4) == 1 ||
-                                                           inet_pton(AF_INET6, source.UTF8String, &ipv6) == 1);
+    (void)request;
     if (valid != NULL)
-        *valid = isAddress;
-    return isAddress ? source : @"invalid";
+        *valid = YES;
+    return @"local";
 }
 
 - (IMPProcessResult *)runIMSGArguments:(NSArray<NSString *> *)arguments
@@ -2125,7 +2110,12 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
     NSString *origin = request.headers[@"origin"];
     if (origin.length == 0)
         return YES;
-    return self.configuration.publicOrigin.length > 0 && [origin isEqualToString:self.configuration.publicOrigin];
+    // The console is served by this process from its own loopback origin, so the
+    // only Origin a browser may legitimately present is that one. Accepting the
+    // localhost spelling as well keeps a bookmarked http://localhost:PORT working
+    // without widening anything: both resolve to the interface we bound.
+    return [origin isEqualToString:self.configuration.localOrigin] ||
+           [origin isEqualToString:[NSString stringWithFormat:@"http://localhost:%u", self.configuration.port]];
 }
 
 - (BOOL)recordAttemptForRequestID:(NSString *)requestID
@@ -2180,9 +2170,52 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
     return response;
 }
 
+// The console is three files, so the router matches an exact table of request
+// paths against constants and looks the chosen name up in a second constant
+// table. No byte of the request is ever concatenated into a filesystem path, so
+// traversal is not defended against here - it is unrepresentable. Assets are
+// served before authentication because a browser cannot present a bearer token
+// for its own <script> tag; that is not a bypass, because the table cannot name
+// anything under /api and the API branches still run only after the bearer check.
+- (IMPHTTPResponse *)staticResponseForRequest:(IMPHTTPRequest *)request {
+    static NSDictionary<NSString *, NSArray<NSString *> *> *routes = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        routes = @{
+            @"/": @[@"index.html", @"text/html; charset=utf-8"],
+            @"/index.html": @[@"index.html", @"text/html; charset=utf-8"],
+            @"/app.js": @[@"app.js", @"text/javascript; charset=utf-8"],
+            @"/styles.css": @[@"styles.css", @"text/css; charset=utf-8"],
+        };
+    });
+    NSArray<NSString *> *route = routes[request.path];
+    if (route == nil) {
+        return nil;
+    }
+    if (![request.method isEqualToString:@"GET"] && ![request.method isEqualToString:@"HEAD"]) {
+        return Problem(405, @"method-not-allowed", @"This route accepts GET.");
+    }
+    NSString *path = [self.configuration.uiDirectory stringByAppendingPathComponent:route[0]];
+    NSError *readError = nil;
+    NSData *body = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:&readError];
+    if (body == nil) {
+        LogOperationalFailure("console.read", "asset_unavailable", readError);
+        return Problem(503, @"console-unavailable", @"The management console is not installed.");
+    }
+    IMPHTTPResponse *response = [IMPHTTPResponse new];
+    response.status = 200;
+    response.contentType = route[1];
+    response.body = [request.method isEqualToString:@"HEAD"] ? NSData.data : body;
+    return response;
+}
+
 - (IMPHTTPResponse *)responseForRequest:(IMPHTTPRequest *)request requestID:(NSString *)requestID {
     NSDate *started = [NSDate date];
     NSThread.currentThread.threadDictionary[RequestContextThreadKey] = requestID;
+    IMPHTTPResponse *asset = [self staticResponseForRequest:request];
+    if (asset != nil) {
+        return asset;
+    }
     BOOL sourceValid = NO;
     NSString *source = [self sourceForRequest:request valid:&sourceValid];
     NSThread.currentThread.threadDictionary[RequestSourceThreadKey] = source;
@@ -2972,10 +3005,47 @@ static BOOL WriteBootstrapToken(NSString *token) {
     return YES;
 }
 
+// Closing a TCP connection while the peer is still writing sends it a reset,
+// and the response we just wrote is discarded unread. That is how a client
+// learns nothing from the 413 and 431 the request caps exist to report: it is
+// still uploading when we answer. Half-close, then read what is already in
+// flight until the peer gives up, so the response is delivered before the
+// socket goes away. Bounded, because the point is to answer an over-limit
+// request rather than to keep reading one.
+static void CloseAfterResponse(int fileDescriptor) {
+    static const int drainMilliseconds = 250;
+    static const size_t drainLimit = 64 * 1024;
+    shutdown(fileDescriptor, SHUT_WR);
+    struct pollfd waiting = {.fd = fileDescriptor, .events = POLLIN};
+    char scratch[4096];
+    size_t drained = 0;
+    while (drained < drainLimit && poll(&waiting, 1, drainMilliseconds) > 0) {
+        ssize_t got = read(fileDescriptor, scratch, sizeof(scratch));
+        if (got <= 0) {
+            break;
+        }
+        drained += (size_t)got;
+    }
+    close(fileDescriptor);
+}
+
 static void SendResponse(int fileDescriptor, IMPHTTPResponse *response) {
     NSMutableString *headers = [NSMutableString
+        // The browser-facing headers the edge used to add are emitted here now,
+        // because this process is the edge. Strict-Transport-Security is
+        // deliberately absent: user agents ignore it over plain HTTP, and
+        // asserting it for a loopback origin would poison the operator's own
+        // hostname if they later front this with TLS. That belongs to whatever
+        // terminates TLS in front, and the documentation says so.
         stringWithFormat:@"HTTP/1.1 %ld %@\r\nContent-Length: %lu\r\nContent-Type: %@\r\nConnection: close\r\n"
-                          "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n",
+                          "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
+                          "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; "
+                          "img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; "
+                          "frame-ancestors 'none'\r\n"
+                          "Permissions-Policy: accelerometer=(), camera=(), geolocation=(), gyroscope=(), "
+                          "magnetometer=(), microphone=(), payment=(), usb=()\r\n"
+                          "Referrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\n"
+                          "X-Robots-Tag: noindex, nofollow, noarchive\r\n",
                          (long)response.status, ReasonPhrase(response.status), (unsigned long)response.body.length,
                          response.contentType ?: @"application/json"];
     [response.headers enumerateKeysAndObjectsUsingBlock:^(NSString *name, NSString *value, __unused BOOL *stop) {
@@ -3016,11 +3086,7 @@ static BOOL RunServer(IMPConfiguration *configuration, NSError **error) {
         fprintf(stderr, "         Most often Full Disk Access no longer covers this exact binary.\n");
         fflush(stderr);
     }
-    struct stat existing;
-    if (lstat(configuration.socketPath.fileSystemRepresentation, &existing) == 0) {
-        return ServerStartupFailure(error, @"socket path already exists", "socket_path_exists");
-    }
-    int server = socket(AF_UNIX, SOCK_STREAM, 0);
+    int server = socket(AF_INET, SOCK_STREAM, 0);
     if (server < 0) {
         return ServerStartupFailure(error, @"could not create socket", "socket_create_failed");
     }
@@ -3029,34 +3095,55 @@ static BOOL RunServer(IMPConfiguration *configuration, NSError **error) {
         close(server);
         return ServerStartupFailure(error, @"could not secure socket", "socket_secure_failed");
     }
-    struct sockaddr_un address = {0};
-    address.sun_family = AF_UNIX;
-    strlcpy(address.sun_path, configuration.socketPath.fileSystemRepresentation, sizeof(address.sun_path));
-    mode_t previousMask = umask(0177);
-    int bindResult = bind(server, (struct sockaddr *)&address, sizeof(address));
-    umask(previousMask);
-    if (bindResult != 0 || chmod(configuration.socketPath.fileSystemRepresentation, 0600) != 0 ||
-        listen(server, 32) != 0) {
+    // A stopped listener leaves the port in TIME_WAIT for up to two minutes.
+    // Without this, every restart inside that window fails to bind and the
+    // service crash-loops on "port already in use" - which is exactly what
+    // server-restart does. SO_REUSEADDR does not permit a second live listener
+    // on the same address and port, so a genuine conflict still returns
+    // EADDRINUSE below.
+    int reuse = 1;
+    if (setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) != 0) {
         close(server);
-        unlink(configuration.socketPath.fileSystemRepresentation);
-        return ServerStartupFailure(error, @"could not bind socket", "socket_bind_failed");
+        return ServerStartupFailure(error, @"could not configure the socket", "socket_option_failed");
     }
-    struct stat ownedSocket;
-    if (lstat(configuration.socketPath.fileSystemRepresentation, &ownedSocket) != 0 || !S_ISSOCK(ownedSocket.st_mode) ||
-        ownedSocket.st_uid != getuid() || (ownedSocket.st_mode & 0777) != 0600) {
+    // Loopback is a compile-time constant, never a setting. There is no
+    // environment variable that can widen it, and a second instance is refused by
+    // bind() returning EADDRINUSE rather than by a check that could race.
+    struct sockaddr_in address = {0};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(configuration.port);
+    if (bind(server, (struct sockaddr *)&address, sizeof(address)) != 0) {
+        int reason = errno;
         close(server);
-        unlink(configuration.socketPath.fileSystemRepresentation);
-        return ServerStartupFailure(error, @"socket ownership is invalid", "socket_ownership_invalid");
+        return ServerStartupFailure(error,
+                                    reason == EADDRINUSE ? @"the configured port is already in use"
+                                                         : @"could not bind the loopback port",
+                                    "socket_bind_failed");
+    }
+    if (listen(server, 32) != 0) {
+        close(server);
+        return ServerStartupFailure(error, @"could not listen on the loopback port", "socket_listen_failed");
+    }
+    // Prove what was actually bound rather than trusting the request. If this is
+    // ever anything but 127.0.0.1 on the configured port, refuse to serve.
+    struct sockaddr_in bound = {0};
+    socklen_t boundLength = sizeof(bound);
+    if (getsockname(server, (struct sockaddr *)&bound, &boundLength) != 0 || boundLength != sizeof(bound) ||
+        bound.sin_family != AF_INET || bound.sin_addr.s_addr != htonl(INADDR_LOOPBACK) ||
+        ntohs(bound.sin_port) != configuration.port) {
+        close(server);
+        return ServerStartupFailure(error, @"the listener is not bound to loopback", "socket_not_loopback");
     }
     IMPServer *handler = [[IMPServer alloc] initWithConfiguration:configuration error:error];
     if (handler == nil) {
         close(server);
-        unlink(configuration.socketPath.fileSystemRepresentation);
         LogOperationalFailure("server.start", "handler_initialization_failed", error == NULL ? nil : *error);
         return NO;
     }
-    os_log_with_type(ServerOperationalLog(), OS_LOG_TYPE_INFO, "action=server.start version=%{public}s transport=unix",
-                     ServerVersion.UTF8String);
+    os_log_with_type(ServerOperationalLog(), OS_LOG_TYPE_INFO,
+                     "action=server.start version=%{public}s transport=loopback port=%u", ServerVersion.UTF8String,
+                     configuration.port);
     dispatch_queue_t clients =
         dispatch_queue_create("io.github.mglaeser.imessage-proxy.server.clients", DISPATCH_QUEUE_CONCURRENT);
     dispatch_group_t clientGroup = dispatch_group_create();
@@ -3115,7 +3202,7 @@ static BOOL RunServer(IMPConfiguration *configuration, NSError **error) {
                                  action:@"server.overloaded"
                                 started:NSDate.date];
             SendResponse(client, response);
-            close(client);
+            CloseAfterResponse(client);
             continue;
         }
         dispatch_group_async(clientGroup, clients, ^{
@@ -3136,7 +3223,7 @@ static BOOL RunServer(IMPConfiguration *configuration, NSError **error) {
                                           started:requestStarted]
                         : [handler responseForRequest:request requestID:requestID];
                 SendResponse(client, response);
-                close(client);
+                CloseAfterResponse(client);
                 dispatch_semaphore_signal(slots);
             }
         });
@@ -3162,12 +3249,9 @@ static BOOL RunServer(IMPConfiguration *configuration, NSError **error) {
             }
         }
     }
+    // A TCP listener leaves no filesystem artifact, so closing it is the whole
+    // teardown; the port is released by the kernel.
     close(server);
-    struct stat current;
-    if (lstat(configuration.socketPath.fileSystemRepresentation, &current) == 0 &&
-        current.st_dev == ownedSocket.st_dev && current.st_ino == ownedSocket.st_ino) {
-        unlink(configuration.socketPath.fileSystemRepresentation);
-    }
     if (!acceptFailed && !drainFailed) {
         os_log_with_type(ServerOperationalLog(), OS_LOG_TYPE_INFO, "action=server.stop status=ok");
     }

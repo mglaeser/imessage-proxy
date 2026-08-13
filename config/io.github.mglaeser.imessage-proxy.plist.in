@@ -26,16 +26,16 @@
 		<string>8</string>
 		<key>IMESSAGE_PROXY_MESSAGES_DATABASE_PATH</key>
 		<string>__MESSAGES_DATABASE_PATH__</string>
-		<key>IMESSAGE_PROXY_PUBLIC_ORIGIN</key>
-		<string>__PUBLIC_ORIGIN__</string>
+		<key>IMESSAGE_PROXY_PORT</key>
+		<string>__PORT__</string>
 		<key>IMESSAGE_PROXY_READ_TIMEOUT_SECONDS</key>
 		<string>30</string>
 		<key>IMESSAGE_PROXY_SEND_TIMEOUT_SECONDS</key>
 		<string>180</string>
-		<key>IMESSAGE_PROXY_SOCKET_PATH</key>
-		<string>__SOCKET_PATH__</string>
 		<key>IMESSAGE_PROXY_SOCKET_TIMEOUT_SECONDS</key>
 		<string>10</string>
+		<key>IMESSAGE_PROXY_UI_DIR</key>
+		<string>__UI_DIR__</string>
 	</dict>
 	<key>ExitTimeOut</key>
 	<integer>210</integer>

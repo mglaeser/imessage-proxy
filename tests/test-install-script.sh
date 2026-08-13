@@ -49,9 +49,8 @@ assert_contains 'installer self-test passed' "$piped_output"
 
 help_text="$(run_installer --help 2>&1)"
 for expected in \
-  '--host HOSTNAME' \
+  '--port N' \
   '--imsg PATH' \
-  '--caddy PATH' \
   '--admin-name NAME' \
   '--expires-in-days N' \
   '--source DIR' \
@@ -61,7 +60,7 @@ for expected in \
 done
 
 expect_failure 'unknown option: --wat' run_installer --wat
-expect_failure '--host requires a hostname' run_installer --host
+expect_failure '--port requires a number' run_installer --port
 expect_failure '--sha256 requires a digest' run_installer --sha256
 expect_failure '--expires-in-days requires a value' run_installer --expires-in-days
 
@@ -76,14 +75,10 @@ expect_failure '--tag must have the form vMAJOR.MINOR.PATCH' \
   run_installer --tag latest
 expect_failure '--sha256 must be a 64-character lowercase SHA-256 digest' \
   run_installer --sha256 deadbeef
-expect_failure '--host must be an explicit lowercase public DNS hostname' \
-  run_installer --host localhost
-expect_failure '--host must be an explicit lowercase public DNS hostname' \
-  run_installer --host messages.example.com
-expect_failure '--email must be a valid operator address on a public domain' \
-  run_installer --email operator@localhost
+expect_failure '--port must be in the range 1024-65535' run_installer --port 80
+expect_failure '--port must be in the range 1024-65535' run_installer --port 70000
+expect_failure '--port must be in the range 1024-65535' run_installer --port eight
 expect_failure '--imsg must be an absolute path' run_installer --imsg ./imsg
-expect_failure '--caddy must be an absolute path' run_installer --caddy ../caddy
 expect_failure '--prefix must be an absolute path' run_installer --prefix relative/path
 expect_failure 'use either --source or --archive, not both' \
   run_installer --source "$REPOSITORY" --archive "$temporary/archive.tar.gz"
@@ -96,21 +91,12 @@ fi
 # The generated configuration must define exactly the keys the CLI allowlists,
 # with the exposure gate closed.
 for expected_key in \
-  IMESSAGE_PROXY_API_HOST \
-  IMESSAGE_PROXY_ACME_EMAIL \
-  IMESSAGE_PROXY_PUBLIC_BIND \
-  IMESSAGE_PROXY_HTTP_PORT \
-  IMESSAGE_PROXY_HTTPS_PORT \
-  IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS \
+  IMESSAGE_PROXY_PORT \
   IMESSAGE_PROXY_IMSG_BIN \
-  IMESSAGE_PROXY_IMSG_SHA256 \
-  IMESSAGE_PROXY_CADDY_BIN \
-  IMESSAGE_PROXY_CADDY_SHA256; do
+  IMESSAGE_PROXY_IMSG_SHA256; do
   grep -Fq "$expected_key=" "$INSTALLER" ||
     fail "installer never writes the required config key: $expected_key"
 done
-grep -Fq 'IMESSAGE_PROXY_ENABLE_PUBLIC_HTTPS=no' "$INSTALLER" ||
-  fail 'installer must write a closed public-exposure gate'
 
 # The API key must stay on stdout only; the installer must not capture or store it.
 # shellcheck disable=SC2016  # the pattern intentionally matches literal shell syntax
@@ -119,12 +105,9 @@ if grep -Eq '\$\("\$cli" bootstrap|key=\$\(' "$INSTALLER"; then
 fi
 
 # Pinned dependency expectations must match the product CLI.
-for pin in \
-  "readonly EXPECTED_IMSG_VERSION='$(awk -F"'" '/^readonly EXPECTED_IMSG_VERSION=/ {print $2}' "$REPOSITORY/bin/imessage-proxy")'" \
-  "readonly EXPECTED_CADDY_VERSION='$(awk -F"'" '/^readonly EXPECTED_CADDY_VERSION=/ {print $2}' "$REPOSITORY/bin/imessage-proxy")'"; do
-  grep -Fq "$pin" "$INSTALLER" ||
-    fail "installer dependency pin disagrees with the CLI: $pin"
-done
+pin="readonly EXPECTED_IMSG_VERSION='$(awk -F"'" '/^readonly EXPECTED_IMSG_VERSION=/ {print $2}' "$REPOSITORY/bin/imessage-proxy")'"
+grep -Fq "$pin" "$INSTALLER" ||
+  fail "installer dependency pin disagrees with the CLI: $pin"
 
 # By default the installer must install the branch carrying the 1.0
 # architecture, not a published release that predates it.
@@ -173,20 +156,12 @@ ln -sf /bin/sh "$temporary/imsg-shim"
 resolved_link="$(bash -c "source '$INSTALLER'; resolve_real_path '$temporary/imsg-shim'")"
 [[ -n "$resolved_link" && ! -L "$resolved_link" ]] ||
   fail "symlink resolution returned an unusable path: $resolved_link"
+# The installer asks no questions of its own. The only interactive moment left is
+# the Full Disk Access checkpoint, which macOS requires and the CLI owns.
+if grep -Eq "prompt_for_value|Service hostname|Operator email" "$INSTALLER"; then
+  fail "installer still prompts for something"
+fi
 
-# A private install must be able to decline public identity, and the placeholder
-# it records must be the exact value the CLI accepts while the gate is closed.
-# If these two drift, the installer writes a config its own product refuses.
-for placeholder in PLACEHOLDER_API_HOST PLACEHOLDER_ACME_EMAIL; do
-  installer_value="$(bash -c "source '$INSTALLER'; printf '%s' \"\$$placeholder\"")"
-  [[ -n "$installer_value" ]] || fail "installer does not define $placeholder"
-  [[ "$installer_value" == *.invalid ]] ||
-    fail "$placeholder must sit in the reserved .invalid namespace: $installer_value"
-  grep -Fq "readonly $placeholder='$installer_value'" "$REPOSITORY/bin/imessage-proxy" ||
-    fail "installer $placeholder disagrees with the CLI"
-done
-grep -Fq 'Enter to skip' "$INSTALLER" ||
-  fail 'installer does not offer to skip the public identity prompts'
 
 # Build noise must be collapsible, and recoverable when a step fails.
 grep -Fq 'run_quietly' "$INSTALLER" ||
@@ -198,7 +173,7 @@ for quiet_step in 'Compiling the native server' 'Installing the CLI and reviewed
 done
 
 # The completion summary has to carry the facts an operator needs next.
-for summary in 'ADMINISTRATOR KEY' 'WHERE THINGS ARE' 'HOW TO REACH IT' 'NEXT' 'UNINSTALL' 'YOUR PATH'; do
+for summary in 'OPEN THE CONSOLE' 'OR CALL THE API' 'UNINSTALL' 'YOUR PATH' 'YOUR ADMINISTRATOR KEY'; do
   grep -Fq "$summary" "$INSTALLER" || fail "completion summary omits: $summary"
 done
 grep -Fq 'scripts/uninstall.sh | bash' "$INSTALLER" ||
@@ -306,12 +281,15 @@ path_already_output="$(
 [[ ! -s "$path_already_probe/.zshrc" ]] ||
   fail 'the installer edited a startup file that already had the prefix on PATH'
 
-# README must advertise the one-liner before any manual instructions.
+# The README leads with the one-liner and delegates the long form to docs, so
+# that the front page stays short enough to actually be read.
 readme_oneliner="$(grep -n 'scripts/install.sh | bash' "$REPOSITORY/README.md" | head -1 | cut -d: -f1)"
-readme_manual="$(grep -n '^## Install and run manually' "$REPOSITORY/README.md" | head -1 | cut -d: -f1)"
 [[ -n "$readme_oneliner" ]] || fail 'README does not advertise the installer one-liner'
-[[ -n "$readme_manual" ]] || fail 'README is missing the manual installation section'
-((readme_oneliner < readme_manual)) ||
-  fail 'README must present the one-liner before the manual instructions'
+((readme_oneliner < 60)) ||
+  fail "README buries the one-liner at line $readme_oneliner"
+grep -Fq 'docs/install.md' "$REPOSITORY/README.md" ||
+  fail 'README does not link to the install guide'
+[[ "$(grep -c '' "$REPOSITORY/README.md")" -le 220 ]] ||
+  fail "README has grown back to $(grep -c '' "$REPOSITORY/README.md") lines"
 
 printf '%s\n' 'iMessage Proxy installer tests passed.'

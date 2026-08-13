@@ -26,7 +26,23 @@ readonly server_log="$temporary/server.log"
 readonly bootstrap_log="$temporary/bootstrap.log"
 readonly response_body="$temporary/response.json"
 readonly response_headers="$temporary/response.headers"
-readonly socket_path="$temporary/run/server.sock"
+# The listener is loopback TCP now, so the suite needs a free port rather than a
+# socket path. Probe upward from a pseudo-random base so parallel runs do not
+# collide, and fail loudly rather than silently testing nothing.
+find_free_port() {
+  local candidate
+  for candidate in $(seq $((20000 + RANDOM % 20000)) 65535); do
+    if ! lsof -nP -iTCP:"$candidate" -sTCP:LISTEN >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  printf 'FAIL: no free TCP port for the test server\n' >&2
+  exit 1
+}
+server_port="$(find_free_port)"
+readonly server_port
+readonly ui_dir="$temporary/web"
 readonly database_path="$temporary/state/imessage-proxy.sqlite3"
 readonly messages_database_path="$temporary/messages/chat.db"
 readonly targets_path="$temporary/private/allowed-targets.txt"
@@ -76,8 +92,8 @@ stop_server() {
       failed=1
     fi
   fi
-  if [[ -e "$socket_path" || -L "$socket_path" ]]; then
-    printf 'ERROR: native server stopped but its socket remains\n' >&2
+  if lsof -nP -iTCP:"$server_port" -sTCP:LISTEN > /dev/null 2>&1; then
+    printf 'ERROR: native server stopped but its port is still listening\n' >&2
     failed=1
   fi
   return "$failed"
@@ -98,7 +114,8 @@ install -d -m 0700 \
   "$temporary/run" \
   "$temporary/state" \
   "$temporary/messages" \
-  "$temporary/private"
+  "$temporary/private" \
+  "$ui_dir"
 # Keep fake behavior in the shell fixture, but pin and spawn a native executable
 # so the test exercises the same verified native-path launch as production.
 install -m 0400 "$FIXTURES/fake-imsg.sh" "$fake_imsg_driver"
@@ -165,10 +182,10 @@ run_native_with_digest() {
     "IMESSAGE_PROXY_IMSG_SHA256=$dependency_digest"
     'IMESSAGE_PROXY_MAX_CONCURRENCY=4'
     "IMESSAGE_PROXY_MESSAGES_DATABASE_PATH=$messages_database_path"
-    'IMESSAGE_PROXY_PUBLIC_ORIGIN=https://messages.example.test'
+    "IMESSAGE_PROXY_PORT=$server_port"
     'IMESSAGE_PROXY_READ_TIMEOUT_SECONDS=2'
     'IMESSAGE_PROXY_SEND_TIMEOUT_SECONDS=2'
-    "IMESSAGE_PROXY_SOCKET_PATH=$socket_path"
+    "IMESSAGE_PROXY_UI_DIR=$ui_dir"
     'IMESSAGE_PROXY_SOCKET_TIMEOUT_SECONDS=2'
   )
   shift 2
@@ -191,12 +208,12 @@ request() {
   curl \
     --silent \
     --show-error \
-    --unix-socket "$socket_path" \
+    \
     --output "$response_body" \
     --dump-header "$response_headers" \
     --write-out '%{http_code}' \
     "$@" \
-    "http://localhost${path}"
+    "http://127.0.0.1:$server_port${path}"
 }
 
 assert_status() {
@@ -239,18 +256,17 @@ assert_no_private_fields() {
 }
 
 start_server() {
-  [[ ! -e "$socket_path" && ! -L "$socket_path" ]] || {
-    printf 'ERROR: native server socket exists before startup\n' >&2
+  if lsof -nP -iTCP:"$server_port" -sTCP:LISTEN > /dev/null 2>&1; then
+    printf 'ERROR: the test port is already in use before startup\n' >&2
     return 1
-  }
+  fi
   : > "$server_log"
   run_native_with_digest "$fake_imsg_sha256" exec serve >> "$server_log" 2>&1 &
   server_pid="$!"
   local ready='no'
   for _ in {1..100}; do
-    if kill -0 "$server_pid" 2>/dev/null && [[ -S "$socket_path" ]] && \
-      curl --silent --unix-socket "$socket_path" --output /dev/null \
-        http://localhost/api/status; then
+    if kill -0 "$server_pid" 2>/dev/null && \
+      curl --silent --output /dev/null "http://127.0.0.1:$server_port/api/status"; then
       ready='yes'
       break
     fi
@@ -399,7 +415,7 @@ grep -Fqi 'returned invalid data' "$temporary/messages-preflight-invalid.err"
 printf '%s\n' chats-failure > "${fake_imsg}.malformed"
 start_server
 kill -0 "$server_pid"
-[[ -S "$socket_path" ]]
+[[ "$(request /api/status)" == 401 ]]
 grep -Fqi 'degraded' "$server_log"
 if grep -Fq 'private Messages read failure detail' "$server_log"; then
   printf 'ERROR: native-server startup exposed private dependency diagnostics\n' >&2
@@ -552,13 +568,52 @@ grep -Fqi 'active administrator' "$temporary/second-bootstrap.err"
 
 start_server
 kill -0 "$server_pid"
-[[ "$(stat -f '%Lp' "$socket_path")" == 600 ]]
-[[ "$(stat -f '%u' "$socket_path")" == "$EUID" ]]
-[[ "$(stat -f '%HT' "$socket_path")" == Socket ]]
-if lsof -nP -a -p "$server_pid" -iTCP -sTCP:LISTEN | sed -n '2p' | grep -q .; then
-  printf 'ERROR: native server opened a TCP listener\n' >&2
+# The listener must be loopback and nothing else. This inverts the assertion the
+# suite carried when the transport was a 0600 Unix socket: the server now does
+# open a TCP listener, and the property worth pinning is that it can only ever be
+# reachable from this machine. A wildcard bind would expose every message on the
+# Mac to the local network, so it fails here rather than in the field.
+listeners="$(lsof -nP -a -p "$server_pid" -iTCP -sTCP:LISTEN -Fn | grep '^n' || true)"
+[[ -n "$listeners" ]] || {
+  printf 'ERROR: native server opened no listener at all\n' >&2
+  exit 1
+}
+while IFS= read -r listener; do
+  [[ "$listener" == "n127.0.0.1:$server_port" ]] || {
+    printf 'ERROR: native server listens somewhere other than loopback: %s\n' "$listener" >&2
+    exit 1
+  }
+done <<< "$listeners"
+
+# Console assets are served without a credential so a browser can load them,
+# while every /api route still refuses one. Serving the console must not have
+# opened an unauthenticated door.
+printf '%s' '<!doctype html><title>console</title>' > "$ui_dir/index.html"
+printf '%s' 'export const ok = true;' > "$ui_dir/app.js"
+printf '%s' ':root{color:#000}' > "$ui_dir/styles.css"
+for asset in / /index.html /app.js /styles.css; do
+  assert_status 200 "$(request "$asset")"
+done
+grep -Fq 'Content-Security-Policy:' "$response_headers"
+grep -Fq 'X-Frame-Options: DENY' "$response_headers"
+grep -Fq 'Referrer-Policy: no-referrer' "$response_headers"
+if grep -Fqi 'Strict-Transport-Security' "$response_headers"; then
+  printf 'ERROR: the server asserted HSTS over plain loopback HTTP\n' >&2
   exit 1
 fi
+assert_status 401 "$(request /api/status)"
+assert_status 401 "$(request /api/chats)"
+
+# Traversal is unrepresentable rather than filtered: nothing outside the table of
+# four request paths reaches a file at all.
+printf '%s' 'SECRET' > "$temporary/outside.txt"
+for probe in /../outside.txt /app.js/../../outside.txt /styles.css%2f..%2foutside.txt /web/app.js; do
+  status="$(request "$probe")"
+  [[ "$status" != 200 ]] || {
+    printf 'ERROR: a path outside the console table was served: %s\n' "$probe" >&2
+    exit 1
+  }
+done
 
 # Every credential failure is the same 401 challenge apart from its unique request ID.
 status="$(request /api/status)"
@@ -969,18 +1024,28 @@ assert_status 504 "$status"
 assert_problem 504
 rm -f -- "${fake_imsg}.malformed"
 
-# The same origin is accepted but the native boundary never emits ACAO headers.
-status="$(request /api/status \
-  --header "Authorization: Bearer $read_key" \
-  --header 'Origin: https://messages.example.test')"
-assert_status 200 "$status"
-assert_no_cors_header
-status="$(request /api/status \
-  --header "Authorization: Bearer $read_key" \
-  --header 'Origin: https://evil.example.test')"
-assert_status 403 "$status"
-assert_problem 403
-assert_no_cors_header
+# The allowed origin is derived from the port the server bound, not configured,
+# so the console's origin and the check cannot drift apart. Both loopback
+# spellings are accepted; nothing else is, and no ACAO header is ever emitted.
+for allowed_origin in "http://127.0.0.1:$server_port" "http://localhost:$server_port"; do
+  status="$(request /api/status \
+    --header "Authorization: Bearer $read_key" \
+    --header "Origin: $allowed_origin")"
+  assert_status 200 "$status"
+  assert_no_cors_header
+done
+for refused_origin in \
+  'https://evil.example.test' \
+  "http://127.0.0.1:$((server_port + 1))" \
+  "https://127.0.0.1:$server_port" \
+  "http://127.0.0.1.evil.example.test:$server_port"; do
+  status="$(request /api/status \
+    --header "Authorization: Bearer $read_key" \
+    --header "Origin: $refused_origin")"
+  assert_status 403 "$status"
+  assert_problem 403
+  assert_no_cors_header
+done
 
 # last_used_at is useful metadata without forcing a SQLite write on every request.
 last_used_before="$(sqlite3 "$database_path" \

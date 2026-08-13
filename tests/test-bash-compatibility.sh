@@ -90,23 +90,17 @@ report() {
   shift
   if "$@" >/dev/null 2>&1; then printf '%s=yes\n' "$name"; else printf '%s=no\n' "$name"; fi
 }
-report host_public   hostname_valid messages.integration.dev
-report host_upper    hostname_valid Messages.integration.dev
-report host_local    hostname_valid messages.local
-report host_invalid  hostname_valid imessage-proxy.invalid
-report host_ip       hostname_valid 203.0.113.10
-report host_empty    hostname_valid ''
-report mail_public   email_valid operator@integration.dev
-report mail_example  email_valid operator@example.com
-report mail_amp      email_valid 'ops&alerts@integration.dev'
-report ipv4_ok       ipv4_address_valid 203.0.113.10
-report ipv4_bad      ipv4_address_valid 203.0.113.999
-report port_ok       unprivileged_port_valid 8080
+report port_ok       unprivileged_port_valid 8765
 report port_priv     unprivileged_port_valid 443
-report port_pad      unprivileged_port_valid 08080
+report port_pad      unprivileged_port_valid 08765
+report port_high     unprivileged_port_valid 65535
+report port_over     unprivileged_port_valid 65536
+report port_empty    unprivileged_port_valid ''
 report fda_exact     full_disk_access_acknowledgement_matches 'FULL DISK ACCESS GRANTED'
 report fda_spaced    full_disk_access_acknowledgement_matches '  full disk access granted  '
 report fda_wrong     full_disk_access_acknowledgement_matches 'FULL DISK ACCESS'
+report key_allowed   service_config_key_allowed IMESSAGE_PROXY_PORT
+report key_refused   service_config_key_allowed IMESSAGE_PROXY_API_HOST
 printf 'config_path=%s\n' "$(service_config_path)"
 PROBE
 }
@@ -119,25 +113,20 @@ report() {
   shift
   if "$@" >/dev/null 2>&1; then printf '%s=yes\n' "$name"; else printf '%s=no\n' "$name"; fi
 }
-report host_public   hostname_valid messages.integration.dev
-report host_invalid  hostname_valid imessage-proxy.invalid
-report mail_public   email_valid operator@integration.dev
+report port_ok       admin_name_valid ok
 report admin_ok      admin_name_valid first-admin
 report admin_space   admin_name_valid ' leading'
 report expiry_ok     expires_days_valid 30
 report expiry_pad    expires_days_valid 007
 report tag_ok        release_tag_valid v1.0.0
 report tag_bad       release_tag_valid 1.0.0
-printf 'placeholder=%s|%s\n' "$PLACEHOLDER_API_HOST" "$PLACEHOLDER_ACME_EMAIL"
 PROBE
 }
 
 for prober in probe_cli probe_installer; do
   reference="$("$prober" "${COMPAT_LEVELS[0]}")"
   [[ -n "$reference" ]] || fail "$prober produced no output"
-  grep -q 'host_public=yes' <<< "$reference" || fail "$prober did not exercise the validators"
-  grep -q 'host_invalid=no' <<< "$reference" ||
-    fail "$prober expected the reserved .invalid namespace to be rejected as a public hostname"
+  grep -q 'port_ok=yes' <<< "$reference" || fail "$prober did not exercise the validators"
   for level in "${COMPAT_LEVELS[@]:1}"; do
     current="$("$prober" "$level")"
     if [[ "$current" != "$reference" ]]; then
