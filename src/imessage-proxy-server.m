@@ -6,6 +6,7 @@
 #import <fcntl.h>
 #import <limits.h>
 #import <math.h>
+#import <netinet/in.h>
 #import <os/log.h>
 #import <poll.h>
 #import <signal.h>
@@ -16,7 +17,6 @@
 #import <sys/socket.h>
 #import <sys/stat.h>
 #import <sys/types.h>
-#import <netinet/in.h>
 #import <sys/wait.h>
 #import <time.h>
 #import <unistd.h>

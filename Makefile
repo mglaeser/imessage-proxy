@@ -60,7 +60,7 @@ SDKFLAGS := $(if $(MACOS_SDK_PATH),-isysroot "$(MACOS_SDK_PATH)",)
 FRAMEWORKS := -framework Foundation -framework Security
 LIBRARIES := -lsqlite3
 
-.PHONY: all analyze build check clean debug help install lint test test-bash-compat test-installer test-uninstaller test-ui uninstall version
+.PHONY: all analyze build check clean debug format help install lint test test-bash-compat test-installer test-uninstaller test-ui uninstall version
 
 all: build
 
@@ -134,6 +134,10 @@ lint: _require-node ## Check Objective-C, shell, Markdown, JavaScript, and confi
 		IMESSAGE_PROXY_UI_DIR="$(CURDIR)/web" \
 		XDG_CONFIG_HOME="$$temporary/config" XDG_DATA_HOME="$$temporary/data" \
 			caddy adapt --config config/Caddyfile --adapter caddyfile --validate >/dev/null
+
+format: ## Rewrite Objective-C sources in the project's clang-format style.
+	@command -v clang-format >/dev/null 2>&1 || { printf 'error: clang-format is required\n' >&2; exit 127; }
+	clang-format -i $(SOURCES) $(HEADERS) $(TEST_C_SOURCES)
 
 check: lint build analyze test ## Run every local check used by CI.
 

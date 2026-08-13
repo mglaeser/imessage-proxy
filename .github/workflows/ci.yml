@@ -219,6 +219,16 @@ jobs:
         run: |
           xcodebuild -version
           xcrun clang --version
+      # TEMPORARY (draft #24): the refactor is authored on Linux, where no
+      # clang-format binary exists for this architecture, so every formatting
+      # round trip costs a full CI run. Print the exact rewrite it wants, then
+      # remove this step before the PR leaves draft.
+      - name: Show the clang-format rewrite
+        continue-on-error: true
+        run: |
+          make format
+          git --no-pager diff -- src/ tests/fixtures/ || true
+          git checkout -- src/ tests/fixtures/ || true
       - name: Run all checks
         run: make check STRICT=1
       - name: Verify version consistency
