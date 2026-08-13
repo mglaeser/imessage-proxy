@@ -864,10 +864,10 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
   )
   (
     setup_lifecycle_prerequisites
-    reset_lifecycle_case server-stop-socket
+    reset_lifecycle_case server-stop-port
     server_loaded() { return 0; }
     wait_for_socket_absent() { return 1; }
-    expect_failure 'native LaunchAgent stopped but its socket remains' \
+    expect_failure 'stopped but port 18765 is still in use' \
       server_stop 'STOP IMESSAGE PROXY SERVER'
     assert_contains "disable gui/$(id -u)/$SERVER_LABEL" "$lifecycle_call_log"
     assert_contains "bootout gui/$(id -u)/$SERVER_LABEL" "$lifecycle_call_log"
