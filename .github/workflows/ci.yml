@@ -64,7 +64,7 @@ jobs:
         run: npm run lint:openapi
       - name: Test the management console
         run: make test-ui
-      - name: Verify the key-store schema fingerprint and migration
+      - name: Verify the key-store schema and native invariants
         run: make test-schema
       - name: Test the one-command installer
         run: make test-installer

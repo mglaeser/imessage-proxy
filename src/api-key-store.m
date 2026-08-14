@@ -40,6 +40,10 @@ static NSString *const kIMPSchemaFingerprint = @"3d46edc160c5e89de3959aad521c54a
 // the SMS transport.
 // The exact column list IMPRecordFromStatement expects, in order. Written once
 // so a column cannot be added to one statement and forgotten in another.
+// Columns in IMP_API_KEY_COLUMNS. Anything selected after them starts here, so a
+// column added to the projection must be counted here in the same edit.
+static const int kIMPAPIKeyColumnCount = 10;
+
 #define IMP_API_KEY_COLUMNS                                                                                            \
     "uuid,name,key_prefix,scopes,sender_identifier,sender_identifier_assigned,created_at,expires_at,"                  \
     "revoked_at,last_used_at"
@@ -1552,7 +1556,7 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
         int result = sqlite3_step(statement);
         if (result == SQLITE_ROW) {
             matchedRecord = IMPRecordFromStatement(statement, 0);
-            storedHash = IMPColumnData(statement, 8);
+            storedHash = IMPColumnData(statement, kIMPAPIKeyColumnCount);
             if (matchedRecord == nil || storedHash.length != kIMPRawKeyLength) {
                 IMPSetError(error, IMPAPIKeyStoreErrorDatabaseCorrupt, @"An API key record is invalid.");
                 databaseOK = NO;
