@@ -347,6 +347,10 @@ select {
   color-scheme: dark;
 }
 
+option:disabled {
+  color: var(--quiet);
+}
+
 textarea {
   min-height: 132px;
   padding: 13px 14px;
@@ -601,7 +605,8 @@ a:focus-visible {
   margin-top: 16px;
 }
 
-.playground-fields label span {
+.playground-fields label span,
+.create-panel label span {
   color: var(--quiet);
   font-size: 0.68rem;
   font-weight: 500;
@@ -637,6 +642,27 @@ a:focus-visible {
   color: #c9d8de;
   font-size: 0.76rem;
   font-weight: 650;
+}
+
+#send-signature-help {
+  margin-bottom: 0;
+}
+
+/* The leading space is part of the suffix the service appends, so it must survive
+   collapsing: this is meant to read exactly as the recipient will see it. */
+#send-signature {
+  white-space: pre-wrap;
+}
+
+.notice {
+  margin: 20px 0 0;
+  padding: 12px 14px;
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: 10px;
+  color: #fde68a;
+  background: rgba(120, 78, 10, 0.18);
+  font-size: 0.76rem;
+  line-height: 1.5;
 }
 
 .request-preview {
@@ -825,6 +851,10 @@ table {
   border-collapse: collapse;
 }
 
+#keys-panel table {
+  min-width: 780px;
+}
+
 th,
 td {
   padding: 15px 14px;
@@ -881,6 +911,30 @@ td {
   max-width: 220px;
   flex-wrap: wrap;
   gap: 5px;
+}
+
+.sender-tag {
+  display: block;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.origin-badge {
+  display: inline-flex;
+  margin-top: 5px;
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: #adc0c8;
+  background: rgba(4, 12, 18, 0.38);
+  font-size: 0.62rem;
+}
+
+.origin-badge[data-origin="chosen"] {
+  border-color: rgba(94, 234, 212, 0.28);
+  color: var(--accent);
 }
 
 .scope-badge,

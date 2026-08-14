@@ -1,5 +1,10 @@
 const STORAGE_KEY = "imessage-proxy.admin-key";
 const MAX_RENDERED_RESPONSE_CHARACTERS = 100000;
+// What the service appends before the identifier. SMS is GSM-7, where a single
+// character outside that alphabet would cut the segment from 160 to 70; iMessage
+// pays nothing for the clearer glyph.
+const SEND_MARKERS = new Map([["imessage", "\u{1F516}"], ["sms", "^"]]);
+const SENDER_IDENTIFIER_PATTERN = /^[a-z]{2,8}$/;
 
 const elements = {
   auditFields: document.querySelector("#audit-fields"),
@@ -26,17 +31,25 @@ const elements = {
   createdKeyDialog: document.querySelector("#created-key-dialog"),
   keyCount: document.querySelector("#key-count"),
   keyFields: document.querySelector("#key-fields"),
+  keyIdentifier: document.querySelector("#key-identifier"),
   keysPanel: document.querySelector("#keys-panel"),
   keysTab: document.querySelector("#keys-tab"),
   keysBody: document.querySelector("#keys-body"),
   keysEmpty: document.querySelector("#keys-empty"),
   logoutButton: document.querySelector("#logout-button"),
+  messagesDetail: document.querySelector("#messages-detail"),
   messagesEnd: document.querySelector("#messages-end"),
   messagesLimit: document.querySelector("#messages-limit"),
   messagesParticipant: document.querySelector("#messages-participant"),
   messagesStart: document.querySelector("#messages-start"),
   messagesStatus: document.querySelector("#messages-status"),
   openPlayground: document.querySelector("#open-playground"),
+  operationChat: document.querySelector("#operation-chat"),
+  operationChatBackground: document.querySelector("#operation-chat-background"),
+  operationChatMessages: document.querySelector("#operation-chat-messages"),
+  operationChats: document.querySelector("#operation-chats"),
+  operationMessageStatistics: document.querySelector("#operation-message-statistics"),
+  operationScheduledMessages: document.querySelector("#operation-scheduled-messages"),
   overviewPanel: document.querySelector("#overview-panel"),
   overviewTab: document.querySelector("#overview-tab"),
   playgroundChatID: document.querySelector("#playground-chat-id"),
@@ -54,6 +67,7 @@ const elements = {
   playgroundRun: document.querySelector("#playground-run"),
   playgroundStatus: document.querySelector("#playground-status"),
   playgroundTab: document.querySelector("#playground-tab"),
+  readDisabledNotice: document.querySelector("#read-disabled-notice"),
   refreshButton: document.querySelector("#refresh-button"),
   revokeDialog: document.querySelector("#revoke-dialog"),
   revokeForm: document.querySelector("#revoke-form"),
@@ -64,7 +78,10 @@ const elements = {
   sendDialog: document.querySelector("#send-dialog"),
   sendDialogTarget: document.querySelector("#send-dialog-target"),
   sendFields: document.querySelector("#send-fields"),
+  sendService: document.querySelector("#send-service"),
+  sendSignature: document.querySelector("#send-signature"),
   sendTarget: document.querySelector("#send-target"),
+  sendTargetChat: document.querySelector("#send-target-chat"),
   sendTargetKind: document.querySelector("#send-target-kind"),
   sendText: document.querySelector("#send-text"),
   serviceDetail: document.querySelector("#service-detail"),
@@ -105,6 +122,8 @@ const elements = {
 let activeKey = "";
 let copyTimer = null;
 let allowedTargets = [];
+let senderIdentifiers = new Map();
+let signedInKeyID = "";
 let pendingPlaygroundRequest = null;
 let pendingRevocation = null;
 let pendingTargetRemoval = null;
@@ -292,11 +311,15 @@ function clearPlayground() {
   elements.statisticsTimeZone.value = "UTC";
   elements.auditLimit.value = "100";
   elements.playgroundKeyID.value = "";
+  elements.sendService.value = "imessage";
   elements.sendTargetKind.value = "recipient";
   updatePlaygroundOperation();
 }
 
 function clearConsoleData() {
+  signedInKeyID = "";
+  senderIdentifiers = new Map();
+  applyMessagesReadState(false, "");
   elements.keysBody.replaceChildren();
   elements.keyCount.textContent = "0 keys";
   elements.keysEmpty.hidden = true;
@@ -317,6 +340,7 @@ function clearConsoleData() {
   elements.createForm.reset();
   elements.createForm.elements.expires_in_days.value = "90";
   setFormError(elements.createError);
+  elements.keyIdentifier.setAttribute("aria-invalid", "false");
   elements.createButton.disabled = false;
   elements.refreshButton.disabled = false;
   elements.confirmRevoke.disabled = false;
@@ -493,13 +517,51 @@ function formatDate(value, fallback = "Never") {
   }).format(date);
 }
 
+// Full Disk Access is the one macOS permission that is never prompted for, so an
+// installation may legitimately decline it and only send. Everything the service
+// would then refuse with messages-read-disabled is greyed rather than hidden, and
+// the command that turns reading back on travels with it: only the operator at
+// that machine can act on it, and a dead control teaches them nothing.
+function applyMessagesReadState(disabled, command) {
+  for (const [operation, option] of MESSAGES_READ_OPTIONS) {
+    const { preview } = PLAYGROUND_OPERATIONS.get(operation);
+    option.disabled = disabled;
+    option.textContent = disabled ? `${preview} · reading Messages is off` : preview;
+  }
+  elements.sendTargetChat.disabled = disabled;
+  elements.sendTargetChat.textContent = disabled ? "Chat ID · reading Messages is off" : "Chat ID";
+
+  const refused = "Reading Messages is turned off for this installation, so chats, scheduled " +
+    "messages, statistics, and sending to a chat ID are refused. Sending to a recipient still works.";
+  const enable = command ? ` Turn it on with: ${command}` : "";
+  elements.readDisabledNotice.hidden = !disabled;
+  elements.readDisabledNotice.textContent = disabled ? `${refused}${enable}` : "";
+  elements.messagesDetail.textContent = disabled
+    ? (command ? `Turn on with: ${command}` : "Reading is turned off")
+    : "Native service";
+
+  // A refresh can turn reading off while a now-refused choice is selected, and a
+  // disabled option keeps its selection in the browser.
+  if (disabled && elements.sendTargetKind.value === "chat_id") {
+    elements.sendTargetKind.value = "recipient";
+    updateSendTargetHint();
+  }
+  if (disabled && MESSAGES_READ_OPTIONS.has(elements.playgroundOperation.value)) {
+    elements.playgroundOperation.value = "status";
+    updatePlaygroundOperation();
+  }
+}
+
 function renderStatus(payload) {
   const serviceRaw = payload?.status || "unknown";
   const messagesRaw = payload?.messages?.status || "unknown";
   const serviceLabel = titleCaseStatus(serviceRaw);
   const messagesLabel = titleCaseStatus(messagesRaw);
   const healthy = serviceLabel === "Healthy";
+  const enableWith = typeof payload?.messages?.enable_with === "string" ? payload.messages.enable_with : "";
 
+  signedInKeyID = typeof payload?.key?.id === "string" ? payload.key.id : "";
+  applyMessagesReadState(String(messagesRaw).toLowerCase() === "disabled", enableWith);
   elements.serviceStatus.textContent = serviceLabel;
   elements.messagesStatus.textContent = messagesLabel;
   elements.serviceVersion.textContent = String(payload?.version || "—");
@@ -553,10 +615,12 @@ function renderKeys(payload) {
   elements.keyCount.textContent = `${keys.length} ${keys.length === 1 ? "key" : "keys"}`;
   elements.keysEmpty.hidden = keys.length !== 0;
   renderPlaygroundKeyChoices(keys);
+  senderIdentifiers = new Map();
 
   for (const key of keys) {
     const row = document.createElement("tr");
     const nameCell = document.createElement("td");
+    const identifierCell = document.createElement("td");
     const scopesCell = document.createElement("td");
     const expiryCell = document.createElement("td");
     const lastUsedCell = document.createElement("td");
@@ -570,6 +634,15 @@ function renderKeys(payload) {
     if (revokedAt) {
       appendText(nameCell, "state-badge", "Revoked");
     }
+
+    const identifier = typeof key?.sender_identifier === "string" ? key.sender_identifier : "";
+    const assigned = key?.sender_identifier_assigned === true;
+    if (keyID && identifier) {
+      senderIdentifiers.set(keyID, identifier);
+    }
+    appendText(identifierCell, "sender-tag", identifier || "unavailable");
+    const originBadge = appendText(identifierCell, "origin-badge", assigned ? "Service-assigned" : "Operator-chosen");
+    originBadge.dataset.origin = assigned ? "assigned" : "chosen";
 
     const scopeList = document.createElement("div");
     scopeList.className = "scope-list";
@@ -596,9 +669,10 @@ function renderKeys(payload) {
     revokeButton.addEventListener("click", () => openRevokeDialog(keyID, keyName));
     actionCell.append(revokeButton);
 
-    row.append(nameCell, scopesCell, expiryCell, lastUsedCell, actionCell);
+    row.append(nameCell, identifierCell, scopesCell, expiryCell, lastUsedCell, actionCell);
     elements.keysBody.append(row);
   }
+  updateSendSignature();
 }
 
 // The allowlist is the send-authorisation boundary. The service exposes it only
@@ -941,10 +1015,16 @@ function buildKeyRequest() {
 
 function buildSendRequest() {
   const kind = elements.sendTargetKind.value;
+  const service = elements.sendService.value;
   const rawTarget = String(elements.sendTarget.value || "").trim();
   const message = String(elements.sendText.value || "");
+  elements.sendService.setAttribute("aria-invalid", "false");
   elements.sendTarget.setAttribute("aria-invalid", "false");
   elements.sendText.setAttribute("aria-invalid", "false");
+  if (!SEND_MARKERS.has(service)) {
+    elements.sendService.setAttribute("aria-invalid", "true");
+    throw new PlaygroundValidationError("Select iMessage or SMS as the service.", elements.sendService);
+  }
   let target;
   if (kind === "chat_id") {
     const value = Number(rawTarget);
@@ -973,11 +1053,12 @@ function buildSendRequest() {
     elements.sendText.setAttribute("aria-invalid", "true");
     throw new PlaygroundValidationError("Message must contain 1–4000 characters, may not start with a hyphen, and may not contain control characters.", elements.sendText);
   }
-  const body = { ...target, text: message };
+  const body = { ...target, text: message, service };
   return {
     body,
     method: "POST",
     path: "/api/messages",
+    service,
     signature: JSON.stringify(body),
     target: rawTarget,
   };
@@ -1004,6 +1085,7 @@ const playgroundValidationFields = [
   elements.playgroundChatID,
   elements.playgroundKeyID,
   elements.scheduledLimit,
+  elements.sendService,
   elements.sendTarget,
   elements.sendTargetKind,
   elements.sendText,
@@ -1023,6 +1105,19 @@ const PLAYGROUND_OPERATIONS = new Map([
   ["audit-events", { build: buildAuditRequest, groups: [elements.auditFields], preview: "GET /api/audit-events" }],
   ["keys", { build: buildKeysRequest, groups: [], preview: "GET /api/keys" }],
   ["key", { build: buildKeyRequest, groups: [elements.keyFields], preview: "GET /api/keys/{key_id}" }],
+]);
+
+// Every operation answered out of the Messages database, kept in step with
+// RequestReadsMessages in src/imessage-proxy-server.m. Sending is absent: it uses
+// Apple Events and works without Full Disk Access, except when a chat_id has to
+// be resolved, which is why the chat destination is greyed separately.
+const MESSAGES_READ_OPTIONS = new Map([
+  ["chats", elements.operationChats],
+  ["chat", elements.operationChat],
+  ["chat-messages", elements.operationChatMessages],
+  ["chat-background", elements.operationChatBackground],
+  ["scheduled-messages", elements.operationScheduledMessages],
+  ["message-statistics", elements.operationMessageStatistics],
 ]);
 
 function selectedPlaygroundOperation() {
@@ -1047,6 +1142,7 @@ function updatePlaygroundOperation() {
     group.hidden = false;
   }
   elements.playgroundPreview.textContent = operation.preview;
+  updateSendSignature();
   if (elements.playgroundOperation.value === "send-message") {
     updateSendTargetHint();
   }
@@ -1056,6 +1152,22 @@ function updateSendTargetHint() {
   const chat = elements.sendTargetKind.value === "chat_id";
   elements.sendTarget.type = chat ? "number" : "text";
   elements.sendTarget.setAttribute("placeholder", chat ? "42" : "person@example.net");
+}
+
+function sendServiceLabel(service) {
+  return service === "sms" ? "SMS" : "iMessage";
+}
+
+// GET /api/status names the signed-in key but not its sender identifier, so the
+// suffix shown here is matched out of the key list that loads beside it. Showing
+// it before the send is the point: the operator sees the exact characters the
+// recipient will read, including which transport they were chosen for.
+function updateSendSignature() {
+  const identifier = senderIdentifiers.get(signedInKeyID) || "";
+  const marker = SEND_MARKERS.get(elements.sendService.value) || "";
+  elements.sendSignature.textContent = identifier && marker
+    ? ` ${marker}${identifier}`
+    : "unavailable until the status check succeeds";
 }
 
 function renderPlaygroundBody(payload) {
@@ -1147,16 +1259,17 @@ async function executePlaygroundRequest(request) {
 
 function currentSendDraftSignature() {
   const kind = elements.sendTargetKind.value;
+  const service = elements.sendService.value;
   const rawTarget = String(elements.sendTarget.value || "").trim();
   const text = String(elements.sendText.value || "");
   if (kind === "chat_id") {
     const chatIDValue = Number(rawTarget);
     return Number.isSafeInteger(chatIDValue) && chatIDValue > 0
-      ? JSON.stringify({ chat_id: chatIDValue, text })
+      ? JSON.stringify({ chat_id: chatIDValue, text, service })
       : "";
   }
   if (kind === "recipient") {
-    return JSON.stringify({ recipient: rawTarget, text });
+    return JSON.stringify({ recipient: rawTarget, text, service });
   }
   return "";
 }
@@ -1189,7 +1302,7 @@ function handlePlaygroundSubmit(event) {
   elements.sendDialogTarget.textContent = request.target;
   elements.confirmSend.textContent = sendAttempt?.signature === request.signature
     ? "Retry same attempt"
-    : "Send iMessage";
+    : `Send ${sendServiceLabel(request.service)}`;
   elements.sendDialog.showModal();
   window.setTimeout(() => elements.confirmSend.focus(), 0);
 }
@@ -1306,12 +1419,16 @@ function showCreatedKey(key) {
 async function handleCreate(event) {
   event.preventDefault();
   setFormError(elements.createError);
+  elements.keyIdentifier.setAttribute("aria-invalid", "false");
   const formData = new FormData(elements.createForm);
   const name = String(formData.get("name") || "").trim();
   const expiresInDays = Number(formData.get("expires_in_days"));
   const scopes = selectedScopes();
   const nameBytes = new TextEncoder().encode(name).length;
   const generation = sessionGeneration;
+  // The service stores the identifier lowercased, so a typed capital is
+  // normalized here rather than refused.
+  const identifier = String(formData.get("sender_identifier") || "").trim().toLowerCase();
 
   if (!name) {
     setFormError(elements.createError, "Give this key a recognizable name.");
@@ -1321,6 +1438,12 @@ async function handleCreate(event) {
   if (nameBytes > 80) {
     setFormError(elements.createError, "The key name must be at most 80 UTF-8 bytes.");
     elements.createForm.elements.name.focus();
+    return;
+  }
+  if (identifier && !SENDER_IDENTIFIER_PATTERN.test(identifier)) {
+    setFormError(elements.createError, "The sender identifier must be 2 to 8 roman letters, such as kle.");
+    elements.keyIdentifier.setAttribute("aria-invalid", "true");
+    elements.keyIdentifier.focus();
     return;
   }
   if (scopes.length === 0) {
@@ -1333,16 +1456,15 @@ async function handleCreate(event) {
     return;
   }
 
+  // An absent field asks the service to assign one; an empty string is refused.
+  const body = { expires_in_days: expiresInDays, name, scopes };
+  if (identifier) {
+    body.sender_identifier = identifier;
+  }
+
   elements.createButton.disabled = true;
   try {
-    const created = await apiRequest("/api/keys", {
-      method: "POST",
-      body: {
-        expires_in_days: expiresInDays,
-        name,
-        scopes,
-      },
-    }, generation);
+    const created = await apiRequest("/api/keys", { body, method: "POST" }, generation);
     requireCurrentSession(generation);
     if (!created || typeof created.key !== "string" || !created.key) {
       throw new RequestError("The service did not return the new key.", 502);
@@ -1470,6 +1592,7 @@ for (const section of consoleSections) {
 elements.openPlayground.addEventListener("click", () => activateConsoleSection(elements.playgroundTab, true));
 elements.playgroundOperation.addEventListener("change", updatePlaygroundOperation);
 elements.playgroundForm.addEventListener("submit", handlePlaygroundSubmit);
+elements.sendService.addEventListener("change", updateSendSignature);
 elements.sendTargetKind.addEventListener("change", updateSendTargetHint);
 elements.cancelSend.addEventListener("click", closeSendDialog);
 elements.sendConfirmForm.addEventListener("submit", handleSendConfirmation);

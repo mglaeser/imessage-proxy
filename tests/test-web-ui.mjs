@@ -289,6 +289,23 @@ function elementFromMarkup(document, id) {
   return document.register(element);
 }
 
+// A browser selects the first option of a select that marks none as selected.
+// elementFromMarkup builds every element childless, so those defaults are
+// restored here: no real select starts with an empty value, and the console
+// reads send-service before anything has changed it.
+function applySelectDefaults(document) {
+  for (const match of markup.matchAll(/<select\b([^>]*)>([\s\S]*?)<\/select>/gi)) {
+    const id = attribute(match[1], "id");
+    const firstOption = match[2].match(/<option\b[^>]*\bvalue="([^"]*)"/i);
+    if (id === null || firstOption === null) {
+      continue;
+    }
+    const element = document.elements.get(id);
+    element.value = firstOption[1];
+    element.defaultValue = firstOption[1];
+  }
+}
+
 function anonymousScopeControls(document) {
   return Array.from(markup.matchAll(/<input\b([^>]*\bname="scope\[\]"[^>]*)>/gi), (match) => {
     const control = new FakeElement(document, "input");
@@ -305,6 +322,7 @@ function createHarness({ initialResponses = [], storedKey = "" } = {}) {
   for (const id of ids) {
     elementFromMarkup(document, id);
   }
+  applySelectDefaults(document);
 
   const textDefaults = {
     "connection-label": "Signed out",
@@ -330,9 +348,10 @@ function createHarness({ initialResponses = [], storedKey = "" } = {}) {
 
   const createForm = document.elements.get("create-form");
   const keyName = document.elements.get("key-name");
+  const keyIdentifier = document.elements.get("key-identifier");
   const keyExpiry = document.elements.get("key-expiry");
   const scopes = anonymousScopeControls(document);
-  createForm.controls = [keyName, ...scopes, keyExpiry];
+  createForm.controls = [keyName, keyIdentifier, ...scopes, keyExpiry];
   createForm.elements = { expires_in_days: keyExpiry, name: keyName };
 
   const playgroundForm = document.elements.get("playground-form");
@@ -351,6 +370,7 @@ function createHarness({ initialResponses = [], storedKey = "" } = {}) {
     "statistics-media",
     "audit-limit",
     "playground-key-id",
+    "send-service",
     "send-target-kind",
     "send-target",
     "send-text",
@@ -449,7 +469,7 @@ function enqueue(fetchMock, ...responses) {
 // the index arithmetic in the tests below honest if that ever changes again.
 const AUTHENTICATED_REQUESTS = 3;
 
-async function authenticate(harness, key = "admin-test-key", keys = [], targets = []) {
+async function authenticate(harness, key = "admin-test-key", keys = [], targets = [], status = {}) {
   enqueue(
     harness.fetchMock,
     json(200, {
@@ -457,6 +477,7 @@ async function authenticate(harness, key = "admin-test-key", keys = [], targets 
       status: "ok",
       uptime_seconds: 7322,
       version: "1.0.0",
+      ...status,
     }),
     json(200, { keys }),
     json(200, { targets }),
@@ -509,6 +530,9 @@ test("markup and interactive controls retain their accessibility contracts", asy
   assert.match(markup, /id="overview-tab"[\s\S]*role="tab"[\s\S]*aria-controls="overview-panel"/);
   assert.match(markup, /id="playground-panel"[\s\S]*role="tabpanel"[\s\S]*aria-labelledby="playground-tab"/);
   assert.match(markup, /<label for="playground-operation">Endpoint<\/label>/);
+  assert.match(markup, /<label for="key-identifier">Sender identifier/);
+  assert.match(markup, /<label for="send-service">Service<\/label>/);
+  assert.match(markup, /id="read-disabled-notice" role="status" hidden/);
   assert.match(markup, /id="playground-error" role="alert" hidden/);
   assert.match(markup, /id="playground-status" role="status" aria-live="polite"/);
   assert.match(markup, /id="playground-output" tabindex="0"/);
@@ -752,6 +776,7 @@ test("message sending requires confirmation and safely reuses one idempotency ke
   assert.equal(first.options.method, "POST");
   assert.deepEqual(JSON.parse(first.options.body), {
     recipient: "first-last@example.net",
+    service: "imessage",
     text: "Hello from the playground",
   });
   assert.match(firstIdempotencyKey, /^[0-9a-f-]{36}$/);
@@ -778,6 +803,58 @@ test("message sending requires confirmation and safely reuses one idempotency ke
   assert.notEqual(separate.options.headers.get("Idempotency-Key"), firstIdempotencyKey);
   assert.equal(separate.options.headers.get("Authorization"), bearerValue("admin-test-key"));
   assert.doesNotMatch(harness.element("playground-preview").textContent, /admin-test-key|Idempotency-Key/);
+});
+
+test("the send form picks a transport and previews the exact suffix the recipient will read", async () => {
+  const harness = createHarness();
+  await authenticate(harness, "admin-test-key", [{
+    expires_at: null,
+    id: "signed-in-key",
+    key_prefix: "imp_console",
+    last_used_at: null,
+    name: "Console key",
+    revoked_at: null,
+    scopes: ["admin"],
+    sender_identifier: "kle",
+    sender_identifier_assigned: false,
+  }], [], { key: { id: "signed-in-key" } });
+
+  harness.element("playground-operation").value = "send-message";
+  await harness.element("playground-operation").emit("change");
+  assert.equal(harness.element("send-signature").textContent, " \u{1F516}kle");
+  harness.element("send-service").value = "sms";
+  await harness.element("send-service").emit("change");
+  assert.equal(harness.element("send-signature").textContent, " ^kle");
+
+  harness.element("send-target").value = "+15551234567";
+  harness.element("send-text").value = "Meeting moved to 15:00";
+  await harness.element("playground-form").emit("submit");
+  assert.equal(harness.element("send-dialog").open, true);
+  assert.equal(harness.element("confirm-send").textContent, "Send SMS");
+  harness.fetchMock.enqueueFailure();
+  await harness.element("send-confirm-form").emit("submit");
+  await settle();
+  const smsRequest = harness.fetchMock.requests.at(-1);
+  assert.deepEqual(JSON.parse(smsRequest.options.body), {
+    recipient: "+15551234567",
+    service: "sms",
+    text: "Meeting moved to 15:00",
+  });
+  const smsAttemptKey = smsRequest.options.headers.get("Idempotency-Key");
+
+  // The service is part of what the send was, so changing it is a new attempt:
+  // replaying the SMS key on an iMessage body is an idempotency conflict.
+  harness.element("send-service").value = "imessage";
+  await harness.element("send-service").emit("change");
+  assert.equal(harness.element("send-signature").textContent, " \u{1F516}kle");
+  await harness.element("playground-form").emit("submit");
+  assert.equal(harness.element("confirm-send").textContent, "Send iMessage");
+  enqueue(harness.fetchMock, json(202, { operation_id: "accepted-imessage", state: "accepted" }));
+  await harness.element("send-confirm-form").emit("submit");
+  await settle();
+  const iMessageRequest = harness.fetchMock.requests.at(-1);
+  assert.equal(JSON.parse(iMessageRequest.options.body).service, "imessage");
+  assert.notEqual(iMessageRequest.options.headers.get("Idempotency-Key"), smsAttemptKey);
 });
 
 test("key creation sends the simple API payload and clears the one-time secret after copying", async () => {
@@ -835,6 +912,162 @@ test("key creation sends the simple API payload and clears the one-time secret a
   assert.match(harness.element("keys-body").textContent, /Notification client/);
 });
 
+test("sender identifiers are validated before any request and their origin is visible", async () => {
+  const harness = createHarness();
+  await authenticate(harness, "admin-test-key", [{
+    expires_at: "2030-01-01T00:00:00Z",
+    id: "key-assigned",
+    key_prefix: "imp_assigned",
+    last_used_at: null,
+    name: "Assigned client",
+    revoked_at: null,
+    scopes: ["messages:send"],
+    sender_identifier: "abc",
+    sender_identifier_assigned: true,
+  }, {
+    expires_at: "2030-01-01T00:00:00Z",
+    id: "key-chosen",
+    key_prefix: "imp_chosen",
+    last_used_at: null,
+    name: "Chosen client",
+    revoked_at: null,
+    scopes: ["messages:send"],
+    sender_identifier: "kle",
+    sender_identifier_assigned: false,
+  }]);
+
+  const [assignedRow, chosenRow] = harness.element("keys-body").children;
+  assert.equal(assignedRow.children[1].children[0].textContent, "abc");
+  assert.equal(assignedRow.children[1].children[1].textContent, "Service-assigned");
+  assert.equal(assignedRow.children[1].children[1].dataset.origin, "assigned");
+  assert.equal(chosenRow.children[1].children[0].textContent, "kle");
+  assert.equal(chosenRow.children[1].children[1].textContent, "Operator-chosen");
+  assert.equal(chosenRow.children[1].children[1].dataset.origin, "chosen");
+
+  const before = harness.fetchMock.requests.length;
+  harness.element("key-name").value = "Notifier";
+  harness.scopes[1].checked = true;
+  for (const candidate of ["k", "toolongtag", "kl3", "kl-e", "kl e"]) {
+    harness.element("key-identifier").value = candidate;
+    await harness.element("create-form").emit("submit");
+    assert.equal(harness.element("create-error").hidden, false, candidate);
+    assert.match(harness.element("create-error").textContent, /2 to 8 roman letters/, candidate);
+    assert.equal(harness.element("key-identifier").getAttribute("aria-invalid"), "true", candidate);
+    assert.equal(harness.document.activeElement, harness.element("key-identifier"), candidate);
+  }
+  assert.equal(harness.fetchMock.requests.length, before, "local validation performs no request");
+
+  // The service stores the tag lowercased, so a typed capital is normalized.
+  enqueue(harness.fetchMock, json(201, { key: "chosen-secret", sender_identifier: "kle" }));
+  harness.element("key-identifier").value = "  KLE  ";
+  await harness.element("create-form").emit("submit");
+  assert.deepEqual(JSON.parse(harness.fetchMock.requests.at(-1).options.body), {
+    expires_in_days: 90,
+    name: "Notifier",
+    scopes: ["messages:send"],
+    sender_identifier: "kle",
+  });
+  assert.equal(harness.element("create-error").hidden, true);
+  assert.equal(harness.element("key-identifier").value, "");
+
+  // An empty field is left out of the body, which is what asks the service to
+  // assign one; an explicit empty string would be refused.
+  enqueue(harness.fetchMock, json(201, { key: "assigned-secret", sender_identifier: "def" }));
+  harness.element("key-name").value = "Assigned notifier";
+  harness.scopes[1].checked = true;
+  await harness.element("create-form").emit("submit");
+  const assignedBody = JSON.parse(harness.fetchMock.requests.at(-1).options.body);
+  assert.equal(Object.hasOwn(assignedBody, "sender_identifier"), false);
+  assert.equal(assignedBody.name, "Assigned notifier");
+});
+
+test("declining Full Disk Access greys every refused control and shows how to turn reading on", async () => {
+  const harness = createHarness();
+  await authenticate(harness, "admin-test-key", [], [], {
+    messages: {
+      dependency_version: "1.0.0",
+      enable_with: "imessage-proxy enable-messages-read",
+      status: "disabled",
+    },
+  });
+
+  assert.equal(harness.element("messages-status").textContent, "Disabled");
+  assert.equal(
+    harness.element("messages-detail").textContent,
+    "Turn on with: imessage-proxy enable-messages-read",
+  );
+  assert.equal(harness.element("read-disabled-notice").hidden, false);
+  assert.match(harness.element("read-disabled-notice").textContent, /Reading Messages is turned off/);
+  assert.match(harness.element("read-disabled-notice").textContent, /Sending to a recipient still works/);
+  assert.match(
+    harness.element("read-disabled-notice").textContent,
+    /Turn it on with: imessage-proxy enable-messages-read/,
+  );
+
+  for (const id of [
+    "operation-chats",
+    "operation-chat",
+    "operation-chat-messages",
+    "operation-chat-background",
+    "operation-scheduled-messages",
+    "operation-message-statistics",
+    "send-target-chat",
+  ]) {
+    assert.equal(harness.element(id).disabled, true, id);
+    assert.match(harness.element(id).textContent, /reading Messages is off/, id);
+  }
+
+  // Nothing is hidden, and the endpoints that never touch the database still run.
+  assert.equal(harness.element("operation-chats").hidden, false);
+  const statusRequest = await runPlayground(harness, "status", null, json(200, { status: "ok" }));
+  assert.equal(statusRequest.path, "/api/status");
+  assert.equal(
+    harness.element("send-signature").textContent,
+    "unavailable until the status check succeeds",
+  );
+
+  // A refresh that turns reading off moves the selection off a now-refused
+  // endpoint, because a disabled option keeps its selection in the browser.
+  const live = createHarness();
+  await authenticate(live);
+  assert.equal(live.element("read-disabled-notice").hidden, true);
+  assert.equal(live.element("operation-chats").disabled, false);
+  live.element("playground-operation").value = "chats";
+  await live.element("playground-operation").emit("change");
+  live.element("send-target-kind").value = "chat_id";
+  enqueue(
+    live.fetchMock,
+    json(200, {
+      messages: { enable_with: "imessage-proxy enable-messages-read", status: "disabled" },
+      status: "ok",
+      version: "1.0.0",
+    }),
+    json(200, { keys: [] }),
+    json(200, { targets: [] }),
+  );
+  await live.element("refresh-button").emit("click");
+  await settle();
+  assert.equal(live.element("playground-operation").value, "status");
+  assert.equal(live.element("send-target-kind").value, "recipient");
+  assert.equal(live.element("read-disabled-notice").hidden, false);
+
+  // Granting the permission puts every control back as it was.
+  enqueue(
+    live.fetchMock,
+    json(200, { messages: { status: "ready" }, status: "ok", version: "1.0.0" }),
+    json(200, { keys: [] }),
+    json(200, { targets: [] }),
+  );
+  await live.element("refresh-button").emit("click");
+  await settle();
+  assert.equal(live.element("read-disabled-notice").hidden, true);
+  assert.equal(live.element("read-disabled-notice").textContent, "");
+  assert.equal(live.element("operation-chats").disabled, false);
+  assert.equal(live.element("operation-chats").textContent, "GET /api/chats");
+  assert.equal(live.element("send-target-chat").textContent, "Chat ID");
+  assert.equal(live.element("messages-detail").textContent, "Native service");
+});
+
 test("revocation requires confirmation, calls the encoded resource, and refreshes the list", async () => {
   const harness = createHarness();
   await authenticate(harness, "admin-test-key", [{
@@ -846,7 +1079,7 @@ test("revocation requires confirmation, calls the encoded resource, and refreshe
     revoked_at: null,
     scopes: ["messages:read"],
   }]);
-  const revokeButton = harness.element("keys-body").children[0].children[4].children[0];
+  const revokeButton = harness.element("keys-body").children[0].children[5].children[0];
 
   await revokeButton.emit("click");
   assert.equal(harness.element("revoke-dialog").open, true);

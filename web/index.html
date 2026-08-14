@@ -140,7 +140,7 @@
             <article class="metric-card">
               <p>Messages</p>
               <strong id="messages-status">Checking</strong>
-              <span>Native service</span>
+              <span id="messages-detail">Native service</span>
             </article>
             <article class="metric-card">
               <p>Version</p>
@@ -160,7 +160,7 @@
               <h2 id="overview-guide-title">Every capability, one key away.</h2>
               <p>
                 Open the API playground to inspect chats, view statistics, or send an
-                allowlisted iMessage. Authentication is added automatically.
+                allowlisted iMessage or SMS. Authentication is added automatically.
               </p>
             </div>
             <button class="button button-primary" id="open-playground" type="button">Try an endpoint</button>
@@ -182,6 +182,8 @@
                 <p>The active key is applied automatically and is never shown in the request preview.</p>
               </div>
 
+              <p class="notice" id="read-disabled-notice" role="status" hidden></p>
+
               <form id="playground-form" novalidate>
                 <label for="playground-operation">Endpoint</label>
                 <select id="playground-operation" name="operation" required>
@@ -189,12 +191,12 @@
                     <option value="status">GET /api/status</option>
                   </optgroup>
                   <optgroup label="Chats and messages">
-                    <option value="chats">GET /api/chats</option>
-                    <option value="chat">GET /api/chats/{chat_id}</option>
-                    <option value="chat-messages">GET /api/chats/{chat_id}/messages</option>
-                    <option value="chat-background">GET /api/chats/{chat_id}/background</option>
-                    <option value="scheduled-messages">GET /api/scheduled-messages</option>
-                    <option value="message-statistics">GET /api/statistics/messages</option>
+                    <option value="chats" id="operation-chats">GET /api/chats</option>
+                    <option value="chat" id="operation-chat">GET /api/chats/{chat_id}</option>
+                    <option value="chat-messages" id="operation-chat-messages">GET /api/chats/{chat_id}/messages</option>
+                    <option value="chat-background" id="operation-chat-background">GET /api/chats/{chat_id}/background</option>
+                    <option value="scheduled-messages" id="operation-scheduled-messages">GET /api/scheduled-messages</option>
+                    <option value="message-statistics" id="operation-message-statistics">GET /api/statistics/messages</option>
                     <option value="send-message">POST /api/messages</option>
                   </optgroup>
                   <optgroup label="Administration">
@@ -280,12 +282,19 @@
                 </div>
 
                 <div class="playground-fields send-fields" id="send-fields" hidden>
+                  <div>
+                    <label for="send-service">Service</label>
+                    <select id="send-service">
+                      <option value="imessage">iMessage</option>
+                      <option value="sms">SMS</option>
+                    </select>
+                  </div>
                   <div class="field-grid">
                     <div>
                       <label for="send-target-kind">Destination type</label>
                       <select id="send-target-kind">
                         <option value="recipient">Recipient</option>
-                        <option value="chat_id">Chat ID</option>
+                        <option value="chat_id" id="send-target-chat">Chat ID</option>
                       </select>
                     </div>
                     <div>
@@ -295,7 +304,15 @@
                   </div>
                   <label for="send-text">Message</label>
                   <textarea id="send-text" rows="6" placeholder="Hello from iMessage Proxy"></textarea>
-                  <p class="field-help">Messages.app acceptance is not delivery confirmation. Carrier SMS fallback is disabled.</p>
+                  <p class="field-help">
+                    Messages.app acceptance is not delivery confirmation. The chosen service is used
+                    exactly as selected, with no automatic fallback to the other one.
+                  </p>
+                  <p class="field-help" id="send-signature-help">
+                    Every message this key sends ends with its sender identifier, so a recipient can
+                    tell which credential wrote to them:
+                    <code id="send-signature">unavailable until the status check succeeds</code>
+                  </p>
                 </div>
 
                 <div class="request-preview" role="group" aria-label="Request preview">
@@ -415,6 +432,7 @@
                 <thead>
                   <tr>
                     <th scope="col">Name</th>
+                    <th scope="col">Sender identifier</th>
                     <th scope="col">Scopes</th>
                     <th scope="col">Expires</th>
                     <th scope="col">Last used</th>
@@ -451,6 +469,25 @@
                 placeholder="Production notifier"
               >
               <p class="field-help" id="key-name-help">1–80 UTF-8 bytes after surrounding whitespace is removed.</p>
+
+              <label for="key-identifier">Sender identifier <span>optional</span></label>
+              <input
+                id="key-identifier"
+                name="sender_identifier"
+                type="text"
+                minlength="2"
+                maxlength="8"
+                aria-describedby="key-identifier-help"
+                autocomplete="off"
+                autocapitalize="none"
+                spellcheck="false"
+                placeholder="kle"
+              >
+              <p class="field-help" id="key-identifier-help">
+                2–8 roman letters, appended to every message this key sends
+                (<code>🔖kle</code> on iMessage, <code>^kle</code> by SMS) so a recipient can tell
+                which credential wrote to them. Leave it empty and the service assigns one.
+              </p>
 
               <fieldset>
                 <legend>Scopes</legend>
@@ -536,7 +573,7 @@
       aria-describedby="send-dialog-description"
     >
       <p class="eyebrow">Confirm intentional send</p>
-      <h2 id="send-dialog-title">Send this iMessage?</h2>
+      <h2 id="send-dialog-title">Send this message?</h2>
       <p id="send-dialog-description">
         The request will be sent to <strong id="send-dialog-target">the selected destination</strong>.
         Accepted means Messages.app accepted the command, not that it was delivered.

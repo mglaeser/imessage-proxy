@@ -14,10 +14,11 @@
 </p>
 <!-- markdownlint-enable MD033 -->
 
-One process on your Mac reads conversations and sends iMessages over a REST API,
-with a browser console for day-to-day use. It listens on `127.0.0.1` only,
-authenticates every request with a scoped revocable key, and sends only to
-recipients you have allowlisted.
+One process on your Mac reads conversations and sends messages — iMessage or
+SMS — over a REST API, with a browser console for day-to-day use. It listens on
+`127.0.0.1` only, authenticates every request with a scoped revocable key, sends
+only to recipients you have allowlisted, and marks every message it sends with
+the key that sent it.
 
 ## Get started
 
@@ -52,8 +53,16 @@ curl --fail-with-body \
 ```
 
 `202 Accepted` means Messages.app accepted the command; it is not delivery
-confirmation. Each logical send needs an idempotency key. The service forces
-iMessage and disables carrier-SMS fallback.
+confirmation. Each logical send needs an idempotency key.
+
+Two things about that message are worth knowing before the first one goes out.
+It went by iMessage because that is the default; add `"service":"sms"` to send
+it over the carrier instead, and nothing ever falls back from one to the other.
+And it arrived tagged with the sending key's identifier, so whoever receives it
+can tell which automation wrote to them: a key identified as `aut` ends its
+messages with `🔖aut` over iMessage and `^aut` over SMS. Only an administrator
+key can send without that tag, one message at a time. See
+[the sender identifier](docs/api.md#the-sender-identifier).
 
 ## Console and API
 
@@ -71,7 +80,7 @@ analytics, third-party assets, or service worker.
 | `GET` | `/api/chats/{id}/background` | `messages:read` | Scrubbed background state |
 | `GET` | `/api/scheduled-messages` | `messages:read` | Future Send Later rows |
 | `GET` | `/api/statistics/messages` | `messages:read` | Message and media statistics |
-| `POST` | `/api/messages` | `messages:send` | Send an allowlisted iMessage |
+| `POST` | `/api/messages` | `messages:send` | Send an allowlisted iMessage or SMS |
 | `GET` | `/api/targets` | `admin` | List who may be messaged |
 | `PUT` | `/api/targets` | `admin` | Replace who may be messaged |
 | `GET` | `/api/audit-events` | `admin` | Bounded privacy-safe request metadata |
@@ -84,7 +93,9 @@ Examples and error semantics: [API](docs/api.md) and the
 ## Requirements
 
 - macOS, with a non-root GUI user signed in to Messages;
-- Full Disk Access for the native server binary, which the installer names;
+- Full Disk Access for the native server binary, which the installer names —
+  only for reading conversations, which an installation may decline and still
+  send;
 - Messages Automation permission, requested at your first send;
 - Xcode Command Line Tools and `curl`; and
 - [`imsg`](https://github.com/openclaw/imsg) **0.13.4**, pinned by digest and
@@ -125,13 +136,13 @@ client, and a public port. See [Install and operate](docs/install.md).
 
 The 1.0 surface covers stable, non-injected `imsg` capabilities that make sense
 across a security boundary: chat discovery, bounded history, scrubbed
-chat-background state, scheduled-message inspection, statistics, and text sends.
+chat-background state, scheduled-message inspection, statistics, and text sends
+over iMessage or SMS.
 
 It intentionally does not expose live infinite streams, Contacts-assisted
-identity lookup, attachment paths or uploads, arbitrary databases, carrier SMS,
-UI-driven reactions, read receipts, typing indicators, message mutation, chat
-management, rich effects, stickers, polls, private frameworks, or code
-injection. Those need different privacy, streaming, upload, or macOS security
+identity lookup, attachment paths or uploads, arbitrary databases, UI-driven
+reactions, read receipts, typing indicators, message mutation, chat management,
+rich effects, stickers, polls, private frameworks, or code injection. Those need different privacy, streaming, upload, or macOS security
 models; they are not hidden generic commands.
 
 Cross-chat text search is excluded too: the pinned dependency couples it to
