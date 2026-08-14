@@ -96,9 +96,6 @@ report port_pad      unprivileged_port_valid 08765
 report port_high     unprivileged_port_valid 65535
 report port_over     unprivileged_port_valid 65536
 report port_empty    unprivileged_port_valid ''
-report fda_exact     full_disk_access_acknowledgement_matches 'FULL DISK ACCESS GRANTED'
-report fda_spaced    full_disk_access_acknowledgement_matches '  full disk access granted  '
-report fda_wrong     full_disk_access_acknowledgement_matches 'FULL DISK ACCESS'
 report key_allowed   service_config_key_allowed IMESSAGE_PROXY_PORT
 report key_refused   service_config_key_allowed IMESSAGE_PROXY_API_HOST
 report key_read      service_config_key_allowed IMESSAGE_PROXY_MESSAGES_READ

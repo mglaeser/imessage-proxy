@@ -55,6 +55,10 @@ for expected in \
   '--expires-in-days N' \
   '--source DIR' \
   '--sha256 HEX' \
+  '--send-test ADDRESS' \
+  '--no-send-test' \
+  '--messages-read' \
+  '--no-messages-read' \
   '--self-test'; do
   assert_contains "$expected" "$help_text"
 done
@@ -63,6 +67,7 @@ expect_failure 'unknown option: --wat' run_installer --wat
 expect_failure '--port requires a number' run_installer --port
 expect_failure '--sha256 requires a digest' run_installer --sha256
 expect_failure '--expires-in-days requires a value' run_installer --expires-in-days
+expect_failure '--send-test requires a number or email' run_installer --send-test
 
 # Argument validation must fail before the installer touches the host.
 expect_failure '--admin-name must contain 1-80 printable ASCII bytes' \
@@ -82,6 +87,17 @@ expect_failure '--imsg must be an absolute path' run_installer --imsg ./imsg
 expect_failure '--prefix must be an absolute path' run_installer --prefix relative/path
 expect_failure 'use either --source or --archive, not both' \
   run_installer --source "$REPOSITORY" --archive "$temporary/archive.tar.gz"
+# A test-send address is refused while the operator is still at the prompt, not
+# by the CLI two commands later.
+for bad_target in nope 'chat_id:42' '+0155512345' 'a@b@c' 'has space@example.com'; do
+  expect_failure '--send-test must be +digits' run_installer --send-test "$bad_target"
+done
+# A run that answered both questions on the command line must get past validation
+# and fail only on the host check, which is what an unattended install does.
+expect_failure 'iMessage Proxy runs only on macOS' \
+  run_installer --no-send-test --no-messages-read
+expect_failure 'iMessage Proxy runs only on macOS' \
+  run_installer --send-test +15551234567 --messages-read
 
 # The installer never enables public HTTPS on its own.
 if grep -Eq -- '--public|ENABLE_PUBLIC_HTTPS=yes|EXPOSE IMESSAGE PROXY PUBLICLY' "$INSTALLER"; then
@@ -156,11 +172,224 @@ ln -sf /bin/sh "$temporary/imsg-shim"
 resolved_link="$(bash -c "source '$INSTALLER'; resolve_real_path '$temporary/imsg-shim'")"
 [[ -n "$resolved_link" && ! -L "$resolved_link" ]] ||
   fail "symlink resolution returned an unusable path: $resolved_link"
-# The installer asks no questions of its own. The only interactive moment left is
-# the Full Disk Access checkpoint, which macOS requires and the CLI owns.
+# The public-HTTPS prompts are gone for good; the two questions that remain are
+# about this Mac, not about publishing it.
 if grep -Eq "prompt_for_value|Service hostname|Operator email" "$INSTALLER"; then
-  fail "installer still prompts for something"
+  fail 'installer still prompts for the removed public-HTTPS values'
 fi
+
+# The send target is validated by the same rule the CLI and the server use, so an
+# address the installer accepts is one a send accepts.
+for good_target in +15551234567 +447700900123 name@example.com; do
+  bash -c "source '$INSTALLER'; send_target_valid \"\$1\"" _ "$good_target" ||
+    fail "send_target_valid rejected a legitimate address: $good_target"
+done
+for bad_target in '' ' ' -15551234567 '+0155512345' '+15551' 'a@b@c' '@leading' 'trailing@' 'chat_id:42'; do
+  bash -c "source '$INSTALLER'; send_target_valid \"\$1\"" _ "$bad_target" &&
+    fail "send_target_valid accepted an invalid address: ${bad_target:-<empty>}"
+done
+
+# Both questions must be answerable without a terminal, and a run that still has
+# one to ask must say which flags answer it rather than dying on a bare tty test.
+answered="$(
+  bash -c "
+    source '$INSTALLER'
+    terminal_available() { return 1; }
+    send_test=no
+    messages_read=disabled
+    require_terminal
+    printf 'no terminal needed\n'
+  "
+)" || fail 'an answered run refused to install without a terminal'
+[[ "$answered" == 'no terminal needed' ]] ||
+  fail "an answered run still demanded a terminal: $answered"
+unanswered="$(
+  bash -c "
+    source '$INSTALLER'
+    terminal_available() { return 1; }
+    require_terminal
+  " 2>&1 || true
+)"
+assert_contains '--send-test' "$unanswered"
+assert_contains '--no-messages-read' "$unanswered"
+
+# A stub CLI records what the installer asks of it, so the order of the send
+# proof and the send-only rollout can be asserted off a Mac.
+stub_cli="$temporary/imessage-proxy"
+cat > "$stub_cli" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_LOG"
+case "$1 ${2:-}" in
+  'targets list') printf '%s\n' "${STUB_TARGETS:-}" ;;
+  'send-test '*) exit "${STUB_SEND_STATUS:-0}" ;;
+esac
+exit 0
+STUB
+chmod +x "$stub_cli"
+
+stub_log() {
+  : > "$temporary/stub.log"
+  printf '%s\n' "$temporary/stub.log"
+}
+
+# The address is put on the send allowlist first: the service refuses every
+# target that is not on it, so the one command meant to prove the install works
+# would otherwise be the one that fails.
+log="$(stub_log)"
+STUB_LOG="$log" bash -c "
+  source '$INSTALLER'
+  send_test=yes
+  send_test_target=+15551234567
+  offer_test_send '$stub_cli'
+" > /dev/null 2>&1 || fail 'a requested test send did not complete'
+[[ "$(< "$log")" == $'targets list\ntargets add +15551234567\nsend-test +15551234567' ]] ||
+  fail "the test send did not allow the address before sending: $(< "$log")"
+
+# An address already on the allowlist must not be added again: `targets add`
+# refuses a duplicate, and that refusal is not a failed install.
+log="$(stub_log)"
+STUB_LOG="$log" STUB_TARGETS='+15551234567' bash -c "
+  source '$INSTALLER'
+  send_test=yes
+  send_test_target=+15551234567
+  offer_test_send '$stub_cli'
+" > /dev/null 2>&1 || fail 'a test send to an already allowed address failed'
+[[ "$(< "$log")" == $'targets list\nsend-test +15551234567' ]] ||
+  fail "an already allowed address was added again: $(< "$log")"
+
+# A refused Messages prompt is a fact about this Mac, not a broken install: the
+# run reports it, names the retry, and finishes.
+log="$(stub_log)"
+send_failure="$(
+  STUB_LOG="$log" STUB_SEND_STATUS=1 bash -c "
+    source '$INSTALLER'
+    send_test=yes
+    send_test_target=+15551234567
+    offer_test_send '$stub_cli'
+  " 2>&1
+)" || fail 'a failed test send aborted the installation'
+assert_contains 'imessage-proxy send-test +15551234567' "$send_failure"
+
+# --no-send-test must skip without touching the CLI at all.
+log="$(stub_log)"
+skipped="$(
+  STUB_LOG="$log" bash -c "
+    source '$INSTALLER'
+    send_test=no
+    offer_test_send '$stub_cli'
+  " 2>&1
+)" || fail 'skipping the test send failed'
+[[ ! -s "$log" ]] || fail "a skipped test send still called the CLI: $(< "$log")"
+assert_contains 'imessage-proxy send-test YOUR-NUMBER-OR-EMAIL' "$skipped"
+
+# The operator must be warned about the Messages permission before being asked
+# for an address, not after they have already committed one.
+log="$(stub_log)"
+warning_first="$(
+  STUB_LOG="$log" bash -c "
+    source '$INSTALLER'
+    ask_line() { printf '  %s' \"\$1\" >&2; printf '\n'; }
+    send_test=ask
+    offer_test_send '$stub_cli'
+  " 2>&1
+)"
+# Tolerant of a missing line on purpose: pipefail would otherwise abort the whole
+# suite here with no message, exactly when this assertion has something to say.
+warning_line="$(printf '%s\n' "$warning_first" | grep -n 'allow control of Messages' | head -1 | cut -d: -f1 || true)"
+address_line="$(printf '%s\n' "$warning_first" | grep -n 'for a test message' | head -1 | cut -d: -f1 || true)"
+[[ -n "$warning_line" && -n "$address_line" ]] ||
+  fail 'the test send offer no longer warns about the Messages permission'
+((warning_line < address_line)) ||
+  fail 'the installer asks for an address before warning about the permission prompt'
+
+# Enter, or no terminal at all, leaves reading off. Reading is a broad grant and
+# is never taken by default.
+for stubbed_answer in '' n no; do
+  resolved="$(
+    bash -c "
+      source '$INSTALLER'
+      ask_line() { printf '%s\n' '$stubbed_answer'; }
+      messages_read=ask
+      offer_messages_read > /dev/null 2>&1
+      printf '%s\n' \"\$messages_read\"
+    "
+  )"
+  [[ "$resolved" == disabled ]] ||
+    fail "answering '${stubbed_answer:-<empty>}' left reading $resolved"
+done
+for stubbed_answer in y Y yes YES; do
+  resolved="$(
+    bash -c "
+      source '$INSTALLER'
+      ask_line() { printf '%s\n' '$stubbed_answer'; }
+      terminal_available() { return 1; }
+      messages_read=ask
+      offer_messages_read > /dev/null 2>&1
+      printf '%s\n' \"\$messages_read\"
+    "
+  )"
+  [[ "$resolved" == enabled ]] ||
+    fail "answering '$stubbed_answer' left reading $resolved"
+done
+
+# The Full Disk Access grant belongs to the binary launchd runs. Naming a
+# terminal instead would send the operator to grant a process that never opens
+# the database.
+grant_text="$(
+  bash -c "
+    source '$INSTALLER'
+    terminal_available() { return 1; }
+    HOME=/Users/probe
+    print_full_disk_access_instructions
+  " 2>&1
+)"
+# shellcheck disable=SC2088  # the tilde is printed to the operator, not expanded
+assert_contains '~/Library/Messages/chat.db' "$grant_text"
+assert_contains 'System Settings > Privacy & Security > Full Disk Access' "$grant_text"
+assert_contains '/Users/probe/Library/Application Support/iMessage Proxy/state/bin/imessage-proxy-server' \
+  "$grant_text"
+if printf '%s\n' "$grant_text" | grep -Eqi 'add your terminal|Terminal\.app|parent launcher'; then
+  fail 'the Full Disk Access instructions send the operator to grant a terminal'
+fi
+
+# The grant checkpoint pauses for somebody who is reading it, and only for them:
+# a run that answered with --messages-read has nobody at the terminal to press
+# Enter, and must not wait for one.
+checkpoint_skipped="$(
+  bash -c "
+    source '$INSTALLER'
+    terminal_available() { return 0; }
+    ask_line() { printf 'PAUSED\n' >&2; printf '\n'; }
+    messages_read=enabled
+    offer_messages_read
+  " 2>&1
+)"
+if printf '%s\n' "$checkpoint_skipped" | grep -Fq PAUSED; then
+  fail 'a flag-answered run still waited at the Full Disk Access checkpoint'
+fi
+assert_contains 'Full Disk Access' "$checkpoint_skipped"
+checkpoint_shown="$(
+  bash -c "
+    source '$INSTALLER'
+    terminal_available() { return 0; }
+    ask_line() { printf 'ASKED:%s\n' \"\$1\" >&2; printf 'y\n'; }
+    messages_read=ask
+    offer_messages_read
+  " 2>&1
+)"
+assert_contains 'ASKED:Press Enter when you have added it' "$checkpoint_shown"
+
+# Declining reading is a complete installation. The service reads the switch once
+# at start from the plist its LaunchAgent carries, so the setting has to be
+# recorded, the plist rendered again and the service brought back up - and
+# prepare refuses to render while it is loaded.
+log="$(stub_log)"
+STUB_LOG="$log" bash -c "
+  source '$INSTALLER'
+  apply_send_only '$stub_cli'
+" > /dev/null 2>&1 || fail 'declining to read Messages did not complete'
+[[ "$(< "$log")" == $'disable-messages-read --confirm DISABLE MESSAGES READ\nserver-stop --confirm STOP IMESSAGE PROXY SERVER\nprepare\nserver-install' ]] ||
+  fail "the send-only rollout is in the wrong order: $(< "$log")"
 
 
 # Build noise must be collapsible, and recoverable when a step fails.
@@ -173,9 +402,16 @@ for quiet_step in 'Compiling the native server' 'Installing the CLI and reviewed
 done
 
 # The completion summary has to carry the facts an operator needs next.
-for summary in 'OPEN THE CONSOLE' 'OR CALL THE API' 'UNINSTALL' 'YOUR PATH' 'YOUR ADMINISTRATOR KEY'; do
+for summary in 'OPEN THE CONSOLE' 'OR CALL THE API' 'UNINSTALL' 'READING YOUR MESSAGES' 'YOUR PATH' \
+  'YOUR ADMINISTRATOR KEY'; do
   grep -Fq "$summary" "$INSTALLER" || fail "completion summary omits: $summary"
 done
+# Declining reading must finish as a supported configuration, naming what is off
+# and the one command that turns it on, not as a warning about a broken install.
+grep -Fq 'imessage-proxy enable-messages-read' "$INSTALLER" ||
+  fail 'the summary never names the command that turns reading on'
+grep -Fq 'messages-read-disabled' "$INSTALLER" ||
+  fail 'the summary never names what a send-only installation refuses'
 grep -Fq 'scripts/uninstall.sh | bash' "$INSTALLER" ||
   fail 'completion summary does not offer the uninstall one-liner'
 grep -Fq 'ensure_path_entry' "$INSTALLER" ||

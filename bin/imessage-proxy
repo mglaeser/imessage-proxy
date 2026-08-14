@@ -310,8 +310,8 @@ messages_read_enabled() {
 
 service_config_key_allowed() {
   case "$1" in
-    IMESSAGE_PROXY_MESSAGES_READ | \
-      IMESSAGE_PROXY_PORT | \
+    IMESSAGE_PROXY_PORT | \
+      IMESSAGE_PROXY_MESSAGES_READ | \
       IMESSAGE_PROXY_IMSG_BIN | \
       IMESSAGE_PROXY_IMSG_SHA256) return 0 ;;
     *) return 1 ;;
@@ -1116,41 +1116,7 @@ initialize_database() {
 }
 
 # Split from the prompt loop so the matching rule can be tested without a tty.
-full_disk_access_acknowledgement_matches() {
-  local candidate
-  candidate="$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"
-  candidate="${candidate#"${candidate%%[![:space:]]*}"}"
-  candidate="${candidate%"${candidate##*[![:space:]]}"}"
-  [[ "$candidate" == 'FULL DISK ACCESS GRANTED' ]]
-}
 
-acknowledge_full_disk_access() {
-  local acknowledgement='' attempt=0 expected='FULL DISK ACCESS GRANTED'
-  [[ -r /dev/tty && -w /dev/tty ]] ||
-    die 'bootstrap needs an interactive terminal for the Full Disk Access checkpoint'
-  printf '\nFull Disk Access is the one required manual macOS step.\n' >&2
-  printf 'Grant it to this exact freshly built binary:\n  %s\n' "$SERVER_BIN" >&2
-  printf 'Keep System Integrity Protection enabled.\n' >&2
-  # A typo here used to discard a completed build, download, and install. The
-  # checkpoint exists so a human reads the sentence, not to test typing, so a
-  # mistyped answer is retried rather than treated as a refusal. Case and
-  # surrounding whitespace are forgiven; the words still have to be typed.
-  while true; do
-    printf "After granting access, type '%s' to continue: " "$expected" >&2
-    IFS= read -r acknowledgement < /dev/tty ||
-      die 'could not read the Full Disk Access acknowledgement'
-    full_disk_access_acknowledgement_matches "$acknowledgement" && return 0
-    attempt=$((attempt + 1))
-    if ((attempt >= 3)); then
-      die 'Full Disk Access acknowledgement did not match; no service or credential was created'
-    fi
-    if [[ -z "$acknowledgement" ]]; then
-      printf 'Nothing was entered. Type the sentence exactly, or press Ctrl-C to stop.\n' >&2
-    else
-      printf 'That did not match. Type the sentence exactly, or press Ctrl-C to stop.\n' >&2
-    fi
-  done
-}
 
 require_bootstrap_tty() {
   if ! (exec 9<>/dev/tty) 2>/dev/null; then
@@ -1225,7 +1191,6 @@ bootstrap() {
   doctor >&2
   prepare >&2
   build_host >&2
-  acknowledge_full_disk_access
   initialize_database >&2
   check_bootstrap_eligibility "$admin_name" "$expires_days" >&2
   check_host >&2
