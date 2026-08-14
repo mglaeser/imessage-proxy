@@ -23,13 +23,71 @@ NSString *const IMPAPIKeyCreationRecordKey = @"record";
 NSString *const IMPAPIKeyCreationTokenKey = @"key";
 
 static const int kIMPApplicationID = 0x494d504b; // "IMPK"
-static const int kIMPSchemaVersion = 6;
-static const int kIMPMigratableSchemaVersion = 5;
+static const int kIMPSchemaVersion = 7;
+// The oldest schema this release can still open. Upgrades are applied in
+// sequence, so a database several releases behind is carried forward rather than
+// refused: an operator who skipped a release must not have to discard their keys.
+static const int kIMPOldestMigratableSchemaVersion = 5;
+static const NSUInteger kIMPMinimumSenderIdentifierLength = 2;
+static const NSUInteger kIMPMaximumSenderIdentifierLength = 8;
 // SHA-256 of the ordered non-internal sqlite_master object signature; update only
 // with a schema bump. tests/test-schema-fingerprint.mjs recomputes this from the
 // DDL in this file and fails if the two disagree, because a stale value here
 // would refuse to open every database in the field.
-static NSString *const kIMPSchemaFingerprint = @"223b40977c9f54e55e35a65d003934c62e8376b11ccedc139b2bd212846d69e1";
+static NSString *const kIMPSchemaFingerprint = @"3d46edc160c5e89de3959aad521c54a7d152ba162d0d9dc5257e0552f0f90565";
+
+// Every message a non-admin key sends carries this key's identifier, so it must
+// be present, and two keys must never be confusable for one another in a
+// received message - hence NOT NULL and UNIQUE, enforced by the database rather
+// than only by the code that writes to it. Roman letters only: the identifier is
+// appended to real messages, and anything else invites an encoding surprise on
+// the SMS transport.
+// The exact column list IMPRecordFromStatement expects, in order. Written once
+// so a column cannot be added to one statement and forgotten in another.
+#define IMP_API_KEY_COLUMNS                                                                                            \
+    "uuid,name,key_prefix,scopes,sender_identifier,sender_identifier_assigned,created_at,expires_at,"                  \
+    "revoked_at,last_used_at"
+
+static const char *const kIMPAPIKeysDDL =
+    "CREATE TABLE api_keys ("
+    "uuid TEXT PRIMARY KEY CHECK(length(uuid)=36),"
+    "name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 80),"
+    "key_prefix TEXT NOT NULL UNIQUE CHECK(length(key_prefix)=12),"
+    "key_hash BLOB NOT NULL UNIQUE CHECK(length(key_hash)=32),"
+    "scopes TEXT NOT NULL CHECK(scopes IN ("
+    "'messages:read','messages:send','admin',"
+    "'messages:read,messages:send','messages:read,admin',"
+    "'messages:send,admin','messages:read,messages:send,admin')) ,"
+    "sender_identifier TEXT NOT NULL UNIQUE CHECK("
+    "length(sender_identifier) BETWEEN 2 AND 8 AND NOT sender_identifier GLOB '*[^a-z]*'),"
+    "sender_identifier_assigned INTEGER NOT NULL CHECK(sender_identifier_assigned IN (0,1)),"
+    "created_at INTEGER NOT NULL CHECK(created_at > 0),"
+    "expires_at INTEGER CHECK(expires_at IS NULL OR expires_at > created_at),"
+    "revoked_at INTEGER CHECK(revoked_at IS NULL OR revoked_at >= created_at),"
+    "last_used_at INTEGER CHECK(last_used_at IS NULL OR last_used_at >= created_at)"
+    ");";
+static const char *const kIMPAPIKeysIndexDDL = "CREATE INDEX api_keys_active_idx ON api_keys(revoked_at, expires_at);";
+
+// Version 7 adds the sender identifier. api_keys is the PARENT of both foreign
+// keys, and renaming a parent rewrites the REFERENCES text inside the children
+// unless legacy_alter_table is on - which would change their stored schema, fail
+// the fingerprint check, and refuse to open every database in the field. The
+// pragma is therefore load-bearing, not decoration; it is verified in
+// tests/test-schema-fingerprint.mjs by asserting a migrated database is
+// byte-identical to a fresh one.
+//
+// Existing keys are assigned identifiers sequentially rather than derived from
+// their contents: a derived value could collide, and a collision would violate
+// the UNIQUE constraint and abort the migration, leaving the operator with a
+// database their server refuses to open.
+static const char *const kIMPAPIKeysMigrationCopyDDL =
+    "INSERT INTO api_keys(uuid,name,key_prefix,key_hash,scopes,sender_identifier,sender_identifier_assigned,"
+    "created_at,expires_at,revoked_at,last_used_at) "
+    "SELECT uuid,name,key_prefix,key_hash,scopes,"
+    "char(97+((rn-1)/676)%26, 97+((rn-1)/26)%26, 97+(rn-1)%26),1,"
+    "created_at,expires_at,revoked_at,last_used_at FROM "
+    "(SELECT *, row_number() OVER (ORDER BY created_at, uuid) AS rn FROM api_keys_v6);"
+    "DROP TABLE api_keys_v6;";
 
 // The audit table and its indexes are defined once and executed by both the
 // fresh install and the version-5 migration. The fingerprint above is a hash of
@@ -81,6 +139,8 @@ static const NSTimeInterval kIMPLastUsedWriteInterval = 5.0 * 60.0;
 @property (nonatomic, copy, readwrite) NSString *name;
 @property (nonatomic, copy, readwrite) NSString *keyPrefix;
 @property (nonatomic, copy, readwrite) NSArray<IMPAPIKeyScope> *scopes;
+@property (nonatomic, copy, readwrite) NSString *senderIdentifier;
+@property (nonatomic, readwrite) BOOL senderIdentifierAssigned;
 @property (nonatomic, copy, readwrite) NSDate *createdAt;
 @property (nonatomic, copy, readwrite, nullable) NSDate *expiresAt;
 @property (nonatomic, copy, readwrite, nullable) NSDate *revokedAt;
@@ -90,6 +150,8 @@ static const NSTimeInterval kIMPLastUsedWriteInterval = 5.0 * 60.0;
                         name:(NSString *)name
                    keyPrefix:(NSString *)keyPrefix
                       scopes:(NSArray<IMPAPIKeyScope> *)scopes
+            senderIdentifier:(NSString *)senderIdentifier
+    senderIdentifierAssigned:(BOOL)senderIdentifierAssigned
                    createdAt:(NSDate *)createdAt
                    expiresAt:(nullable NSDate *)expiresAt
                    revokedAt:(nullable NSDate *)revokedAt
@@ -547,6 +609,27 @@ static IMPAuditPhase IMPAuditPhaseFromString(NSString *phase) {
     return 0;
 }
 
+// Roman letters only, lower case, 2 to 8 of them. This value is appended to real
+// messages on both transports, so anything outside a-z risks an encoding
+// surprise on SMS, and anything long enough to matter eats the sender's text.
+// Case is normalized rather than rejected: "KLE" and "kle" naming different keys
+// would make the identifier useless for telling them apart.
+static BOOL IMPValidateSenderIdentifier(NSString *value, NSString **normalized, NSError **error) {
+    NSString *candidate = [value isKindOfClass:NSString.class] ? value.lowercaseString : nil;
+    NSCharacterSet *notRoman =
+        [[NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyz"] invertedSet];
+    if (candidate == nil || candidate.length < kIMPMinimumSenderIdentifierLength ||
+        candidate.length > kIMPMaximumSenderIdentifierLength ||
+        [candidate rangeOfCharacterFromSet:notRoman].location != NSNotFound) {
+        IMPSetError(error, IMPAPIKeyStoreErrorInvalidArgument, @"The sender identifier must be 2 to 8 roman letters.");
+        return NO;
+    }
+    if (normalized != NULL) {
+        *normalized = candidate;
+    }
+    return YES;
+}
+
 static BOOL IMPValidateAuditAction(NSString *action, NSError **error) {
     if (![action isKindOfClass:NSString.class]) {
         IMPSetError(error, IMPAPIKeyStoreErrorInvalidArgument, @"The audit action is invalid.");
@@ -726,9 +809,11 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
     NSString *name = IMPColumnString(statement, firstColumn + 1);
     NSString *keyPrefix = IMPColumnString(statement, firstColumn + 2);
     NSString *scopeString = IMPColumnString(statement, firstColumn + 3);
+    NSString *senderIdentifier = IMPColumnString(statement, firstColumn + 4);
     NSString *normalizedName = nil;
     if (uuid == nil || name == nil || keyPrefix == nil || scopeString == nil ||
-        sqlite3_column_type(statement, firstColumn + 4) == SQLITE_NULL ||
+        !IMPValidateSenderIdentifier(senderIdentifier, NULL, NULL) ||
+        sqlite3_column_type(statement, firstColumn + 6) == SQLITE_NULL ||
         !IMPValidateName(name, &normalizedName, NULL) || ![normalizedName isEqualToString:name]) {
         return nil;
     }
@@ -738,10 +823,12 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
                                          name:name
                                     keyPrefix:keyPrefix
                                        scopes:scopes
-                                    createdAt:IMPDateForMilliseconds(sqlite3_column_int64(statement, firstColumn + 4))
-                                    expiresAt:IMPNullableDateColumn(statement, firstColumn + 5)
-                                    revokedAt:IMPNullableDateColumn(statement, firstColumn + 6)
-                                   lastUsedAt:IMPNullableDateColumn(statement, firstColumn + 7)];
+                             senderIdentifier:senderIdentifier
+                     senderIdentifierAssigned:sqlite3_column_int64(statement, firstColumn + 5) != 0
+                                    createdAt:IMPDateForMilliseconds(sqlite3_column_int64(statement, firstColumn + 6))
+                                    expiresAt:IMPNullableDateColumn(statement, firstColumn + 7)
+                                    revokedAt:IMPNullableDateColumn(statement, firstColumn + 8)
+                                   lastUsedAt:IMPNullableDateColumn(statement, firstColumn + 9)];
 }
 
 @implementation IMPAPIKeyRecord
@@ -750,6 +837,8 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
                         name:(NSString *)name
                    keyPrefix:(NSString *)keyPrefix
                       scopes:(NSArray<IMPAPIKeyScope> *)scopes
+            senderIdentifier:(NSString *)senderIdentifier
+    senderIdentifierAssigned:(BOOL)senderIdentifierAssigned
                    createdAt:(NSDate *)createdAt
                    expiresAt:(NSDate *)expiresAt
                    revokedAt:(NSDate *)revokedAt
@@ -760,6 +849,8 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
         _name = [name copy];
         _keyPrefix = [keyPrefix copy];
         _scopes = [scopes copy];
+        _senderIdentifier = [senderIdentifier copy];
+        _senderIdentifierAssigned = senderIdentifierAssigned;
         _createdAt = [createdAt copy];
         _expiresAt = [expiresAt copy];
         _revokedAt = [revokedAt copy];
@@ -937,7 +1028,8 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
 
     BOOL fresh = applicationID == 0 && schemaVersion == 0 && userObjectCount == 0;
     BOOL current = applicationID == kIMPApplicationID && schemaVersion == kIMPSchemaVersion;
-    BOOL migratable = applicationID == kIMPApplicationID && schemaVersion == kIMPMigratableSchemaVersion;
+    BOOL migratable = applicationID == kIMPApplicationID && schemaVersion >= kIMPOldestMigratableSchemaVersion &&
+                      schemaVersion < kIMPSchemaVersion;
     if (!fresh && !current && !migratable) {
         IMPSetError(error, IMPAPIKeyStoreErrorSchemaMismatch, @"The API key database schema is unsupported.");
         return NO;
@@ -970,23 +1062,11 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
         if (!IMPExecute(_database, "BEGIN EXCLUSIVE", error)) {
             return NO;
         }
-        BOOL created =
+        BOOL created = IMPExecute(_database, kIMPAPIKeysDDL, error);
+        created = created && IMPExecute(_database, kIMPAPIKeysIndexDDL, error);
+        created =
+            created &&
             IMPExecute(_database,
-                       "CREATE TABLE api_keys ("
-                       "uuid TEXT PRIMARY KEY CHECK(length(uuid)=36),"
-                       "name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 80),"
-                       "key_prefix TEXT NOT NULL UNIQUE CHECK(length(key_prefix)=12),"
-                       "key_hash BLOB NOT NULL UNIQUE CHECK(length(key_hash)=32),"
-                       "scopes TEXT NOT NULL CHECK(scopes IN ("
-                       "'messages:read','messages:send','admin',"
-                       "'messages:read,messages:send','messages:read,admin',"
-                       "'messages:send,admin','messages:read,messages:send,admin')) ,"
-                       "created_at INTEGER NOT NULL CHECK(created_at > 0),"
-                       "expires_at INTEGER CHECK(expires_at IS NULL OR expires_at > created_at),"
-                       "revoked_at INTEGER CHECK(revoked_at IS NULL OR revoked_at >= created_at),"
-                       "last_used_at INTEGER CHECK(last_used_at IS NULL OR last_used_at >= created_at)"
-                       ");"
-                       "CREATE INDEX api_keys_active_idx ON api_keys(revoked_at, expires_at);"
                        "CREATE TABLE idempotency_records ("
                        "principal_uuid TEXT NOT NULL REFERENCES api_keys(uuid) ON DELETE RESTRICT,"
                        "idempotency_key TEXT NOT NULL CHECK(length(idempotency_key) BETWEEN 8 AND 128),"
@@ -1006,35 +1086,59 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
                        error);
         created = created && IMPExecute(_database, kIMPAuditRecordsDDL, error);
         created = created && IMPExecute(_database, kIMPAuditIndexesDDL, error);
-        created = created && IMPExecute(_database, "PRAGMA user_version=6;", error);
+        created = created && IMPExecute(_database, "PRAGMA user_version=7;", error);
         if (!created || !IMPCommit(_database, error)) {
             IMPRollback(_database);
             return NO;
         }
     }
 
-    // Version 6 adds the two recipient-allowlist actions to the audit table's
-    // action constraint. Rebuilding is the only way to change a CHECK in SQLite,
-    // so the rows are copied into a new table rather than the operator being
-    // told to discard their keys and audit history for a two-word addition.
+    // Upgrades run in sequence, each in its own transaction, so a version-5
+    // database becomes 6 and then 7 in one open. A step that fails rolls itself
+    // back and leaves the database on the last version it completed, which an
+    // earlier release can still open.
     //
-    // The old table is renamed out of the way first and the new one created
-    // under the real name, because renaming a table INTO place makes SQLite
-    // store its name quoted, which would no longer match the fingerprint a fresh
-    // install produces. Every old action is present in the new constraint, so no
-    // row can be rejected; the whole rebuild is one transaction, so a failure
-    // leaves a version-5 database that still opens on the previous release.
-    if (migratable) {
-        if (!IMPExecute(_database, "BEGIN EXCLUSIVE", error)) {
-            return NO;
-        }
-        BOOL migrated = IMPExecute(_database, "ALTER TABLE audit_records RENAME TO audit_records_v5;", error);
+    // Version 6 added two audit actions, and a CHECK can only change by
+    // rebuilding the table. audit_records is a child, so renaming it is safe.
+    if (migratable && schemaVersion < 6) {
+        BOOL migrated = IMPExecute(_database, "BEGIN EXCLUSIVE", error);
+        migrated = migrated && IMPExecute(_database, "ALTER TABLE audit_records RENAME TO audit_records_v5;", error);
         migrated = migrated && IMPExecute(_database, kIMPAuditRecordsDDL, error);
         migrated = migrated && IMPExecute(_database, kIMPAuditMigrationCopyDDL, error);
         migrated = migrated && IMPExecute(_database, kIMPAuditIndexesDDL, error);
         migrated = migrated && IMPExecute(_database, "PRAGMA user_version=6;", error);
-        if (!migrated || !IMPCommit(_database, error)) {
+        migrated = migrated && IMPCommit(_database, error);
+        if (!migrated) {
             IMPRollback(_database);
+            return NO;
+        }
+    }
+
+    // Version 7 adds the sender identifier to api_keys. See kIMPAPIKeysDDL for
+    // why legacy_alter_table must be on: api_keys is the PARENT of both foreign
+    // keys, and without it the children's REFERENCES text is rewritten, changing
+    // their stored schema and refusing every database in the field. The pragmas
+    // are toggled outside the transaction because SQLite ignores them inside
+    // one, and are restored on every path - a connection left with foreign keys
+    // disabled would silently drop the guarantee asserted just below.
+    if (migratable && schemaVersion < 7) {
+        BOOL prepared = IMPExecute(_database, "PRAGMA foreign_keys=OFF", error) &&
+                        IMPExecute(_database, "PRAGMA legacy_alter_table=ON", error);
+        BOOL migrated = prepared && IMPExecute(_database, "BEGIN EXCLUSIVE", error);
+        if (migrated) {
+            migrated = IMPExecute(_database, "ALTER TABLE api_keys RENAME TO api_keys_v6;", error);
+            migrated = migrated && IMPExecute(_database, kIMPAPIKeysDDL, error);
+            migrated = migrated && IMPExecute(_database, kIMPAPIKeysMigrationCopyDDL, error);
+            migrated = migrated && IMPExecute(_database, kIMPAPIKeysIndexDDL, error);
+            migrated = migrated && IMPExecute(_database, "PRAGMA user_version=7;", error);
+            migrated = migrated && IMPCommit(_database, error);
+            if (!migrated) {
+                IMPRollback(_database);
+            }
+        }
+        BOOL restored = IMPExecute(_database, "PRAGMA legacy_alter_table=OFF", error) &&
+                        IMPExecute(_database, "PRAGMA foreign_keys=ON", error);
+        if (!migrated || !restored) {
             return NO;
         }
     }
@@ -1093,7 +1197,7 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
 
 - (BOOL)verifySchema:(NSError **)error {
     const char *queries[] = {
-        "SELECT uuid,name,key_prefix,key_hash,scopes,created_at,expires_at,revoked_at,last_used_at "
+        "SELECT " IMP_API_KEY_COLUMNS " "
         "FROM api_keys LIMIT 0",
         "SELECT principal_uuid,idempotency_key,operation_uuid,request_hash,state,response_status,"
         "response_body,created_at,updated_at FROM idempotency_records LIMIT 0",
@@ -1304,13 +1408,67 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
     return record;
 }
 
+// The lowest unused two-letter identifier, then three, and so on. Sequential
+// rather than random so an operator reading their key list sees something
+// stable and short; uniqueness is enforced by the column regardless.
+- (NSString *)nextSenderIdentifier:(NSError **)error {
+    sqlite3_stmt *statement = NULL;
+    if (!IMPPrepare(_database, "SELECT sender_identifier FROM api_keys", &statement, error)) {
+        return nil;
+    }
+    NSMutableSet<NSString *> *taken = [NSMutableSet set];
+    int result = SQLITE_ROW;
+    while ((result = sqlite3_step(statement)) == SQLITE_ROW) {
+        NSString *existing = IMPColumnString(statement, 0);
+        if (existing != nil) {
+            [taken addObject:existing];
+        }
+    }
+    int finalResult = sqlite3_finalize(statement);
+    if (result != SQLITE_DONE) {
+        IMPSetSQLiteError(error, result);
+        return nil;
+    }
+    if (finalResult != SQLITE_OK) {
+        IMPSetSQLiteError(error, finalResult);
+        return nil;
+    }
+    for (NSUInteger width = kIMPMinimumSenderIdentifierLength; width <= kIMPMaximumSenderIdentifierLength; width++) {
+        NSUInteger span = 1;
+        for (NSUInteger power = 0; power < width; power++) {
+            span *= 26;
+        }
+        for (NSUInteger index = 0; index < span; index++) {
+            NSMutableString *candidate = [NSMutableString stringWithCapacity:width];
+            NSUInteger remaining = index;
+            for (NSUInteger position = 0; position < width; position++) {
+                [candidate insertString:[NSString stringWithFormat:@"%c", (char)('a' + remaining % 26)] atIndex:0];
+                remaining /= 26;
+            }
+            if (![taken containsObject:candidate]) {
+                return [candidate copy];
+            }
+        }
+    }
+    IMPSetError(error, IMPAPIKeyStoreErrorConflict, @"No sender identifier is available.");
+    return nil;
+}
+
 - (NSDictionary<NSString *, id> *)createKeyNamed:(NSString *)name
                                           scopes:(NSArray<IMPAPIKeyScope> *)scopes
                                        expiresAt:(NSDate *)expiresAt
+                                senderIdentifier:(NSString *)senderIdentifier
                                        actorUUID:(NSString *)actorUUID
                                            error:(NSError **)error {
     NSString *normalizedName = nil;
     if (!IMPValidateName(name, &normalizedName, error)) {
+        return nil;
+    }
+    // Validated before anything is written, so a malformed identifier is a plain
+    // rejection rather than a rolled-back transaction.
+    NSString *normalizedIdentifier = nil;
+    BOOL identifierAssigned = senderIdentifier == nil;
+    if (!identifierAssigned && !IMPValidateSenderIdentifier(senderIdentifier, &normalizedIdentifier, error)) {
         return nil;
     }
     NSArray<IMPAPIKeyScope> *normalizedScopes = IMPNormalizeScopes(scopes, error);
@@ -1349,8 +1507,17 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
     if (ok) {
         ok = [self ensureKeyCapacityLockedAtDate:NSDate.date pruneIfNeeded:YES error:error];
     }
+    if (ok && identifierAssigned) {
+        normalizedIdentifier = [self nextSenderIdentifier:error];
+        ok = normalizedIdentifier != nil;
+    }
     if (ok) {
-        creation = [self createKeyLockedNamed:normalizedName scopes:normalizedScopes expiresAt:expiresAt error:error];
+        creation = [self createKeyLockedNamed:normalizedName
+                                       scopes:normalizedScopes
+                                    expiresAt:expiresAt
+                             senderIdentifier:normalizedIdentifier
+                           identifierAssigned:identifierAssigned
+                                        error:error];
         ok = creation != nil;
     }
     if (ok) {
@@ -1368,7 +1535,9 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
 - (NSDictionary<NSString *, id> *)createKeyLockedNamed:(NSString *)name
                                                 scopes:(NSArray<IMPAPIKeyScope> *)scopes
                                              expiresAt:(NSDate *)expiresAt
-                                                 error:(NSError **)error {
+                                                 senderIdentifier:(NSString *)normalizedIdentifier
+                                          identifierAssigned:(BOOL)identifierAssigned
+                                                       error:(NSError **)error {
     NSString *scopeString = [scopes componentsJoinedByString:@","];
     NSDate *createdAt = NSDate.date;
 
@@ -1388,20 +1557,23 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
         sqlite3_stmt *statement = NULL;
         if (!IMPPrepare(_database,
                         "INSERT INTO api_keys"
-                        "(uuid,name,key_prefix,key_hash,scopes,created_at,expires_at) "
-                        "VALUES(?,?,?,?,?,?,?)",
+                        "(uuid,name,key_prefix,key_hash,scopes,sender_identifier,sender_identifier_assigned,"
+                        "created_at,expires_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?)",
                         &statement, error)) {
             return nil;
         }
         BOOL bound = IMPBindText(statement, 1, uuid, error) && IMPBindText(statement, 2, name, error) &&
                      IMPBindText(statement, 3, prefix, error) && IMPBindData(statement, 4, hash, error) &&
-                     IMPBindText(statement, 5, scopeString, error);
+                     IMPBindText(statement, 5, scopeString, error) &&
+                     IMPBindText(statement, 6, normalizedIdentifier, error) &&
+                     IMPBindInteger(statement, 7, identifierAssigned ? 1 : 0, error);
         if (bound) {
-            bound = IMPBindInteger(statement, 6, IMPMillisecondsForDate(createdAt), error);
+            bound = IMPBindInteger(statement, 8, IMPMillisecondsForDate(createdAt), error);
         }
         if (bound) {
-            bound = expiresAt == nil ? IMPBindNull(statement, 7, error)
-                                     : IMPBindInteger(statement, 7, IMPMillisecondsForDate(expiresAt), error);
+            bound = expiresAt == nil ? IMPBindNull(statement, 9, error)
+                                     : IMPBindInteger(statement, 9, IMPMillisecondsForDate(expiresAt), error);
         }
         int result = bound ? sqlite3_step(statement) : SQLITE_ERROR;
         int finalResult = sqlite3_finalize(statement);
@@ -1441,12 +1613,11 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
     sqlite3_stmt *statement = NULL;
     IMPAPIKeyRecord *matchedRecord = nil;
     NSData *storedHash = nil;
-    BOOL databaseOK =
-        IMPPrepare(_database,
-                   "SELECT uuid,name,key_prefix,scopes,created_at,expires_at,revoked_at,last_used_at,key_hash "
-                   "FROM api_keys WHERE key_prefix=?",
-                   &statement, error) &&
-        IMPBindText(statement, 1, prefix, error);
+    BOOL databaseOK = IMPPrepare(_database,
+                                 "SELECT " IMP_API_KEY_COLUMNS ",key_hash "
+                                 "FROM api_keys WHERE key_prefix=?",
+                                 &statement, error) &&
+                      IMPBindText(statement, 1, prefix, error);
     if (databaseOK) {
         int result = sqlite3_step(statement);
         if (result == SQLITE_ROW) {
@@ -1538,7 +1709,7 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
     sqlite3_stmt *statement = NULL;
     NSMutableArray<IMPAPIKeyRecord *> *records = [NSMutableArray array];
     BOOL ok = IMPPrepare(_database,
-                         "SELECT uuid,name,key_prefix,scopes,created_at,expires_at,revoked_at,last_used_at "
+                         "SELECT " IMP_API_KEY_COLUMNS " "
                          "FROM api_keys ORDER BY created_at DESC, uuid ASC LIMIT ?",
                          &statement, error) &&
               IMPBindInteger(statement, 1, (sqlite3_int64)limit, error);
@@ -1677,7 +1848,7 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
 - (IMPAPIKeyRecord *)recordLockedForUUID:(NSString *)uuid error:(NSError **)error {
     sqlite3_stmt *statement = NULL;
     if (!IMPPrepare(_database,
-                    "SELECT uuid,name,key_prefix,scopes,created_at,expires_at,revoked_at,last_used_at "
+                    "SELECT " IMP_API_KEY_COLUMNS " "
                     "FROM api_keys WHERE uuid=?",
                     &statement, error)) {
         return nil;

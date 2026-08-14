@@ -75,25 +75,28 @@ function inlineStatement(firstLiteral, lastLiteral) {
 }
 
 const schemaVersion = constant("kIMPSchemaVersion");
-const migratableVersion = constant("kIMPMigratableSchemaVersion");
+const oldestMigratable = constant("kIMPOldestMigratableSchemaVersion");
 const declaredFingerprint = source.match(/kIMPSchemaFingerprint = @"([0-9a-f]{64})"/)?.[1];
+const apiKeysDDL = stringConstant("kIMPAPIKeysDDL");
+const apiKeysIndexDDL = stringConstant("kIMPAPIKeysIndexDDL");
+const apiKeysCopyDDL = stringConstant("kIMPAPIKeysMigrationCopyDDL");
 const auditRecordsDDL = stringConstant("kIMPAuditRecordsDDL");
 const auditIndexesDDL = stringConstant("kIMPAuditIndexesDDL");
 const auditCopyDDL = stringConstant("kIMPAuditMigrationCopyDDL");
+const idempotencyDDL = inlineStatement('"CREATE TABLE idempotency_records ("', '"PRAGMA application_id=1229803595;"');
 
 // The order these run in inside configureAndValidateDatabase, for a fresh
 // install and for an upgrade from the previous schema.
 const freshDDL =
-  inlineStatement('"CREATE TABLE api_keys ("', '"PRAGMA application_id=1229803595;"') +
-  auditRecordsDDL +
-  auditIndexesDDL +
+  apiKeysDDL + apiKeysIndexDDL + idempotencyDDL + auditRecordsDDL + auditIndexesDDL +
   `PRAGMA user_version=${schemaVersion};`;
-const migrationDDL =
+// The two upgrade steps, in the order configureAndValidateDatabase runs them.
+const auditMigrationDDL =
   "ALTER TABLE audit_records RENAME TO audit_records_v5;" +
-  auditRecordsDDL +
-  auditCopyDDL +
-  auditIndexesDDL +
-  `PRAGMA user_version=${schemaVersion};`;
+  auditRecordsDDL + auditCopyDDL + auditIndexesDDL + "PRAGMA user_version=6;";
+const apiKeysMigrationDDL =
+  "ALTER TABLE api_keys RENAME TO api_keys_v6;" +
+  apiKeysDDL + apiKeysCopyDDL + apiKeysIndexDDL + `PRAGMA user_version=${schemaVersion};`;
 
 // Exactly IMPVerifySchemaFingerprint in src/api-key-store.m.
 function fingerprint(database) {
@@ -111,91 +114,117 @@ function freshDatabase() {
   return database;
 }
 
-// A populated database on the previous schema, built from the current DDL with
-// the version-6 additions removed, so the fixture cannot rot into something the
-// migration was never going to meet.
+// A populated database on the OLDEST schema this release still opens, built from
+// the current DDL with each later addition removed, so the fixture cannot rot
+// into something the migrations were never going to meet.
 function legacyDatabase() {
-  const legacyDDL = freshDDL
-    .replace(",'targets.read','targets.replace'", "")
-    .replace(`PRAGMA user_version=${schemaVersion};`, `PRAGMA user_version=${migratableVersion};`);
-  assert.ok(!legacyDDL.includes("targets.read"), "the legacy fixture must not already allow the new actions");
-  assert.ok(legacyDDL.includes(`user_version=${migratableVersion}`), "the legacy fixture must be the migratable version");
+  const apiKeysV5 = apiKeysDDL
+    .replace(
+      "sender_identifier TEXT NOT NULL UNIQUE CHECK(" +
+        "length(sender_identifier) BETWEEN 2 AND 8 AND NOT sender_identifier GLOB '*[^a-z]*')," +
+        "sender_identifier_assigned INTEGER NOT NULL CHECK(sender_identifier_assigned IN (0,1)),",
+      "",
+    );
+  const auditV5 = auditRecordsDDL.replace(",'targets.read','targets.replace'", "");
+  assert.ok(!apiKeysV5.includes("sender_identifier"), "the legacy fixture must predate the sender identifier");
+  assert.ok(!auditV5.includes("targets.read"), "the legacy fixture must predate the allowlist audit actions");
+
   const database = new DatabaseSync(":memory:");
   database.exec("PRAGMA foreign_keys=ON");
-  database.exec(legacyDDL);
   database.exec(
-    "INSERT INTO api_keys VALUES('11111111-1111-4111-8111-111111111111','Existing key','imp_abcdefgh'," +
-      `x'${"11".repeat(32)}','admin',100,NULL,NULL,NULL)`,
+    apiKeysV5 + apiKeysIndexDDL + idempotencyDDL + auditV5 + auditIndexesDDL +
+      `PRAGMA user_version=${oldestMigratable};`,
   );
+  for (let index = 0; index < 3; index += 1) {
+    database.exec(
+      `INSERT INTO api_keys VALUES('1111111${index}-1111-4111-8111-11111111111${index}','Key ${index}',` +
+        `'imp_abcdefg${index}',x'${String(index + 1).repeat(64).slice(0, 64)}','admin',${100 + index},NULL,NULL,NULL)`,
+    );
+  }
   database.exec(
     "INSERT INTO audit_records VALUES('22222222-2222-4222-8222-222222222222'," +
-      "'11111111-1111-4111-8111-111111111111',NULL,'local','keys.list','final',200,5,100)",
+      "'11111110-1111-4111-8111-111111111110',NULL,'local','keys.list','final',200,5,100)",
   );
   database.exec(
-    "INSERT INTO audit_records VALUES('33333333-3333-4333-8333-333333333333'," +
-      "NULL,NULL,'local','auth.reject','attempted',NULL,NULL,101)",
+    "INSERT INTO idempotency_records VALUES('11111110-1111-4111-8111-111111111110','idem-key-0001'," +
+      `'33333333-3333-4333-8333-333333333333',x'${"aa".repeat(32)}','succeeded',202,x'7b7d',100,100)`,
   );
   return database;
 }
 
+// Exactly the sequence configureAndValidateDatabase runs, pragmas included. The
+// legacy_alter_table pragma is not incidental: api_keys is the parent of both
+// foreign keys, and without it SQLite rewrites the children's REFERENCES text,
+// which changes their stored schema and fails the fingerprint on every existing
+// installation.
+function migrate(database) {
+  database.exec("BEGIN EXCLUSIVE");
+  database.exec(auditMigrationDDL);
+  database.exec("COMMIT");
+  database.exec("PRAGMA foreign_keys=OFF");
+  database.exec("PRAGMA legacy_alter_table=ON");
+  database.exec("BEGIN EXCLUSIVE");
+  database.exec(apiKeysMigrationDDL);
+  database.exec("COMMIT");
+  database.exec("PRAGMA legacy_alter_table=OFF");
+  database.exec("PRAGMA foreign_keys=ON");
+}
+
 test("the schema versions describe a coherent upgrade", () => {
-  // Everything else here is derived from these two numbers, so they are checked
-  // against each other rather than against themselves. If they were ever equal,
-  // a database would be simultaneously current and in need of migration, and the
-  // migration would run against the schema it was meant to produce.
   assert.ok(Number.isInteger(schemaVersion) && schemaVersion > 0);
-  assert.equal(
-    schemaVersion,
-    migratableVersion + 1,
-    "this release must migrate from exactly the previous schema version",
-  );
+  assert.ok(oldestMigratable > 0 && oldestMigratable < schemaVersion,
+    "the oldest migratable schema must precede this release");
   assert.ok(/^[0-9a-f]{64}$/.test(declaredFingerprint ?? ""), "kIMPSchemaFingerprint must be a SHA-256 digest");
-  // A schema edit that changed the DDL but not the version would leave existing
-  // databases claiming a version whose fingerprint no longer matches.
-  assert.ok(
-    freshDDL.includes(`PRAGMA user_version=${schemaVersion};`),
-    "the DDL must set the version this release declares",
-  );
-  assert.ok(
-    migrationDDL.includes(`PRAGMA user_version=${schemaVersion};`),
-    "the migration must set the version this release declares",
-  );
+  assert.ok(freshDDL.includes(`PRAGMA user_version=${schemaVersion};`),
+    "the DDL must set the version this release declares");
+  assert.ok(apiKeysMigrationDDL.includes(`PRAGMA user_version=${schemaVersion};`),
+    "the last migration step must set the version this release declares");
 });
 
 test("the declared fingerprint matches the schema this release creates", () => {
   const database = freshDatabase();
   assert.equal(database.prepare("PRAGMA user_version").get().user_version, schemaVersion);
-  assert.equal(
-    fingerprint(database),
-    declaredFingerprint,
-    "kIMPSchemaFingerprint is stale: every existing installation would refuse to open its key store",
-  );
+  assert.equal(fingerprint(database), declaredFingerprint,
+    "kIMPSchemaFingerprint is stale: every existing installation would refuse to open its key store");
 });
 
-test("a database on the previous schema migrates to a byte-identical schema", () => {
-  const migrated = legacyDatabase();
-  const before = migrated.prepare("SELECT count(*) AS n FROM audit_records").get().n;
-  const keysBefore = migrated.prepare("SELECT count(*) AS n FROM api_keys").get().n;
+test("a database on the oldest supported schema migrates to a byte-identical schema", () => {
+  const database = legacyDatabase();
+  const counted = (table) => database.prepare(`SELECT count(*) AS n FROM ${table}`).get().n;
+  const before = ["api_keys", "audit_records", "idempotency_records"].map(counted);
 
-  migrated.exec("BEGIN EXCLUSIVE");
-  migrated.exec(migrationDDL);
-  migrated.exec("COMMIT");
+  migrate(database);
 
-  assert.equal(migrated.prepare("PRAGMA user_version").get().user_version, schemaVersion);
-  assert.equal(
-    fingerprint(migrated),
-    declaredFingerprint,
-    "a migrated database differs from a fresh one, so upgrading would brick the installation",
-  );
+  assert.equal(database.prepare("PRAGMA user_version").get().user_version, schemaVersion);
+  assert.equal(fingerprint(database), declaredFingerprint,
+    "a migrated database differs from a fresh one, so upgrading would brick the installation");
   // An upgrade must not cost the operator their credentials or their history.
-  assert.equal(migrated.prepare("SELECT count(*) AS n FROM audit_records").get().n, before);
-  assert.equal(migrated.prepare("SELECT count(*) AS n FROM api_keys").get().n, keysBefore);
-  assert.equal(
-    migrated.prepare("SELECT source FROM audit_records WHERE request_uuid='22222222-2222-4222-8222-222222222222'").get()
-      .source,
-    "local",
-  );
-  assert.equal(migrated.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name LIKE '%_v5'").get().n, 0);
+  assert.deepEqual(["api_keys", "audit_records", "idempotency_records"].map(counted), before);
+  assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
+  assert.equal(database.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name LIKE '%\\_v_' ESCAPE '\\'").get().n, 0);
+
+  // Every carried-forward key must be attributable, or the transparency the
+  // identifier exists for would have a hole exactly the size of the install base.
+  const carried = database.prepare("SELECT sender_identifier, sender_identifier_assigned FROM api_keys").all();
+  assert.equal(carried.length, before[0]);
+  assert.equal(new Set(carried.map((row) => row.sender_identifier)).size, carried.length, "identifiers must be unique");
+  for (const row of carried) {
+    assert.match(row.sender_identifier, /^[a-z]{2,8}$/);
+    assert.equal(row.sender_identifier_assigned, 1, "a carried-forward identifier must be marked as assigned");
+  }
+});
+
+test("the children keep referencing api_keys after the parent is rebuilt", () => {
+  // Without legacy_alter_table the RENAME rewrites these to api_keys_v6, which
+  // changes their stored schema silently and only fails later, as a refusal to
+  // open. Asserted directly so the pragma cannot be dropped as noise.
+  const database = legacyDatabase();
+  migrate(database);
+  for (const child of ["audit_records", "idempotency_records"]) {
+    const sql = database.prepare("SELECT sql FROM sqlite_master WHERE name=?").get(child).sql;
+    assert.ok(sql.includes("REFERENCES api_keys(uuid)"), `${child} must still reference api_keys`);
+    assert.ok(!sql.includes("api_keys_v6"), `${child} must not reference the renamed table`);
+  }
 });
 
 test("the audit action constraint and the Objective-C validator list the same actions", () => {
