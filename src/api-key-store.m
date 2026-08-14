@@ -24,10 +24,6 @@ NSString *const IMPAPIKeyCreationTokenKey = @"key";
 
 static const int kIMPApplicationID = 0x494d504b; // "IMPK"
 static const int kIMPSchemaVersion = 7;
-// The oldest schema this release can still open. Upgrades are applied in
-// sequence, so a database several releases behind is carried forward rather than
-// refused: an operator who skipped a release must not have to discard their keys.
-static const int kIMPOldestMigratableSchemaVersion = 5;
 static const NSUInteger kIMPMinimumSenderIdentifierLength = 2;
 static const NSUInteger kIMPMaximumSenderIdentifierLength = 8;
 // SHA-256 of the ordered non-internal sqlite_master object signature; update only
@@ -68,32 +64,8 @@ static const char *const kIMPAPIKeysDDL =
     ");";
 static const char *const kIMPAPIKeysIndexDDL = "CREATE INDEX api_keys_active_idx ON api_keys(revoked_at, expires_at);";
 
-// Version 7 adds the sender identifier. api_keys is the PARENT of both foreign
-// keys, and renaming a parent rewrites the REFERENCES text inside the children
-// unless legacy_alter_table is on - which would change their stored schema, fail
-// the fingerprint check, and refuse to open every database in the field. The
-// pragma is therefore load-bearing, not decoration; it is verified in
-// tests/test-schema-fingerprint.mjs by asserting a migrated database is
-// byte-identical to a fresh one.
-//
-// Existing keys are assigned identifiers sequentially rather than derived from
-// their contents: a derived value could collide, and a collision would violate
-// the UNIQUE constraint and abort the migration, leaving the operator with a
-// database their server refuses to open.
-static const char *const kIMPAPIKeysMigrationCopyDDL =
-    "INSERT INTO api_keys(uuid,name,key_prefix,key_hash,scopes,sender_identifier,sender_identifier_assigned,"
-    "created_at,expires_at,revoked_at,last_used_at) "
-    "SELECT uuid,name,key_prefix,key_hash,scopes,"
-    "char(97+((rn-1)/676)%26, 97+((rn-1)/26)%26, 97+(rn-1)%26),1,"
-    "created_at,expires_at,revoked_at,last_used_at FROM "
-    "(SELECT *, row_number() OVER (ORDER BY created_at, uuid) AS rn FROM api_keys_v6);"
-    "DROP TABLE api_keys_v6;";
-
-// The audit table and its indexes are defined once and executed by both the
-// fresh install and the version-5 migration. The fingerprint above is a hash of
-// the exact CREATE text SQLite stores, so a migrated database whose DDL differed
-// from a fresh one by a single character would refuse to open. Sharing the text
-// makes that divergence impossible rather than merely unlikely.
+// The fingerprint above is a hash of the exact CREATE text SQLite stores, so any
+// edit here must be reflected there or the store refuses to open.
 static const char *const kIMPAuditRecordsDDL =
     "CREATE TABLE audit_records ("
     "request_uuid TEXT NOT NULL CHECK(length(request_uuid)=36),"
@@ -118,11 +90,6 @@ static const char *const kIMPAuditIndexesDDL =
     "CREATE INDEX audit_created_idx ON audit_records(created_at DESC);"
     "CREATE INDEX audit_key_idx ON audit_records(key_uuid,created_at DESC);"
     "CREATE INDEX audit_target_key_idx ON audit_records(target_key_uuid,created_at DESC);";
-static const char *const kIMPAuditMigrationCopyDDL =
-    "INSERT INTO audit_records(request_uuid,key_uuid,target_key_uuid,source,action,phase,status,duration_ms,"
-    "created_at) SELECT request_uuid,key_uuid,target_key_uuid,source,action,phase,status,duration_ms,created_at "
-    "FROM audit_records_v5;"
-    "DROP TABLE audit_records_v5;";
 static const NSUInteger kIMPRawKeyLength = 32;
 static const NSUInteger kIMPRequestHashLength = 32;
 static const NSUInteger kIMPMaximumNameBytes = 80;
@@ -214,7 +181,10 @@ static const NSTimeInterval kIMPLastUsedWriteInterval = 5.0 * 60.0;
 - (nullable NSDictionary<NSString *, id> *)createKeyLockedNamed:(NSString *)name
                                                          scopes:(NSArray<IMPAPIKeyScope> *)scopes
                                                       expiresAt:(nullable NSDate *)expiresAt
+                                               senderIdentifier:(NSString *)senderIdentifier
+                                             identifierAssigned:(BOOL)identifierAssigned
                                                           error:(NSError **)error;
+- (nullable NSString *)nextSenderIdentifier:(NSError **)error;
 - (nullable IMPAPIKeyRecord *)recordLockedForUUID:(NSString *)uuid error:(NSError **)error;
 @end
 
@@ -1028,9 +998,13 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
 
     BOOL fresh = applicationID == 0 && schemaVersion == 0 && userObjectCount == 0;
     BOOL current = applicationID == kIMPApplicationID && schemaVersion == kIMPSchemaVersion;
-    BOOL migratable = applicationID == kIMPApplicationID && schemaVersion >= kIMPOldestMigratableSchemaVersion &&
-                      schemaVersion < kIMPSchemaVersion;
-    if (!fresh && !current && !migratable) {
+    // A schema this release does not recognise is refused rather than upgraded in
+    // place. Carrying databases forward means maintaining one migration per
+    // release forever, and a migration that produces a schema even one character
+    // different from a fresh install refuses to open on every machine that ran
+    // it. Reinstalling is the supported path; scripts/uninstall.sh --purge exists
+    // for exactly this.
+    if (!fresh && !current) {
         IMPSetError(error, IMPAPIKeyStoreErrorSchemaMismatch, @"The API key database schema is unsupported.");
         return NO;
     }
@@ -1089,56 +1063,6 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
         created = created && IMPExecute(_database, "PRAGMA user_version=7;", error);
         if (!created || !IMPCommit(_database, error)) {
             IMPRollback(_database);
-            return NO;
-        }
-    }
-
-    // Upgrades run in sequence, each in its own transaction, so a version-5
-    // database becomes 6 and then 7 in one open. A step that fails rolls itself
-    // back and leaves the database on the last version it completed, which an
-    // earlier release can still open.
-    //
-    // Version 6 added two audit actions, and a CHECK can only change by
-    // rebuilding the table. audit_records is a child, so renaming it is safe.
-    if (migratable && schemaVersion < 6) {
-        BOOL migrated = IMPExecute(_database, "BEGIN EXCLUSIVE", error);
-        migrated = migrated && IMPExecute(_database, "ALTER TABLE audit_records RENAME TO audit_records_v5;", error);
-        migrated = migrated && IMPExecute(_database, kIMPAuditRecordsDDL, error);
-        migrated = migrated && IMPExecute(_database, kIMPAuditMigrationCopyDDL, error);
-        migrated = migrated && IMPExecute(_database, kIMPAuditIndexesDDL, error);
-        migrated = migrated && IMPExecute(_database, "PRAGMA user_version=6;", error);
-        migrated = migrated && IMPCommit(_database, error);
-        if (!migrated) {
-            IMPRollback(_database);
-            return NO;
-        }
-    }
-
-    // Version 7 adds the sender identifier to api_keys. See kIMPAPIKeysDDL for
-    // why legacy_alter_table must be on: api_keys is the PARENT of both foreign
-    // keys, and without it the children's REFERENCES text is rewritten, changing
-    // their stored schema and refusing every database in the field. The pragmas
-    // are toggled outside the transaction because SQLite ignores them inside
-    // one, and are restored on every path - a connection left with foreign keys
-    // disabled would silently drop the guarantee asserted just below.
-    if (migratable && schemaVersion < 7) {
-        BOOL prepared = IMPExecute(_database, "PRAGMA foreign_keys=OFF", error) &&
-                        IMPExecute(_database, "PRAGMA legacy_alter_table=ON", error);
-        BOOL migrated = prepared && IMPExecute(_database, "BEGIN EXCLUSIVE", error);
-        if (migrated) {
-            migrated = IMPExecute(_database, "ALTER TABLE api_keys RENAME TO api_keys_v6;", error);
-            migrated = migrated && IMPExecute(_database, kIMPAPIKeysDDL, error);
-            migrated = migrated && IMPExecute(_database, kIMPAPIKeysMigrationCopyDDL, error);
-            migrated = migrated && IMPExecute(_database, kIMPAPIKeysIndexDDL, error);
-            migrated = migrated && IMPExecute(_database, "PRAGMA user_version=7;", error);
-            migrated = migrated && IMPCommit(_database, error);
-            if (!migrated) {
-                IMPRollback(_database);
-            }
-        }
-        BOOL restored = IMPExecute(_database, "PRAGMA legacy_alter_table=OFF", error) &&
-                        IMPExecute(_database, "PRAGMA foreign_keys=ON", error);
-        if (!migrated || !restored) {
             return NO;
         }
     }
@@ -1382,10 +1306,14 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
         ok = [self ensureKeyCapacityLockedAtDate:now pruneIfNeeded:YES error:error];
     }
     if (ok) {
-        creation = [self createKeyLockedNamed:normalizedName
-                                       scopes:@[IMPAPIKeyScopeAdmin]
-                                    expiresAt:expiresAt
-                                        error:error];
+        NSString *bootstrapIdentifier = [self nextSenderIdentifier:error];
+        creation = bootstrapIdentifier == nil ? nil
+                                              : [self createKeyLockedNamed:normalizedName
+                                                                    scopes:@[IMPAPIKeyScopeAdmin]
+                                                                 expiresAt:expiresAt
+                                                          senderIdentifier:bootstrapIdentifier
+                                                        identifierAssigned:YES
+                                                                     error:error];
         ok = creation != nil;
     }
     if (ok) {
@@ -1535,9 +1463,9 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
 - (NSDictionary<NSString *, id> *)createKeyLockedNamed:(NSString *)name
                                                 scopes:(NSArray<IMPAPIKeyScope> *)scopes
                                              expiresAt:(NSDate *)expiresAt
-                                                 senderIdentifier:(NSString *)normalizedIdentifier
-                                          identifierAssigned:(BOOL)identifierAssigned
-                                                       error:(NSError **)error {
+                                      senderIdentifier:(NSString *)normalizedIdentifier
+                                    identifierAssigned:(BOOL)identifierAssigned
+                                                 error:(NSError **)error {
     NSString *scopeString = [scopes componentsJoinedByString:@","];
     NSDate *createdAt = NSDate.date;
 
