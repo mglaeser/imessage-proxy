@@ -164,6 +164,9 @@ usage() {
     '  api-key bootstrap-admin --name NAME [--expires-in-days 30]' \
     '  targets list' \
     '  targets add TARGET' \
+    '  send-test RECIPIENT' \
+    '  enable-messages-read' \
+    '  disable-messages-read' \
     '  targets remove TARGET' \
     '  server-install' \
     '  server-start' \
@@ -282,9 +285,30 @@ unprivileged_port_valid() {
   [[ "$1" =~ ^[1-9][0-9]{3,4}$ ]] && ((10#$1 >= 1024 && 10#$1 <= 65535))
 }
 
+# The server reads only the exact word "disabled" as off and treats everything
+# else, including a misspelling, as on. A configuration saying "off" or "false"
+# would therefore read as off to the person who wrote it and as on to the
+# service, so only the two words this CLI writes are accepted.
+messages_read_setting_valid() {
+  [[ "$1" == enabled || "$1" == disabled ]]
+}
+
+# Absent means enabled, exactly as the server reads it, so an installation that
+# predates the setting keeps its reads. The default is deliberately not seeded
+# into a shell variable at load time: load_service_config fills in only what the
+# environment lacks, so a seeded default would outrank the configured value.
+messages_read_setting() {
+  printf '%s\n' "${IMESSAGE_PROXY_MESSAGES_READ:-enabled}"
+}
+
+messages_read_enabled() {
+  [[ "$(messages_read_setting)" != disabled ]]
+}
+
 service_config_key_allowed() {
   case "$1" in
-    IMESSAGE_PROXY_PORT | \
+    IMESSAGE_PROXY_MESSAGES_READ | \
+      IMESSAGE_PROXY_PORT | \
       IMESSAGE_PROXY_IMSG_BIN | \
       IMESSAGE_PROXY_IMSG_SHA256) return 0 ;;
     *) return 1 ;;
@@ -892,6 +916,62 @@ write_targets() {
   mv "$temporary" "$TARGETS_FILE"
   require_private_file "$TARGETS_FILE"
 }
+# Sends one message through the pinned dependency, directly rather than through
+# the API. That is deliberate: this exists to raise the macOS Apple Events prompt
+# at a moment the operator is expecting it, and to prove the dependency, its
+# payload and the Messages grant all work. It does not exercise the HTTP layer,
+# which readiness already proved before this ever runs.
+send_test() {
+  local target="${1:-}"
+  require_macos
+  require_safe_runtime_root
+  [[ -n "$target" ]] || die 'send-test requires one recipient'
+  target_is_valid "$target" ||
+    die "not a valid recipient: $target
+  use +digits (7-15, no leading zero) or one handle containing a single @"
+  require_staged_imsg
+  printf 'Sending a test message to %s.\n' "$target"
+  printf 'macOS asks once to allow control of Messages; approve it.\n'
+  if ! "$IMSG_BIN" send --to "$target" \
+    --text 'iMessage Proxy is set up. This is its test message.' \
+    --service imessage --no-sms-fallback \
+    --db "$MESSAGES_DATABASE_PATH" --json > /dev/null 2>&1; then
+    die "the test message could not be sent
+  Approve the Messages prompt, then run: imessage-proxy send-test $target
+  If no prompt appeared, check System Settings > Privacy & Security > Automation"
+  fi
+  printf 'Sent. Check your messages.\n'
+}
+
+# Reading Messages needs Full Disk Access, which macOS never prompts for. The
+# setting lives in the reviewed configuration and is rendered into the
+# LaunchAgent, so it only takes effect once the agent is re-rendered - which
+# server-restart does not do. Say so rather than leaving the operator to wonder
+# why nothing changed.
+set_messages_read() {
+  local desired="$1" path
+  require_macos
+  require_safe_runtime_root
+  path="$(service_config_path)"
+  [[ -f "$path" && ! -L "$path" ]] ||
+    die "no reviewed configuration at $path; reinstall to create one"
+  require_private_file "$path"
+  local temporary
+  temporary="$(mktemp "${path}.XXXXXX")"
+  grep -v '^IMESSAGE_PROXY_MESSAGES_READ=' "$path" > "$temporary"
+  [[ "$desired" == enabled ]] || printf '%s\n' 'IMESSAGE_PROXY_MESSAGES_READ=disabled' >> "$temporary"
+  chmod 600 "$temporary"
+  mv "$temporary" "$path"
+  require_private_file "$path"
+  if [[ "$desired" == enabled ]]; then
+    printf 'Reading Messages is on.\n'
+    printf 'Grant Full Disk Access to this exact binary, which macOS will not ask for:\n  %s\n' "$SERVER_BIN"
+  else
+    printf 'Reading Messages is off. Sending is unaffected.\n'
+  fi
+  printf 'Apply it with: imessage-proxy prepare && imessage-proxy server-install\n'
+}
+
 
 targets() {
   local action="${1:-list}" existing listed target
@@ -1400,6 +1480,12 @@ main() {
     check-host) [[ $# -eq 1 ]] || die 'check-host takes no arguments'; check_host ;;
     api-key) shift; api_key "$@" ;;
     targets) shift; targets "${@:-list}" ;;
+    send-test) [[ $# -eq 2 ]] || die 'send-test requires one recipient'; send_test "$2" ;;
+    enable-messages-read) [[ $# -eq 1 ]] || die 'enable-messages-read takes no arguments'; set_messages_read enabled ;;
+    disable-messages-read)
+      [[ $# -eq 1 ]] || die 'disable-messages-read takes no arguments'
+      set_messages_read disabled
+      ;;
     server-install) [[ $# -eq 1 ]] || die 'server-install takes no arguments'; server_install ;;
     server-start) [[ $# -eq 1 ]] || die 'server-start takes no arguments'; server_start ;;
     server-stop)

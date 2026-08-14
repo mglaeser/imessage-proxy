@@ -55,6 +55,9 @@ cyan=''
 green=''
 reset=''
 verbose='no'
+# Both questions default to skipping on Enter, so a piped or unattended run
+# installs a service that sends and does not read, and says so at the end.
+messages_read='disabled'
 path_result=''
 path_profile=''
 source_directory=''
@@ -786,6 +789,65 @@ heading() {
 # Four facts and nothing else: where the console is, how to call the API, the
 # key, and how to remove it all. Everything an operator needed the old six
 # sections for is either unnecessary now or one command away.
+# The address must be on the send allowlist for the service to be allowed to
+# message it, so the installer puts it there rather than leaving the operator to
+# meet a 403 on the one command meant to prove the install works.
+offer_test_send() {
+  local answer cli="$1"
+  printf '\n  %sSend a test message to prove sending works?%s\n' "$bold" "$reset" >&2
+  printf '  %sYour own number or email, or Enter to skip:%s ' "$dim" "$reset" >&2
+  IFS= read -r answer < /dev/tty || answer=''
+  [[ -n "$answer" ]] || {
+    printf '  %sSkipped.%s\n' "$dim" "$reset" >&2
+    return 0
+  }
+
+  printf '\n  %smacOS will now ask to allow control of Messages. Approve it.%s\n' "$bold" "$reset" >&2
+  printf '  %sSending cannot work without it, and this is when it is asked.%s\n' "$dim" "$reset" >&2
+  printf '  %sIf no window appears, look behind this one.%s\n\n' "$dim" "$reset" >&2
+
+  if ! "$cli" targets add "$answer" >/dev/null 2>&1; then
+    printf '  %sNot a valid recipient, so nothing was sent or allowed.%s\n' "$dim" "$reset" >&2
+    printf '  %sUse +15551234567 or name@example.com.%s\n' "$dim" "$reset" >&2
+    return 0
+  fi
+  if "$cli" send-test "$answer" >/dev/null 2>&1; then
+    printf '  %sSent, and %s is now an allowed recipient.%s\n' "$green" "$answer" "$reset" >&2
+  else
+    printf '  %s%s is allowed, but the test did not complete.%s\n' "$dim" "$answer" "$reset" >&2
+    printf '  %sApprove the Messages prompt, then: imessage-proxy send-test %s%s\n' "$dim" "$answer" "$reset" >&2
+  fi
+}
+
+# macOS never prompts for Full Disk Access, so this is a checkpoint rather than
+# something the system will ask later. Declining is a complete installation, not
+# a degraded one.
+offer_messages_read() {
+  local answer server_binary
+  server_binary="$HOME/Library/Application Support/iMessage Proxy/state/bin/imessage-proxy-server"
+  printf '\n  %sAlso read your Messages history?%s\n' "$bold" "$reset" >&2
+  printf '  %sPowers listing chats, history and statistics. Sending does not need it.%s\n' "$dim" "$reset" >&2
+  printf '  %sType y to enable, or Enter to skip:%s ' "$dim" "$reset" >&2
+  IFS= read -r answer < /dev/tty || answer=''
+  case "$answer" in
+    [yY] | [yY][eE][sS]) messages_read='enabled' ;;
+    *)
+      messages_read='disabled'
+      printf '  %sSkipped. Reading stays off until you run:%s\n' "$dim" "$reset" >&2
+      printf '  %s  imessage-proxy enable-messages-read%s\n' "$dim" "$reset" >&2
+      return 0
+      ;;
+  esac
+
+  printf '\n  %sFull Disk Access is required, and macOS never asks for it.%s\n' "$bold" "$reset" >&2
+  printf '  %sIt has to be added by hand:%s\n\n' "$dim" "$reset" >&2
+  printf '  %s  1. Open System Settings > Privacy & Security > Full Disk Access%s\n' "$dim" "$reset" >&2
+  printf '  %s  2. Add this exact binary:%s\n' "$dim" "$reset" >&2
+  printf '       %s%s%s\n' "$cyan" "$server_binary" "$reset" >&2
+  printf '  %s  3. Toggle stale entries off and on after an update%s\n' "$dim" "$reset" >&2
+  printf '  %s  4. Reading starts on the next request; no restart needed%s\n\n' "$dim" "$reset" >&2
+}
+
 print_next_steps() {
   local port="$1" version="$2"
 
@@ -802,6 +864,15 @@ print_next_steps() {
 
   heading 'UNINSTALL'
   note "     ${dim}curl -fsSL ${PROJECT_URL}/raw/main/scripts/uninstall.sh | bash${reset}"
+  note ''
+
+  heading 'READING MESSAGES'
+  if [[ "$messages_read" == enabled ]]; then
+    note "     ${dim}On, once Full Disk Access is granted to the server binary.${reset}"
+  else
+    note "     ${dim}Off. Sending works. Turn reading on with:${reset}"
+    note "     ${dim}  imessage-proxy enable-messages-read${reset}"
+  fi
   note ''
 
   print_path_result
@@ -1018,6 +1089,17 @@ main() {
     --expires-in-days "$expires_days" \
     --without-admin-key
   ensure_path_entry
+
+  step "Proving the send path"
+  offer_test_send "$cli"
+
+  step "Reading Messages"
+  offer_messages_read
+  if [[ "$messages_read" == disabled ]]; then
+    run_quietly "Turning reading off" "$cli" disable-messages-read
+    run_quietly "Applying the setting" "$cli" prepare
+  fi
+
   print_next_steps "$service_port" "$("$cli" version)"
   # Deliberately the last command, uncaptured and unredirected. The key is the
   # only thing this script ever writes to stdout, so a pipeline can take it and
