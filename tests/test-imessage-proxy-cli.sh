@@ -524,31 +524,6 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     assert_not_contains 'no Messages database' "$temporary/doctor-read-disabled.out"
   )
 
-  # The checkpoint exists so a human reads the sentence, not to test typing. A
-  # single mistyped character used to discard a completed build and install, so
-  # case and surrounding whitespace are forgiven while the words remain
-  # mandatory. Anything short of the full sentence must still be refused.
-  for accepted in \
-    'FULL DISK ACCESS GRANTED' \
-    'full disk access granted' \
-    'Full Disk Access Granted' \
-    '   FULL DISK ACCESS GRANTED   '; do
-    full_disk_access_acknowledgement_matches "$accepted" ||
-      fail "a valid Full Disk Access acknowledgement was refused: $accepted"
-  done
-  for refused in \
-    'FULL DISK ACCESS GRANTE' \
-    'FULL DISK ACCESS' \
-    'GRANTED' \
-    'FULL  DISK ACCESS GRANTED' \
-    'FULL DISK ACCESS GRANTED PLEASE' \
-    'yes' \
-    ''; do
-    if full_disk_access_acknowledgement_matches "$refused"; then
-      fail "an invalid Full Disk Access acknowledgement was accepted: $refused"
-    fi
-  done
-
   bootstrap_token="imp_$(printf 'a%.0s' {1..43})"
   (
     bootstrap_log="$temporary/bootstrap-sequence.log"
@@ -561,7 +536,6 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     doctor() { printf '%s\n' doctor >> "$bootstrap_log"; }
     prepare() { printf '%s\n' prepare >> "$bootstrap_log"; }
     build_host() { printf '%s\n' build-host >> "$bootstrap_log"; }
-    acknowledge_full_disk_access() { printf '%s\n' full-disk-access >> "$bootstrap_log"; }
     initialize_database() { printf '%s\n' initialize-database >> "$bootstrap_log"; }
     check_bootstrap_eligibility() { printf '%s\n' bootstrap-preflight >> "$bootstrap_log"; }
     check_host() { printf '%s\n' check-host >> "$bootstrap_log"; }
@@ -574,7 +548,7 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
       --expires-in-days 14 2> "$bootstrap_stderr")"
     [[ "$output" == "$bootstrap_token" ]] || fail 'bootstrap stdout was not exactly the first key'
     [[ "$(< "$bootstrap_log")" == \
-      $'config\ndoctor\nprepare\nbuild-host\nfull-disk-access\ninitialize-database\nbootstrap-preflight\ncheck-host\nserver-install\nkey bootstrap-admin --name first-admin --expires-in-days 14' ]] ||
+      $'config\ndoctor\nprepare\nbuild-host\ninitialize-database\nbootstrap-preflight\ncheck-host\nserver-install\nkey bootstrap-admin --name first-admin --expires-in-days 14' ]] ||
       fail 'bootstrap lifecycle order or final key operation changed'
     assert_not_contains "$bootstrap_token" "$bootstrap_stderr"
     assert_contains 'Progress is sent to stderr; the key is stdout only.' "$bootstrap_stderr"
@@ -587,7 +561,6 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     doctor() { :; }
     prepare() { :; }
     build_host() { false; fail 'errexit ignored an internal build failure'; }
-    acknowledge_full_disk_access() { fail 'bootstrap continued after build failure'; }
     api_key_bootstrap() { fail 'bootstrap created a key after build failure'; }
     set +e
     (
@@ -612,7 +585,6 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     doctor() { :; }
     prepare() { :; }
     build_host() { :; }
-    acknowledge_full_disk_access() { :; }
     initialize_database() { printf '%s\n' initialize-database >> "$bootstrap_log"; }
     check_bootstrap_eligibility() { printf '%s\n' bootstrap-preflight >> "$bootstrap_log"; }
     check_host() { printf '%s\n' check-host >> "$bootstrap_log"; }
@@ -681,7 +653,6 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     doctor() { :; }
     prepare() { :; }
     build_host() { :; }
-    acknowledge_full_disk_access() { :; }
     initialize_database() { :; }
     check_bootstrap_eligibility() { :; }
     check_host() { :; }
@@ -709,7 +680,6 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     doctor() { :; }
     prepare() { :; }
     build_host() { :; }
-    acknowledge_full_disk_access() { :; }
     initialize_database() { :; }
     check_bootstrap_eligibility() { :; }
     check_host() { :; }
