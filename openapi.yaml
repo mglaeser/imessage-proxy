@@ -33,6 +33,10 @@ tags:
     description: Scoped credential lifecycle management.
   - name: Audit
     description: Privacy-safe operational event metadata for administrators.
+  - name: Recipients
+    description: >-
+      The send allowlist. Administration only: a key holding messages:send may
+      write to these destinations but may not change which destinations they are.
 paths:
   /api/status:
     get:
@@ -484,6 +488,86 @@ paths:
           $ref: "#/components/responses/RequestTimeout"
         "413":
           $ref: "#/components/responses/TooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "431":
+          $ref: "#/components/responses/HeadersTooLarge"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /api/targets:
+    get:
+      operationId: listAllowedTargets
+      tags: [Recipients]
+      summary: List the destinations this service may message.
+      description: >-
+        The allowlist is the send-authorisation boundary and is readable and
+        writable only with the admin scope, so a stolen messages:send credential
+        cannot discover or widen the set of people it may write to. It is also
+        editable on the host with "imessage-proxy targets".
+      x-required-scope: admin
+      responses:
+        "200":
+          description: The current allowlist, sorted, with chats as chat_id:N.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AllowedTargets"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "431":
+          $ref: "#/components/responses/HeadersTooLarge"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    put:
+      operationId: replaceAllowedTargets
+      tags: [Recipients]
+      summary: Replace the whole allowlist.
+      description: >-
+        Send the complete list, not a change to it: there is no add or remove
+        operation, so two administrators editing at once cannot silently merge
+        into a set neither approved. The file is written atomically and re-read
+        on the next send, so no restart is needed. An empty list disables
+        sending entirely. A list containing any invalid entry is rejected whole.
+      x-required-scope: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AllowedTargets"
+      responses:
+        "200":
+          description: The allowlist as stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AllowedTargets"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
         "429":
           $ref: "#/components/responses/RateLimited"
         "431":
@@ -1178,6 +1262,27 @@ components:
         total_bytes:
           type: integer
           minimum: 0
+    AllowedTargets:
+      type: object
+      additionalProperties: false
+      required: [targets]
+      properties:
+        targets:
+          type: array
+          maxItems: 500
+          uniqueItems: true
+          description: >-
+            Every destination this service may message, and nothing else. A
+            direct handle uses the same form the send endpoint accepts; an
+            existing conversation is written as chat_id: followed by its number.
+            Wildcards and contact names are not supported. An empty array
+            disables sending.
+          items:
+            type: string
+            minLength: 1
+            maxLength: 256
+            pattern: '^(?:chat_id:[1-9][0-9]{0,17}|\+[1-9][0-9]{6,14}|[^\s@\u0000-\u001F\u007F-\u009F-][^\s@\u0000-\u001F\u007F-\u009F]*@[^\s@\u0000-\u001F\u007F-\u009F]+)$'
+          example: ["+15551234567", "chat_id:42", "person@example.net"]
     SendMessageRequest:
       type: object
       additionalProperties: false

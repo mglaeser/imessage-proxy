@@ -71,7 +71,22 @@ Only the port is meant to be edited. Change it, then
 `bootstrap` reads this file; anything already exported wins, and
 `IMESSAGE_PROXY_CONFIG` points at a different one.
 
-The allowlist is one recipient per line at
+The allowlist decides who this Mac may message. Manage it with the CLI:
+
+```bash
+imessage-proxy targets list
+imessage-proxy targets add person@example.net
+imessage-proxy targets add +15551234567
+imessage-proxy targets add chat_id:42
+imessage-proxy targets remove person@example.net
+```
+
+Changes take effect on the next send; nothing needs restarting. The console has
+the same list under **Recipients**, and `GET`/`PUT /api/targets` expose it to
+the API — all three require the `admin` scope, so a stolen `messages:send` key
+can write to the people you approved but cannot add anyone new.
+
+Underneath it is one recipient per line at
 `~/Library/Application Support/iMessage Proxy/private/allowed-targets.txt`.
 Wildcards are not supported, by design.
 

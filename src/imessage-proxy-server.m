@@ -351,6 +351,58 @@ static BOOL IsDirectMessageRecipient(NSString *value) {
            NSMaxRange(firstAt) < value.length;
 }
 
+// Shared by startup validation and by the per-send re-read, so a target the file
+// accepts is exactly a target a send accepts. One malformed line rejects the
+// whole file rather than being skipped: silently ignoring a line an operator
+// believed they had authorised is the worse failure.
+static BOOL ParseAllowedTargets(NSString *text, NSMutableSet<NSString *> **recipients,
+                                NSMutableSet<NSString *> **chatIDs, NSError **error) {
+    NSMutableSet<NSString *> *parsedRecipients = [NSMutableSet set];
+    NSMutableSet<NSString *> *parsedChatIDs = [NSMutableSet set];
+    for (NSString *rawLine in [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+        NSString *line = Trim(rawLine);
+        if (line.length == 0 || [line hasPrefix:@"#"]) {
+            continue;
+        }
+        BOOL valid = NO;
+        if ([line hasPrefix:@"chat_id:"]) {
+            NSString *chatID = [line substringFromIndex:@"chat_id:".length];
+            NSUInteger parsedChatID = 0;
+            valid = ParsePositiveInteger(chatID, NSIntegerMax, &parsedChatID) &&
+                    [line isEqualToString:[NSString stringWithFormat:@"chat_id:%lu", (unsigned long)parsedChatID]];
+            if (valid)
+                [parsedChatIDs addObject:chatID];
+        } else if (IsDirectMessageRecipient(line)) {
+            valid = YES;
+            [parsedRecipients addObject:line];
+        }
+        if (!valid) {
+            if (error != NULL) {
+                *error = ServerError(IMPServerErrorInvalidConfiguration, @"target allowlist contains an invalid entry");
+            }
+            return NO;
+        }
+    }
+    if (recipients != NULL)
+        *recipients = parsedRecipients;
+    if (chatIDs != NULL)
+        *chatIDs = parsedChatIDs;
+    return YES;
+}
+
+// One submitted value must mean exactly one target. A value carrying a newline
+// would otherwise parse as two, and one beginning with # as none, so what the
+// service stored could differ from what it echoed back to the caller. Counting
+// what the shared parser actually produced makes both unrepresentable.
+static BOOL IsAllowedTargetLine(NSString *line) {
+    NSMutableSet<NSString *> *recipients = nil;
+    NSMutableSet<NSString *> *chatIDs = nil;
+    if (!ParseAllowedTargets(line, &recipients, &chatIDs, NULL)) {
+        return NO;
+    }
+    return recipients.count + chatIDs.count == 1;
+}
+
 @interface IMPConfiguration : NSObject
 @property (nonatomic) uint16_t port;
 @property (nonatomic, copy) NSString *uiDirectory;
@@ -358,8 +410,6 @@ static BOOL IsDirectMessageRecipient(NSString *value) {
 @property (nonatomic, copy) NSString *messagesDatabasePath;
 @property (nonatomic, copy) NSString *allowedTargetsPath;
 @property (nonatomic, copy) NSData *allowedTargetsBytes;
-@property (nonatomic, copy) NSSet<NSString *> *allowedRecipients;
-@property (nonatomic, copy) NSSet<NSString *> *allowedChatIDs;
 @property (nonatomic, copy) NSString *imsgPath;
 @property (nonatomic, copy) NSString *imsgSHA256;
 @property (nonatomic, copy) NSString *localOrigin;
@@ -1069,35 +1119,14 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
         }
         return nil;
     }
-    NSMutableSet<NSString *> *recipients = [NSMutableSet set];
-    NSMutableSet<NSString *> *chatIDs = [NSMutableSet set];
-    for (NSString *rawLine in [targetsText componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
-        NSString *line = Trim(rawLine);
-        if (line.length == 0 || [line hasPrefix:@"#"]) {
-            continue;
-        }
-        BOOL valid = NO;
-        if ([line hasPrefix:@"chat_id:"]) {
-            NSString *chatID = [line substringFromIndex:@"chat_id:".length];
-            NSUInteger parsedChatID = 0;
-            valid = ParsePositiveInteger(chatID, NSIntegerMax, &parsedChatID) &&
-                    [line isEqualToString:[NSString stringWithFormat:@"chat_id:%lu", (unsigned long)parsedChatID]];
-            if (valid)
-                [chatIDs addObject:chatID];
-        } else if (IsDirectMessageRecipient(line)) {
-            valid = YES;
-            [recipients addObject:line];
-        }
-        if (!valid) {
-            if (error != NULL) {
-                *error = ServerError(IMPServerErrorInvalidConfiguration, @"target allowlist contains an invalid entry");
-            }
-            return nil;
-        }
+    // Parsed but not retained: every send re-reads the file, so the only thing
+    // startup needs from it is the guarantee that it is well formed. Refusing to
+    // start on a malformed allowlist reports the mistake at install time instead
+    // of as a puzzling 503 on the operator's first send.
+    if (!ParseAllowedTargets(targetsText, NULL, NULL, error)) {
+        return nil;
     }
     configuration.allowedTargetsBytes = targetsData;
-    configuration.allowedRecipients = [recipients copy];
-    configuration.allowedChatIDs = [chatIDs copy];
 
     NSString *readTimeoutText = environment[@"IMESSAGE_PROXY_READ_TIMEOUT_SECONDS"] ?: @"30";
     NSUInteger readTimeout = 0;
@@ -2170,6 +2199,99 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
     return response;
 }
 
+// Reads the allowlist as it is on disk right now, with the same validation the
+// server applied at startup.
+- (BOOL)loadCurrentTargets:(NSSet<NSString *> **)recipients
+                   chatIDs:(NSSet<NSString *> **)chatIDs
+                     error:(NSError **)error {
+    NSData *data = nil;
+    if (!IsPrivateRegularFile(self.configuration.allowedTargetsPath, &data, error)) {
+        return NO;
+    }
+    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (text == nil || data.length > 64 * 1024) {
+        if (error != NULL) {
+            *error = ServerError(IMPServerErrorInvalidConfiguration, @"target allowlist is invalid");
+        }
+        return NO;
+    }
+    NSMutableSet<NSString *> *parsedRecipients = nil;
+    NSMutableSet<NSString *> *parsedChatIDs = nil;
+    if (!ParseAllowedTargets(text, &parsedRecipients, &parsedChatIDs, error)) {
+        return NO;
+    }
+    if (recipients != NULL)
+        *recipients = parsedRecipients;
+    if (chatIDs != NULL)
+        *chatIDs = parsedChatIDs;
+    return YES;
+}
+
+// Written whole, never appended, so a concurrent send never observes a half
+// written allowlist: the rename is atomic and the temporary carries the same
+// 0600 the reader insists on.
+- (BOOL)replaceTargets:(NSArray<NSString *> *)lines error:(NSError **)error {
+    NSString *path = self.configuration.allowedTargetsPath;
+    NSMutableString *rendered = [NSMutableString
+        stringWithString:@"# One exact permitted iMessage target per line. An empty file disables sending.\n"
+                          "# Direct address: canonical +digits or one no-whitespace @ handle\n"
+                          "# Existing iMessage chat: chat_id:42\n"
+                          "# Wildcards are not supported.\n"];
+    for (NSString *line in lines) {
+        [rendered appendFormat:@"%@\n", line];
+    }
+    NSString *temporary = [path stringByAppendingFormat:@".%@", NewRequestUUID()];
+    NSData *payload = [rendered dataUsingEncoding:NSUTF8StringEncoding];
+    // O_EXCL with an explicit 0600 means the temporary is never briefly readable
+    // by anyone else, so there is no window in which the allowlist could leak or
+    // in which a concurrent reader would reject it for being too permissive.
+    int file = open(temporary.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (file < 0) {
+        if (error != NULL) {
+            *error = ServerError(IMPServerErrorInvalidConfiguration, @"could not create the target allowlist");
+        }
+        return NO;
+    }
+    const uint8_t *bytes = payload.bytes;
+    size_t remaining = payload.length;
+    BOOL wrote = YES;
+    while (remaining > 0) {
+        ssize_t written = write(file, bytes, remaining);
+        if (written <= 0) {
+            if (written < 0 && errno == EINTR) {
+                continue;
+            }
+            wrote = NO;
+            break;
+        }
+        bytes += written;
+        remaining -= (size_t)written;
+    }
+    // Durable before it is visible: a crash between the two must not leave the
+    // allowlist naming a recipient whose bytes never reached the disk. The
+    // descriptor is closed exactly once on every path, including the failing
+    // ones - a double close could otherwise land on an unrelated connection.
+    BOOL durable = wrote && fsync(file) == 0;
+    if (close(file) != 0) {
+        durable = NO;
+    }
+    if (!durable) {
+        unlink(temporary.fileSystemRepresentation);
+        if (error != NULL) {
+            *error = ServerError(IMPServerErrorInvalidConfiguration, @"could not write the target allowlist");
+        }
+        return NO;
+    }
+    if (rename(temporary.fileSystemRepresentation, path.fileSystemRepresentation) != 0) {
+        unlink(temporary.fileSystemRepresentation);
+        if (error != NULL) {
+            *error = ServerError(IMPServerErrorInvalidConfiguration, @"could not replace the target allowlist");
+        }
+        return NO;
+    }
+    return YES;
+}
+
 // The console is three files, so the router matches an exact table of request
 // paths against constants and looks the chosen name up in a second constant
 // table. No byte of the request is ever concatenated into a filesystem path, so
@@ -2636,10 +2758,25 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
                         response = Problem(400, @"invalid-message",
                                            @"Exactly one valid target and message text are required.");
                     } else {
-                        BOOL targetAllowed = validChat
-                                                 ? [self.configuration.allowedChatIDs containsObject:chatID.stringValue]
-                                                 : [self.configuration.allowedRecipients containsObject:recipient];
-                        if (!targetAllowed) {
+                        // Re-read rather than trusting the set captured at
+                        // startup. The allowlist is editable by the CLI and by
+                        // PUT /api/targets, and authorising a send against a
+                        // stale copy would either honour a target the operator
+                        // had just revoked or refuse one they had just added.
+                        NSError *targetsError = nil;
+                        NSSet<NSString *> *currentRecipients = nil;
+                        NSSet<NSString *> *currentChatIDs = nil;
+                        BOOL targetsLoaded = [self loadCurrentTargets:&currentRecipients
+                                                              chatIDs:&currentChatIDs
+                                                                error:&targetsError];
+                        BOOL targetAllowed =
+                            targetsLoaded && (validChat ? [currentChatIDs containsObject:chatID.stringValue]
+                                                        : [currentRecipients containsObject:recipient]);
+                        if (!targetsLoaded) {
+                            LogOperationalFailure("messages.send", "allowlist_unreadable", targetsError);
+                            response =
+                                Problem(503, @"allowlist-unavailable", @"The recipient allowlist could not be read.");
+                        } else if (!targetAllowed) {
                             response = Problem(403, @"target-forbidden", @"The message target is not allowed.");
                         } else {
                             NSDictionary *normalized = validChat ? @{@"chat_id": chatID, @"text": text}
@@ -2792,6 +2929,81 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
                     [keys addObject:KeyDTO(record)];
                 response = JSONResponse(200, @{@"keys": keys});
             }
+        }
+    }
+
+    // The allowlist is the send-authorisation boundary, so managing it requires
+    // admin - the same scope that can already mint sending keys - and every
+    // change is audited. A caller holding only messages:send still cannot widen
+    // the set of people it may write to.
+    if (response == nil && [request.path isEqualToString:@"/api/targets"]) {
+        if (![actor hasScope:IMPAPIKeyScopeAdmin]) {
+            auditAction = @"targets.read";
+            response = [self scopeProblem];
+        } else if ([request.method isEqualToString:@"GET"]) {
+            auditAction = @"targets.read";
+            NSError *targetsError = nil;
+            NSSet<NSString *> *recipients = nil;
+            NSSet<NSString *> *chatIDs = nil;
+            if (request.body.length > 0 || request.query.length > 0) {
+                response = Problem(400, @"invalid-request", @"This route accepts no body or query.");
+            } else if (![self loadCurrentTargets:&recipients chatIDs:&chatIDs error:&targetsError]) {
+                LogOperationalFailure("targets.read", "allowlist_unreadable", targetsError);
+                response = Problem(503, @"allowlist-unavailable", @"The recipient allowlist could not be read.");
+            } else {
+                NSMutableArray<NSString *> *targets = [NSMutableArray array];
+                for (NSString *recipient in recipients)
+                    [targets addObject:recipient];
+                for (NSString *chatID in chatIDs)
+                    [targets addObject:[@"chat_id:" stringByAppendingString:chatID]];
+                [targets sortUsingSelector:@selector(compare:)];
+                response = JSONResponse(200, @{@"targets": targets});
+            }
+        } else if ([request.method isEqualToString:@"PUT"]) {
+            auditAction = @"targets.replace";
+            id object = request.body.length == 0
+                            ? nil
+                            : [NSJSONSerialization JSONObjectWithData:request.body options:0 error:nil];
+            NSDictionary *body = [object isKindOfClass:NSDictionary.class] ? object : nil;
+            NSArray *submitted = [body[@"targets"] isKindOfClass:NSArray.class] ? body[@"targets"] : nil;
+            NSMutableArray<NSString *> *lines = [NSMutableArray array];
+            BOOL valid = body != nil && submitted != nil &&
+                         [[NSSet setWithArray:body.allKeys] isSubsetOfSet:[NSSet setWithObject:@"targets"]] &&
+                         submitted.count <= 500;
+            if (valid) {
+                // Each entry is validated on its own, with exactly the rule a
+                // send applies, so the API cannot write a file that then
+                // refuses every send or refuses to start. Anything dropped here
+                // - a non-string, an invalid value, a duplicate - makes the
+                // counts disagree, so a caller is never told it saved a list it
+                // did not send.
+                for (id entry in submitted) {
+                    if (![entry isKindOfClass:NSString.class]) {
+                        continue;
+                    }
+                    NSString *line = Trim(entry);
+                    if (!IsAllowedTargetLine(line) || [lines containsObject:line]) {
+                        continue;
+                    }
+                    [lines addObject:line];
+                }
+                valid = lines.count == submitted.count;
+            }
+            if (!valid) {
+                response = Problem(400, @"invalid-targets",
+                                   @"Provide up to 500 unique targets, each a canonical handle or chat_id.");
+            } else {
+                NSError *writeError = nil;
+                if (![self replaceTargets:lines error:&writeError]) {
+                    LogOperationalFailure("targets.replace", "allowlist_unwritable", writeError);
+                    response = Problem(503, @"allowlist-unavailable", @"The recipient allowlist could not be written.");
+                } else {
+                    response = JSONResponse(200, @{@"targets": lines});
+                }
+            }
+        } else {
+            auditAction = @"targets.read";
+            response = Problem(405, @"method-not-allowed", @"This route accepts GET and PUT.");
         }
     }
 

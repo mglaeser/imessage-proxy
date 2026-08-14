@@ -111,6 +111,15 @@
             >API playground</button>
             <button
               class="console-tab"
+              id="targets-tab"
+              type="button"
+              role="tab"
+              aria-controls="targets-panel"
+              aria-selected="false"
+              tabindex="-1"
+            >Recipients</button>
+            <button
+              class="console-tab"
               id="keys-tab"
               type="button"
               role="tab"
@@ -318,6 +327,77 @@
           </div>
         </section>
 
+        <section id="targets-panel" role="tabpanel" aria-labelledby="targets-tab" tabindex="0" hidden>
+          <div class="workspace-grid">
+          <section class="panel keys-panel" aria-labelledby="targets-title">
+            <div class="panel-heading panel-heading-row">
+              <div>
+                <p class="eyebrow">Send allowlist</p>
+                <h2 id="targets-title">Allowed recipients</h2>
+                <p>
+                  The only destinations this service may message. A key with
+                  <code>messages:send</code> can write to these and nothing else.
+                </p>
+              </div>
+              <span class="count-badge" id="target-count">0 recipients</span>
+            </div>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Recipient</th>
+                    <th scope="col">Kind</th>
+                    <th scope="col"><span class="visually-hidden">Actions</span></th>
+                  </tr>
+                </thead>
+                <tbody id="targets-body"></tbody>
+              </table>
+              <div class="empty-state" id="targets-empty" hidden>
+                <strong>No recipients are allowed</strong>
+                <p>Sending is disabled until you allow at least one destination.</p>
+              </div>
+            </div>
+          </section>
+
+          <aside class="panel create-panel" aria-labelledby="allow-title">
+            <div class="panel-heading">
+              <p class="eyebrow">New destination</p>
+              <h2 id="allow-title">Allow a recipient</h2>
+              <p>Changes apply to the next send. Nothing needs restarting.</p>
+            </div>
+
+            <form id="allow-form" novalidate>
+              <label for="allow-kind">Kind</label>
+              <select id="allow-kind" name="kind">
+                <option value="recipient" selected>Phone number or handle</option>
+                <option value="chat_id">Existing chat</option>
+              </select>
+
+              <label for="allow-value" id="allow-value-label">Phone number or handle</label>
+              <input
+                id="allow-value"
+                name="value"
+                type="text"
+                required
+                maxlength="256"
+                aria-describedby="allow-value-help"
+                autocomplete="off"
+                placeholder="person@example.net"
+              >
+              <p class="field-help" id="allow-value-help">
+                A phone number in <code>+</code> international form, or a handle containing one <code>@</code>.
+              </p>
+
+              <p class="form-error" id="allow-error" role="alert" hidden></p>
+              <button class="button button-primary button-wide" id="allow-button" type="submit">
+                Allow recipient
+              </button>
+            </form>
+          </aside>
+          </div>
+        </section>
+
         <section id="keys-panel" role="tabpanel" aria-labelledby="keys-tab" tabindex="0" hidden>
           <div class="workspace-grid">
           <section class="panel keys-panel" aria-labelledby="keys-title">
@@ -430,6 +510,21 @@
         <div class="dialog-actions">
           <button class="button button-danger" id="confirm-revoke" type="submit">Revoke key</button>
           <button class="button button-secondary" id="cancel-revoke" type="button">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="confirm-dialog" id="remove-target-dialog" aria-labelledby="remove-target-title">
+      <p class="eyebrow">Confirm removal</p>
+      <h2 id="remove-target-title">Stop allowing this recipient?</h2>
+      <p>
+        <strong id="remove-target-name">This recipient</strong> can no longer be messaged
+        by any key. Existing conversations are untouched.
+      </p>
+      <form id="remove-target-form">
+        <div class="dialog-actions">
+          <button class="button button-danger" id="confirm-remove-target" type="submit">Remove recipient</button>
+          <button class="button button-secondary" id="cancel-remove-target" type="button">Cancel</button>
         </div>
       </form>
     </dialog>

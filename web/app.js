@@ -81,14 +81,33 @@ const elements = {
   statisticsMedia: document.querySelector("#statistics-media"),
   statisticsTimeZone: document.querySelector("#statistics-time-zone"),
   statusUpdated: document.querySelector("#status-updated"),
+  allowButton: document.querySelector("#allow-button"),
+  allowError: document.querySelector("#allow-error"),
+  allowForm: document.querySelector("#allow-form"),
+  allowKind: document.querySelector("#allow-kind"),
+  allowValue: document.querySelector("#allow-value"),
+  allowValueHelp: document.querySelector("#allow-value-help"),
+  allowValueLabel: document.querySelector("#allow-value-label"),
+  cancelRemoveTarget: document.querySelector("#cancel-remove-target"),
+  confirmRemoveTarget: document.querySelector("#confirm-remove-target"),
+  removeTargetDialog: document.querySelector("#remove-target-dialog"),
+  removeTargetForm: document.querySelector("#remove-target-form"),
+  removeTargetName: document.querySelector("#remove-target-name"),
+  targetCount: document.querySelector("#target-count"),
+  targetsBody: document.querySelector("#targets-body"),
+  targetsEmpty: document.querySelector("#targets-empty"),
+  targetsPanel: document.querySelector("#targets-panel"),
+  targetsTab: document.querySelector("#targets-tab"),
   toast: document.querySelector("#toast"),
   toggleKey: document.querySelector("#toggle-key"),
 };
 
 let activeKey = "";
 let copyTimer = null;
+let allowedTargets = [];
 let pendingPlaygroundRequest = null;
 let pendingRevocation = null;
+let pendingTargetRemoval = null;
 let playgroundController = new AbortController();
 let playgroundGeneration = 0;
 let sendAttempt = null;
@@ -190,6 +209,7 @@ function setConnection(state, label) {
 const consoleSections = [
   { panel: elements.overviewPanel, tab: elements.overviewTab },
   { panel: elements.playgroundPanel, tab: elements.playgroundTab },
+  { panel: elements.targetsPanel, tab: elements.targetsTab },
   { panel: elements.keysPanel, tab: elements.keysTab },
 ];
 
@@ -280,6 +300,14 @@ function clearConsoleData() {
   elements.keysBody.replaceChildren();
   elements.keyCount.textContent = "0 keys";
   elements.keysEmpty.hidden = true;
+  allowedTargets = [];
+  elements.targetsBody.replaceChildren();
+  elements.targetCount.textContent = "0 recipients";
+  elements.targetsEmpty.hidden = true;
+  elements.allowForm.reset();
+  elements.allowButton.disabled = false;
+  elements.confirmRemoveTarget.disabled = false;
+  updateAllowKind();
   elements.serviceStatus.textContent = "Signed out";
   elements.messagesStatus.textContent = "—";
   elements.serviceVersion.textContent = "—";
@@ -307,6 +335,7 @@ function signOut(message = "") {
   invalidateSession();
   pendingPlaygroundRequest = null;
   pendingRevocation = null;
+  pendingTargetRemoval = null;
   sendAttempt = null;
   persistSessionKey("");
   elements.signinKey.value = "";
@@ -319,6 +348,9 @@ function signOut(message = "") {
   }
   if (elements.sendDialog.open) {
     elements.sendDialog.close();
+  }
+  if (elements.removeTargetDialog.open) {
+    elements.removeTargetDialog.close();
   }
   clearConsoleData();
   showSignin(message);
@@ -566,6 +598,180 @@ function renderKeys(payload) {
 
     row.append(nameCell, scopesCell, expiryCell, lastUsedCell, actionCell);
     elements.keysBody.append(row);
+  }
+}
+
+// The allowlist is the send-authorisation boundary. The service exposes it only
+// to an admin key, which is also the only key that can reach this console at
+// all, so a stolen messages:send credential can never widen the set of people
+// it may write to - it can only use the destinations an operator approved here.
+function normalizedTargets(payload) {
+  if (!payload || !Array.isArray(payload.targets)) {
+    throw new RequestError("The service returned an invalid recipient list.", 502);
+  }
+  return payload.targets.map((entry) => String(entry ?? ""));
+}
+
+// Kept in step with IsDirectMessageRecipient in src/imessage-proxy-server.m and
+// target_is_valid in bin/imessage-proxy, so a rejection is explained inline
+// instead of arriving as an opaque 400.
+function targetProblem(value) {
+  if (value.startsWith("chat_id:")) {
+    return /^chat_id:[1-9][0-9]{0,17}$/.test(value)
+      ? ""
+      : "A chat must be chat_id: followed by the chat's number, such as chat_id:42.";
+  }
+  if (!value) {
+    return "Enter a phone number or handle.";
+  }
+  if (Array.from(value).length > 256) {
+    return "A recipient may be at most 256 characters.";
+  }
+  if (value.startsWith("-")) {
+    return "A recipient may not start with a dash.";
+  }
+  if (/[\s\p{Cc}\p{Cf}]/u.test(value)) {
+    return "A recipient may not contain spaces or control characters.";
+  }
+  if (value.startsWith("+")) {
+    return /^\+[1-9][0-9]{6,14}$/.test(value)
+      ? ""
+      : "A phone number must be + followed by 7 to 15 digits, with no leading zero, such as +15551234567.";
+  }
+  const at = value.indexOf("@");
+  if (at <= 0 || at !== value.lastIndexOf("@") || at === value.length - 1) {
+    return "A handle must contain exactly one @, with text on both sides.";
+  }
+  return "";
+}
+
+function describeTargetKind(value) {
+  if (value.startsWith("chat_id:")) {
+    return "Chat";
+  }
+  return value.startsWith("+") ? "Phone number" : "Handle";
+}
+
+function renderTargets(payload) {
+  const targets = normalizedTargets(payload).slice().sort((left, right) => left.localeCompare(right));
+  allowedTargets = targets;
+  elements.targetsBody.replaceChildren();
+  elements.targetCount.textContent =
+    `${targets.length} ${targets.length === 1 ? "recipient" : "recipients"}`;
+  elements.targetsEmpty.hidden = targets.length !== 0;
+
+  for (const target of targets) {
+    const row = document.createElement("tr");
+    const valueCell = document.createElement("td");
+    const kindCell = document.createElement("td");
+    const actionCell = document.createElement("td");
+
+    appendText(valueCell, "key-name", target);
+    kindCell.textContent = describeTargetKind(target);
+
+    const removeButton = document.createElement("button");
+    removeButton.className = "revoke-button";
+    removeButton.type = "button";
+    removeButton.textContent = "Remove";
+    removeButton.addEventListener("click", () => openRemoveTargetDialog(target));
+    actionCell.append(removeButton);
+
+    row.append(valueCell, kindCell, actionCell);
+    elements.targetsBody.append(row);
+  }
+}
+
+// One endpoint replaces the whole list, so both add and remove send the full set
+// and re-render from what the service actually stored. That keeps the table
+// honest when another operator, or the CLI, changed the file underneath.
+async function replaceTargets(targets, generation) {
+  const saved = await apiRequest("/api/targets", {
+    body: { targets },
+    method: "PUT",
+  }, generation);
+  requireCurrentSession(generation);
+  renderTargets(saved);
+}
+
+function updateAllowKind() {
+  const chat = elements.allowKind.value === "chat_id";
+  elements.allowValueLabel.textContent = chat ? "Chat number" : "Phone number or handle";
+  elements.allowValue.placeholder = chat ? "42" : "person@example.net";
+  elements.allowValueHelp.textContent = chat
+    ? "The numeric id of an existing conversation, as listed by GET /api/chats."
+    : "A phone number in + international form, or a handle containing one @.";
+  elements.allowValue.value = "";
+  setFormError(elements.allowError);
+  elements.allowValue.setAttribute("aria-invalid", "false");
+}
+
+async function handleAllowTarget(event) {
+  event.preventDefault();
+  setFormError(elements.allowError);
+  elements.allowValue.setAttribute("aria-invalid", "false");
+
+  const raw = String(elements.allowValue.value || "").trim();
+  const target = elements.allowKind.value === "chat_id" ? `chat_id:${raw}` : raw;
+  const problem = targetProblem(target);
+  if (problem) {
+    elements.allowValue.setAttribute("aria-invalid", "true");
+    setFormError(elements.allowError, problem);
+    elements.allowValue.focus();
+    return;
+  }
+  if (allowedTargets.includes(target)) {
+    elements.allowValue.setAttribute("aria-invalid", "true");
+    setFormError(elements.allowError, `${target} is already allowed.`);
+    elements.allowValue.focus();
+    return;
+  }
+
+  const generation = sessionGeneration;
+  elements.allowButton.disabled = true;
+  try {
+    await replaceTargets(allowedTargets.concat([target]), generation);
+    elements.allowValue.value = "";
+    showToast(`${target} can now be messaged.`);
+  } catch (error) {
+    if (!sessionEnded(error) && error.status !== 401 && generation === sessionGeneration) {
+      setFormError(elements.allowError, error.message);
+    }
+  } finally {
+    elements.allowButton.disabled = false;
+  }
+}
+
+function openRemoveTargetDialog(target) {
+  pendingTargetRemoval = target;
+  elements.removeTargetName.textContent = target;
+  elements.removeTargetDialog.showModal();
+  window.setTimeout(() => elements.confirmRemoveTarget.focus(), 0);
+}
+
+function closeRemoveTargetDialog() {
+  pendingTargetRemoval = null;
+  elements.removeTargetName.textContent = "This recipient";
+  elements.removeTargetDialog.close();
+}
+
+async function handleRemoveTarget(event) {
+  event.preventDefault();
+  if (!pendingTargetRemoval) {
+    return;
+  }
+  const target = pendingTargetRemoval;
+  const generation = sessionGeneration;
+  elements.confirmRemoveTarget.disabled = true;
+  try {
+    await replaceTargets(allowedTargets.filter((entry) => entry !== target), generation);
+    closeRemoveTargetDialog();
+    showToast(`${target} can no longer be messaged.`);
+  } catch (error) {
+    if (!sessionEnded(error) && error.status !== 401 && generation === sessionGeneration) {
+      showToast(error.message);
+    }
+  } finally {
+    elements.confirmRemoveTarget.disabled = false;
   }
 }
 
@@ -1026,13 +1232,15 @@ async function loadConsole(generation = sessionGeneration) {
       status: "degraded",
     };
   });
-  const [status, keys] = await Promise.all([
+  const [status, keys, targets] = await Promise.all([
     statusRequest,
     apiRequest("/api/keys", {}, generation),
+    apiRequest("/api/targets", {}, generation),
   ]);
   requireCurrentSession(generation);
   renderStatus(status || {});
   renderKeys(keys);
+  renderTargets(targets);
   elements.signinView.hidden = true;
   elements.consoleView.hidden = false;
 }
@@ -1072,7 +1280,7 @@ async function handleRefresh() {
   try {
     await loadConsole(generation);
     requireCurrentSession(generation);
-    showToast("Status and keys refreshed.");
+    showToast("Status, recipients, and keys refreshed.");
   } catch (error) {
     if (!sessionEnded(error) && error.status !== 401 && generation === sessionGeneration) {
       showToast(error.message);
@@ -1276,6 +1484,14 @@ elements.createdKeyDialog.addEventListener("cancel", (event) => event.preventDef
 elements.createdKeyDialog.addEventListener("close", clearCreatedKey);
 elements.cancelRevoke.addEventListener("click", closeRevokeDialog);
 elements.revokeForm.addEventListener("submit", handleRevoke);
+elements.allowKind.addEventListener("change", updateAllowKind);
+elements.allowForm.addEventListener("submit", handleAllowTarget);
+elements.cancelRemoveTarget.addEventListener("click", closeRemoveTargetDialog);
+elements.removeTargetForm.addEventListener("submit", handleRemoveTarget);
+elements.removeTargetDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeRemoveTargetDialog();
+});
 
 const restoredKey = sessionKey();
 if (restoredKey) {

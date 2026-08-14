@@ -292,23 +292,22 @@ do not move it to persistent browser storage.
 For reads, the key needs `messages:read`; sends need `messages:send`; key
 management needs `admin`. Administrator keys include all operations.
 
-For sends, `403` can instead mean the exact target is missing from:
+For sends, `403` with `target-forbidden` instead means the exact target is not
+on the allowlist. Check and change it with:
 
-```text
-~/Library/Application Support/iMessage Proxy/private/allowed-targets.txt
+```bash
+imessage-proxy targets list
+imessage-proxy targets add person@example.net
 ```
 
 Use a canonical `+` phone handle, one no-whitespace `@` handle, or
-`chat_id:POSITIVE_INTEGER`, one per line. Contact names, leading-zero chat IDs,
-and wildcards are invalid. Apply an intentional policy change outside-in:
+`chat_id:POSITIVE_INTEGER`. Contact names, leading-zero chat IDs, and wildcards
+are invalid, and the CLI refuses them rather than writing a file the server would
+then reject whole. The allowlist is read on every send, so a change applies to
+the next one and no restart is needed. Then test one harmless consented target.
 
-```bash
-imessage-proxy check-host
-imessage-proxy server-restart --confirm 'RESTART IMESSAGE PROXY SERVER'
-imessage-proxy server-status
-```
-
-Then test one harmless consented target.
+A `403` on `/api/targets` itself means the key lacks `admin`. That is
+deliberate: a credential that can send must not be able to add new recipients.
 
 ## A send returns `409`
 

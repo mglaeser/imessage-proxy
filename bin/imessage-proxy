@@ -162,6 +162,9 @@ usage() {
     '  build-host' \
     '  check-host' \
     '  api-key bootstrap-admin --name NAME [--expires-in-days 30]' \
+    '  targets list' \
+    '  targets add TARGET' \
+    '  targets remove TARGET' \
     '  server-install' \
     '  server-start' \
     "  server-stop --confirm 'STOP IMESSAGE PROXY SERVER'" \
@@ -764,6 +767,124 @@ api_key_bootstrap() {
   run_server bootstrap-admin "$name" "$expires_days"
 }
 
+# The allowlist decides who this machine may message, so it is the one setting
+# no API key of any scope should be able to widen from the outside without the
+# operator's own account. The CLI therefore edits the file directly as the Mac
+# user who owns it, and the API exposes the same list only to an admin key. The
+# server re-reads the file on every send, so a change here takes effect at once
+# and no restart is needed.
+#
+# These rules must stay identical to IsDirectMessageRecipient/ParseAllowedTargets
+# in src/imessage-proxy-server.m: a target this accepts has to be a target a send
+# accepts, or the CLI would happily write a file the server then rejects whole.
+target_is_valid() {
+  local value="$1" digits
+  case "$value" in
+    chat_id:*)
+      digits="${value#chat_id:}"
+      [[ "$digits" =~ ^[1-9][0-9]{0,17}$ ]]
+      return
+      ;;
+    '' | -* | *[[:space:]]* | *[[:cntrl:]]*) return 1 ;;
+  esac
+  [[ "${#value}" -le 256 ]] || return 1
+  if [[ "$value" == +* ]]; then
+    digits="${value#+}"
+    [[ "$digits" =~ ^[1-9][0-9]{6,14}$ ]] && return 0
+  fi
+  # Exactly one @, neither first nor last.
+  [[ "$value" == *@* && "$value" != @* && "$value" != *@ && "$value" != *@*@* ]]
+}
+
+# Prints one target per line. A file that cannot be read safely is an error, not
+# an empty list: treating it as empty would let `add` overwrite a file this
+# process was never allowed to read.
+read_targets() {
+  [[ -e "$TARGETS_FILE" || -L "$TARGETS_FILE" ]] ||
+    die "the recipient allowlist is missing: $TARGETS_FILE
+  reinstall, or recreate it with: imessage-proxy targets add TARGET"
+  require_private_file "$TARGETS_FILE"
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "$line" == '#'* ]] && continue
+    printf '%s\n' "$line"
+  done < "$TARGETS_FILE"
+}
+
+# Written whole through a temporary and renamed, so a send that reads the file
+# concurrently never sees a partial list.
+write_targets() {
+  local temporary
+  temporary="$(mktemp "$PRIVATE/allowed-targets.XXXXXX")"
+  {
+    printf '%s\n' '# One exact permitted iMessage target per line. An empty file disables sending.'
+    printf '%s\n' '# Direct address: canonical +digits or one no-whitespace @ handle'
+    printf '%s\n' '# Existing iMessage chat: chat_id:42'
+    printf '%s\n' '# Wildcards are not supported.'
+    [[ $# -eq 0 ]] || printf '%s\n' "$@"
+  } > "$temporary"
+  chmod 600 "$temporary"
+  mv "$temporary" "$TARGETS_FILE"
+  require_private_file "$TARGETS_FILE"
+}
+
+targets() {
+  local action="${1:-list}" existing listed target
+  local -a current=()
+  require_macos
+  require_safe_runtime_root
+  # Read once, up front, through a command substitution: a failure inside
+  # read_targets stops the action here instead of arriving as an empty list.
+  listed="$(read_targets)" || exit 1
+  case "$action" in
+    list)
+      [[ $# -eq 1 ]] || die 'targets list takes no arguments'
+      if [[ -z "$listed" ]]; then
+        printf 'No targets are allowed, so sending is disabled.\n'
+        printf 'Allow one with: imessage-proxy targets add TARGET\n'
+      else
+        printf '%s\n' "$listed"
+      fi
+      ;;
+    add)
+      [[ $# -eq 2 ]] || die 'targets add requires exactly one target'
+      target="$2"
+      target_is_valid "$target" ||
+        die "not a valid target: $target
+  use +digits (7-15, no leading zero), one handle containing a single @, or chat_id:N"
+      if [[ -n "$listed" ]]; then
+        while IFS= read -r existing; do
+          [[ "$existing" == "$target" ]] && die "already allowed: $target"
+          current+=("$existing")
+        done <<< "$listed"
+      fi
+      current+=("$target")
+      write_targets "${current[@]}"
+      printf 'Allowed %s. It can be messaged immediately; no restart is needed.\n' "$target"
+      ;;
+    remove)
+      [[ $# -eq 2 ]] || die 'targets remove requires exactly one target'
+      target="$2"
+      local found=no
+      if [[ -n "$listed" ]]; then
+        while IFS= read -r existing; do
+          if [[ "$existing" == "$target" ]]; then
+            found=yes
+            continue
+          fi
+          current+=("$existing")
+        done <<< "$listed"
+      fi
+      [[ "$found" == yes ]] || die "not currently allowed: $target"
+      write_targets ${current[@]+"${current[@]}"}
+      printf 'Removed %s. It can no longer be messaged.\n' "$target"
+      ;;
+    *) die "unknown targets subcommand: $action" ;;
+  esac
+}
+
 api_key() {
   [[ $# -ge 1 ]] || die 'api-key requires a subcommand'
   case "$1" in
@@ -1212,6 +1333,7 @@ main() {
     build-host) [[ $# -eq 1 ]] || die 'build-host takes no arguments'; build_host ;;
     check-host) [[ $# -eq 1 ]] || die 'check-host takes no arguments'; check_host ;;
     api-key) shift; api_key "$@" ;;
+    targets) shift; targets "${@:-list}" ;;
     server-install) [[ $# -eq 1 ]] || die 'server-install takes no arguments'; server_install ;;
     server-start) [[ $# -eq 1 ]] || die 'server-start takes no arguments'; server_start ;;
     server-stop)

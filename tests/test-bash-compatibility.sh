@@ -101,6 +101,26 @@ report fda_spaced    full_disk_access_acknowledgement_matches '  full disk acces
 report fda_wrong     full_disk_access_acknowledgement_matches 'FULL DISK ACCESS'
 report key_allowed   service_config_key_allowed IMESSAGE_PROXY_PORT
 report key_refused   service_config_key_allowed IMESSAGE_PROXY_API_HOST
+# The send allowlist decides who this machine may message, so the predicate that
+# guards it must not answer differently on a stock Mac than on a Homebrew bash.
+report target_email    target_is_valid 'person@example.net'
+report target_phone    target_is_valid '+15551234567'
+report target_chat     target_is_valid 'chat_id:42'
+report target_at_first target_is_valid '@example.net'
+report target_at_last  target_is_valid 'person@'
+report target_two_at   target_is_valid 'a@b@c'
+report target_bare     target_is_valid 'Alice'
+report target_zero     target_is_valid '+01234567'
+report target_short    target_is_valid '+123456'
+report target_long     target_is_valid '+1234567890123456'
+report target_space    target_is_valid 'person @example.net'
+report target_tab      target_is_valid "$(printf 'a\tb@example.net')"
+report target_newline  target_is_valid "$(printf 'a@b.test\nc@d.test')"
+report target_dash     target_is_valid '-oProxyCommand@example.net'
+report target_chat_pad target_is_valid 'chat_id:042'
+report target_chat_neg target_is_valid 'chat_id:-1'
+report target_chat_nan target_is_valid 'chat_id:x'
+report target_empty    target_is_valid ''
 printf 'config_path=%s\n' "$(service_config_path)"
 PROBE
 }
