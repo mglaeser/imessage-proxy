@@ -115,13 +115,23 @@ imessage-proxy server-restart --confirm 'RESTART IMESSAGE PROXY SERVER'
 
 ## Uninstall
 
+Remove the service and keep your keys, allowlist and logs:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mglaeser/imessage-proxy/main/scripts/uninstall.sh | bash
 ```
 
-Your keys, allowlist and logs survive unless you add
-`--purge --confirm 'DESTROY IMESSAGE PROXY STATE'`. Preview any run with
-`--dry-run`.
+Remove everything, including keys, the allowlist and logs:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mglaeser/imessage-proxy/main/scripts/uninstall.sh | bash -s -- --purge --confirm 'DESTROY IMESSAGE PROXY STATE'
+```
+
+When the script is piped to `bash`, its options have to come after `-s --`;
+without that separator `bash` reads them as its own and the script never sees
+them. `--purge` also needs the exact phrase above, and asks once more on the
+terminal before destroying anything. Add `--yes` to skip that question, or
+`--dry-run` to see what any run would remove without removing it.
 
 ## Reaching it from elsewhere
 

@@ -62,9 +62,12 @@ cyan=''
 green=''
 reset=''
 verbose='no'
-# Both questions default to skipping on Enter, so a piped or unattended run
-# installs a service that sends and does not read, and says so at the end.
-messages_read='disabled'
+# Both questions have a flag equivalent, and both resolve to what a bare Enter
+# gives: no test send, no reading. An unattended run therefore installs a service
+# that sends and does not read, and says so at the end.
+messages_read='ask'
+send_test='ask'
+send_test_target=''
 path_result=''
 path_profile=''
 source_directory=''
@@ -141,9 +144,18 @@ Options:
   --port N               Loopback port for the service (default: 8765)
   --prefix DIR           Installation prefix (default: $HOME/.local)
   --tests, --no-tests    Force running or skipping the product test suite
+  --send-test ADDRESS    Send the test message to this number or email without
+                         asking; it is added to the send allowlist first
+  --no-send-test         Skip the test send without asking
+  --messages-read        Read the Messages database, and print the Full Disk
+                         Access instructions, without asking
+  --no-messages-read     Install a send-only service without asking
   --verbose              Show the full output of each build and install step
   --self-test            Validate this installer's own logic and exit
   -h, --help             Show this help and exit
+
+Without --send-test/--no-send-test and --messages-read/--no-messages-read the
+installer asks for both, so an unattended run needs them on the command line.
 
 The service listens on 127.0.0.1 only. Put your own TLS proxy in front of it if
 you want to publish it.
@@ -192,6 +204,24 @@ release_tag_valid() {
 config_value_valid() {
   local value="$1"
   [[ -n "$value" && "$value" != *$'\n'* && "$value" != *$'\r'* && "$value" != *'#'* ]]
+}
+
+# The rule target_is_valid in bin/imessage-proxy and IsDirectMessageRecipient in
+# src/imessage-proxy-server.m both apply, minus chat_id: a test send goes to a
+# person. Checked here as well as there so a mistyped address is refused while
+# the operator is still looking at the prompt, rather than two commands later.
+send_target_valid() {
+  local digits value="$1"
+  case "$value" in
+    '' | -* | *[[:space:]]* | *[[:cntrl:]]*) return 1 ;;
+  esac
+  [[ "${#value}" -le 256 ]] || return 1
+  if [[ "$value" == +* ]]; then
+    digits="${value#+}"
+    [[ "$digits" =~ ^[1-9][0-9]{6,14}$ ]] && return 0
+  fi
+  # Exactly one @, neither first nor last.
+  [[ "$value" == *@* && "$value" != @* && "$value" != *@ && "$value" != *@*@* ]]
 }
 
 # A path that will be written into a shell startup file and evaluated by every
@@ -273,6 +303,24 @@ parse_arguments() {
         run_tests='no'
         shift
         ;;
+      --send-test)
+        [[ $# -ge 2 ]] || die '--send-test requires a number or email'
+        send_test='yes'
+        send_test_target="$2"
+        shift 2
+        ;;
+      --no-send-test)
+        send_test='no'
+        shift
+        ;;
+      --messages-read)
+        messages_read='enabled'
+        shift
+        ;;
+      --no-messages-read)
+        messages_read='disabled'
+        shift
+        ;;
       --verbose)
         verbose='yes'
         shift
@@ -314,6 +362,8 @@ validate_arguments() {
     die '--prefix must not contain quotes, backslashes, dollar signs, backticks, semicolons, or control characters'
   [[ -z "$source_directory" || -z "$archive_path" ]] ||
     die 'use either --source or --archive, not both'
+  [[ "$send_test" != yes ]] || send_target_valid "$send_test_target" ||
+    die '--send-test must be +digits (7-15, no leading zero) or one address containing a single @'
 }
 
 require_supported_host() {
@@ -336,9 +386,28 @@ require_supported_host() {
     die 'the Xcode Command Line Tools are incomplete; run xcode-select --install'
 }
 
+terminal_available() {
+  [[ -r /dev/tty && -w /dev/tty ]]
+}
+
+# Only a run that still has something to ask needs a terminal. Both questions
+# have flag equivalents, and answering them on the command line is what makes an
+# unattended install possible at all.
 require_terminal() {
-  [[ -r /dev/tty && -w /dev/tty ]] ||
-    die 'run the installer in an interactive terminal; macOS Full Disk Access must be granted interactively'
+  [[ "$send_test" == ask || "$messages_read" == ask ]] || return 0
+  terminal_available ||
+    die 'there is no terminal to ask on; answer with --send-test ADDRESS or --no-send-test, and --messages-read or --no-messages-read'
+}
+
+# Always /dev/tty, never stdin: the published shape of this installer is
+# `curl ... | bash`, where stdin is the remainder of the script and a read would
+# swallow it. A terminal that cannot be read answers nothing, which every caller
+# treats as the skip.
+ask_line() {
+  local answer=''
+  printf '  %s' "$1" >&2
+  IFS= read -r answer < /dev/tty || answer=''
+  printf '%s\n' "$answer"
 }
 
 service_is_installed() {
@@ -766,7 +835,8 @@ write_service_config() {
   printf '%s\n' "$config_path"
 }
 
-# and a redirect because a log file full of escape sequences helps nobody.
+# Colour only where it is wanted: NO_COLOR and a dumb TERM are honoured, and so
+# is a redirect, because a log file full of escape sequences helps nobody.
 setup_colour() {
   bold='' dim='' cyan='' green='' reset=''
   [[ -t 2 ]] || return 0
@@ -793,68 +863,157 @@ heading() {
   note "  ${bold}$*${reset}"
 }
 
-# Four facts and nothing else: where the console is, how to call the API, the
-# key, and how to remove it all. Everything an operator needed the old six
-# sections for is either unnecessary now or one command away.
-# The address must be on the send allowlist for the service to be allowed to
-# message it, so the installer puts it there rather than leaving the operator to
-# meet a 403 on the one command meant to prove the install works.
-offer_test_send() {
-  local answer cli="$1"
-  printf '\n  %sSend a test message to prove sending works?%s\n' "$bold" "$reset" >&2
-  printf '  %sYour own number or email, or Enter to skip:%s ' "$dim" "$reset" >&2
-  IFS= read -r answer < /dev/tty || answer=''
-  [[ -n "$answer" ]] || {
-    printf '  %sSkipped.%s\n' "$dim" "$reset" >&2
-    return 0
-  }
-
-  printf '\n  %smacOS will now ask to allow control of Messages. Approve it.%s\n' "$bold" "$reset" >&2
-  printf '  %sSending cannot work without it, and this is when it is asked.%s\n' "$dim" "$reset" >&2
-  printf '  %sIf no window appears, look behind this one.%s\n\n' "$dim" "$reset" >&2
-
-  if ! "$cli" targets add "$answer" >/dev/null 2>&1; then
-    printf '  %sNot a valid recipient, so nothing was sent or allowed.%s\n' "$dim" "$reset" >&2
-    printf '  %sUse +15551234567 or name@example.com.%s\n' "$dim" "$reset" >&2
-    return 0
-  fi
-  if "$cli" send-test "$answer" >/dev/null 2>&1; then
-    printf '  %sSent, and %s is now an allowed recipient.%s\n' "$green" "$answer" "$reset" >&2
-  else
-    printf '  %s%s is allowed, but the test did not complete.%s\n' "$dim" "$answer" "$reset" >&2
-    printf '  %sApprove the Messages prompt, then: imessage-proxy send-test %s%s\n' "$dim" "$answer" "$reset" >&2
-  fi
+print_send_test_hint() {
+  note 'Prove it whenever you like:'
+  note "     ${dim}imessage-proxy targets add YOUR-NUMBER-OR-EMAIL${reset}"
+  note "     ${dim}imessage-proxy send-test YOUR-NUMBER-OR-EMAIL${reset}"
 }
 
-# macOS never prompts for Full Disk Access, so this is a checkpoint rather than
-# something the system will ask later. Declining is a complete installation, not
-# a degraded one.
-offer_messages_read() {
-  local answer server_binary
-  server_binary="$HOME/Library/Application Support/iMessage Proxy/state/bin/imessage-proxy-server"
-  printf '\n  %sAlso read your Messages history?%s\n' "$bold" "$reset" >&2
-  printf '  %sPowers listing chats, history and statistics. Sending does not need it.%s\n' "$dim" "$reset" >&2
-  printf '  %sType y to enable, or Enter to skip:%s ' "$dim" "$reset" >&2
-  IFS= read -r answer < /dev/tty || answer=''
-  case "$answer" in
-    [yY] | [yY][eE][sS]) messages_read='enabled' ;;
-    *)
-      messages_read='disabled'
-      printf '  %sSkipped. Reading stays off until you run:%s\n' "$dim" "$reset" >&2
-      printf '  %s  imessage-proxy enable-messages-read%s\n' "$dim" "$reset" >&2
-      return 0
-      ;;
+# `targets add` refuses an address that is already listed, which is the ordinary
+# state on a second run, so the list is consulted first rather than reading that
+# refusal as a failure.
+allow_send_target() {
+  local address="$2" cli="$1" listed
+  listed="$("$cli" targets list 2>/dev/null || true)"
+  case $'\n'"$listed"$'\n' in
+    *$'\n'"$address"$'\n'*) return 0 ;;
   esac
-
-  printf '\n  %sFull Disk Access is required, and macOS never asks for it.%s\n' "$bold" "$reset" >&2
-  printf '  %sIt has to be added by hand:%s\n\n' "$dim" "$reset" >&2
-  printf '  %s  1. Open System Settings > Privacy & Security > Full Disk Access%s\n' "$dim" "$reset" >&2
-  printf '  %s  2. Add this exact binary:%s\n' "$dim" "$reset" >&2
-  printf '       %s%s%s\n' "$cyan" "$server_binary" "$reset" >&2
-  printf '  %s  3. Toggle stale entries off and on after an update%s\n' "$dim" "$reset" >&2
-  printf '  %s  4. Reading starts on the next request; no restart needed%s\n\n' "$dim" "$reset" >&2
+  run_quietly "Allowing $address to be messaged" "$cli" targets add "$address" ||
+    die "could not add $address to the send allowlist"
 }
 
+# Sending is guarded by Apple Events, the one macOS permission here that does
+# prompt. The test send raises that prompt now, with the operator warned and
+# watching, instead of on some later request nobody is looking at - and it leaves
+# them a delivered message as the proof. The address goes on the send allowlist
+# first, because the service refuses every target that is not on it.
+offer_test_send() {
+  local address='' cli="$1"
+  note 'macOS will ask you to allow control of Messages. Approve it: nothing'
+  note 'can be sent until you do. If no window appears, look behind this one.'
+  note ''
+  if [[ "$send_test" == no ]]; then
+    note 'Skipping the test send at your request.'
+    print_send_test_hint
+    return 0
+  fi
+  address="$send_test_target"
+  if [[ "$send_test" == ask ]]; then
+    while true; do
+      address="$(ask_line 'Your own number or email for a test message, or Enter to skip: ')"
+      [[ -n "$address" ]] || break
+      send_target_valid "$address" && break
+      note 'Use +15551234567 or name@example.com.'
+    done
+  fi
+  if [[ -z "$address" ]]; then
+    note 'Skipped, so nothing was sent.'
+    print_send_test_hint
+    return 0
+  fi
+  allow_send_target "$cli" "$address"
+  note ''
+  # A refused prompt is a fact about this Mac, not a broken install: the service
+  # is running and everything else is done, so the run reports it and carries on.
+  if "$cli" send-test "$address" >&2; then
+    note "Sent, and $address is now an allowed recipient."
+  else
+    note ''
+    note "$address is an allowed recipient, but the test message did not go out."
+    note 'Approve the Messages prompt, then run:'
+    note "     ${dim}imessage-proxy send-test $address${reset}"
+  fi
+}
+
+# The one binary the grant has to name, derived exactly as bin/imessage-proxy
+# derives SERVER_BIN. A grant given to any other path silently does nothing.
+server_binary_path() {
+  printf '%s\n' \
+    "${IMESSAGE_PROXY_HOME:-$HOME/Library/Application Support/iMessage Proxy}/state/bin/imessage-proxy-server"
+}
+
+# Modelled on the message the pinned dependency prints when a read fails, with
+# the one substitution that matters: the grant belongs to the LaunchAgent binary
+# named below, not to a terminal or its parent launcher. TCC attributes the read
+# to the process launchd started, so a terminal's own Full Disk Access proves
+# nothing about the service.
+print_full_disk_access_instructions() {
+  local checkpoint="${1:-no}"
+  note ''
+  heading 'FULL DISK ACCESS'
+  note '  The Messages database at ~/Library/Messages/chat.db requires Full Disk'
+  note '  Access permission.'
+  note ''
+  note '  To grant it:'
+  note '  1. Open System Settings > Privacy & Security > Full Disk Access'
+  note '  2. Add this exact binary, which is the one that reads the database:'
+  note "       ${cyan}$(server_binary_path)${reset}"
+  note '  3. Turn its switch on'
+  note '  4. Toggle a stale entry off and on after the binary is rebuilt, since'
+  note '     the grant follows its code signature'
+  note '  5. Restart the service, then try again:'
+  note "       ${dim}imessage-proxy server-restart --confirm 'RESTART IMESSAGE PROXY SERVER'${reset}"
+  note ''
+  note '  macOS never prompts for Full Disk Access, so nothing will ask you for'
+  note '  this later. It is the one step that has to be done by hand.'
+  # A checkpoint rather than a prompt: there is nothing to answer, and no probe
+  # this script could run would prove the grant, since a read from here would
+  # only ever prove the terminal's own permissions. It pauses solely to keep the
+  # instructions on screen while they are followed, so a run that answered on the
+  # command line - which is nobody watching - goes straight past it.
+  if [[ "$checkpoint" == yes ]] && terminal_available; then
+    ask_line 'Press Enter when you have added it: ' > /dev/null
+  fi
+}
+
+# Reading needs Full Disk Access, which macOS never prompts for, so an
+# installation that declines it is a supported configuration rather than a
+# half-finished one. Asked after the send test on purpose: by now the operator
+# has watched sending work and can weigh the broad grant against what it buys.
+offer_messages_read() {
+  local answer asked='no'
+  note 'Reading the Messages database lists your chats, returns message history,'
+  note 'answers the statistics routes and finds scheduled messages. Sending never'
+  note 'needs it, on either transport.'
+  note 'It needs Full Disk Access, which macOS never asks for.'
+  if [[ "$messages_read" == ask ]]; then
+    asked='yes'
+    answer="$(ask_line 'Read your Messages as well? Type y, or Enter to skip: ')"
+    case "$answer" in
+      [yY] | [yY][eE][sS]) messages_read='enabled' ;;
+      *) messages_read='disabled' ;;
+    esac
+  fi
+  if [[ "$messages_read" == enabled ]]; then
+    print_full_disk_access_instructions "$asked"
+    return 0
+  fi
+  note ''
+  note 'Reading stays off. Sending is unaffected on both transports.'
+}
+
+# The service reads the switch once, when it starts, from the environment its
+# LaunchAgent carries, and server-restart reinstalls the staged plist unchanged.
+# The choice therefore only takes effect once that plist has been rendered again
+# and reinstalled - and prepare refuses to render while the service is loaded,
+# which is why this stops it in the middle rather than restarting it at the end.
+apply_send_only() {
+  local cli="$1"
+  run_quietly 'Recording the send-only configuration' \
+    "$cli" disable-messages-read --confirm 'DISABLE MESSAGES READ' ||
+    die 'could not record the send-only configuration'
+  run_quietly 'Stopping the service' \
+    "$cli" server-stop --confirm 'STOP IMESSAGE PROXY SERVER' ||
+    die 'could not stop the service to apply the send-only configuration'
+  run_quietly 'Rendering the LaunchAgent' "$cli" prepare ||
+    die 'could not render the send-only LaunchAgent'
+  run_quietly 'Starting the service' "$cli" server-install ||
+    die 'the send-only service could not be started again'
+}
+
+# Five facts and nothing else: where the console is, how to call the API, how to
+# remove it all, what reading does today, and the key. Everything an operator
+# needed the old six sections for is either unnecessary now or one command away.
 print_next_steps() {
   local port="$1" version="$2"
 
@@ -871,13 +1030,21 @@ print_next_steps() {
 
   heading 'UNINSTALL'
   note "     ${dim}curl -fsSL ${PROJECT_URL}/raw/main/scripts/uninstall.sh | bash${reset}"
+  note ""
+  note "  ${bold}UNINSTALL AND DESTROY KEYS, ALLOWLIST AND LOGS${reset}"
+  note "     ${dim}curl -fsSL ${PROJECT_URL}/raw/main/scripts/uninstall.sh | bash -s -- \\${reset}"
+  note "     ${dim}  --purge --confirm 'DESTROY IMESSAGE PROXY STATE'${reset}"
   note ''
 
-  heading 'READING MESSAGES'
+  heading 'READING YOUR MESSAGES'
   if [[ "$messages_read" == enabled ]]; then
-    note "     ${dim}On, once Full Disk Access is granted to the server binary.${reset}"
+    note "     ${dim}On, as soon as Full Disk Access covers the server binary.${reset}"
+    note "     ${dim}Until then /api/status reports messages-unavailable.${reset}"
   else
-    note "     ${dim}Off. Sending works. Turn reading on with:${reset}"
+    note "     ${dim}Off. Listing chats, message history, the statistics routes${reset}"
+    note "     ${dim}and scheduled messages answer 409 messages-read-disabled,${reset}"
+    note "     ${dim}and so does a send addressed to a chat_id. Sending to a${reset}"
+    note "     ${dim}recipient is unaffected. Turn reading on with:${reset}"
     note "     ${dim}  imessage-proxy enable-messages-read${reset}"
   fi
   note ''
@@ -1032,6 +1199,14 @@ self_test() {
     ! node_version_supported "$candidate" ||
       die "self-test accepted an unsupported Node.js version: $candidate"
   done
+  for candidate in +15551234567 +447700900123 name@example.com a@b; do
+    send_target_valid "$candidate" || die "self-test rejected a valid send target: $candidate"
+  done
+  for candidate in '' ' ' -15551234567 '+0155512345' '+15551' 'no-at-sign' 'a@b@c' '@leading' 'trailing@' \
+    'has space@example.com' 'chat_id:42' "$(printf 'a%.0s' {1..250})@example.com"; do
+    ! send_target_valid "$candidate" ||
+      die "self-test accepted an invalid send target: ${candidate:-<empty>}"
+  done
   config_value_valid /opt/homebrew/bin/caddy || die 'self-test rejected a valid config value'
   for candidate in '' "$(printf 'value\nsecond=1')" "$(printf 'value\r')" 'value # comment'; do
     ! config_value_valid "$candidate" ||
@@ -1087,9 +1262,14 @@ main() {
   imsg_binary="$(resolve_imsg)"
   link_imsg "$imsg_binary"
   config_path="$(write_service_config "$imsg_binary")"
+  # Every action but bootstrap reads the reviewed configuration from
+  # IMESSAGE_PROXY_CONFIG, and disable-messages-read writes to it. Pinning it to
+  # the file this run just wrote stops an operator who already had the variable
+  # set from having the service configured out of one file and switched in
+  # another.
+  export IMESSAGE_PROXY_CONFIG="$config_path"
 
   step 'Starting the service'
-  note 'macOS asks once for Full Disk Access. That is the only manual step.'
   "$cli" bootstrap \
     --config "$config_path" \
     --admin-name "$admin_name" \
@@ -1097,15 +1277,12 @@ main() {
     --without-admin-key
   ensure_path_entry
 
-  step "Proving the send path"
+  step 'Proving that sending works'
   offer_test_send "$cli"
 
-  step "Reading Messages"
+  step 'Reading your Messages'
   offer_messages_read
-  if [[ "$messages_read" == disabled ]]; then
-    run_quietly "Turning reading off" "$cli" disable-messages-read --confirm 'DISABLE MESSAGES READ'
-    run_quietly "Applying the setting" "$cli" prepare
-  fi
+  [[ "$messages_read" == enabled ]] || apply_send_only "$cli"
 
   print_next_steps "$service_port" "$("$cli" version)"
   # Deliberately the last command, uncaptured and unredirected. The key is the
