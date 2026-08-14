@@ -408,6 +408,11 @@ static BOOL IsAllowedTargetLine(NSString *line) {
 @property (nonatomic, copy) NSString *uiDirectory;
 @property (nonatomic, copy) NSString *databasePath;
 @property (nonatomic, copy) NSString *messagesDatabasePath;
+// NO when the operator declined Full Disk Access. Reading Messages needs a grant
+// macOS never prompts for - it must be added by hand in System Settings - so an
+// installation that only sends is a supported configuration rather than a broken
+// one. Sending needs Apple Events, which is a separate grant and does prompt.
+@property (nonatomic) BOOL messagesReadEnabled;
 @property (nonatomic, copy) NSString *allowedTargetsPath;
 @property (nonatomic, copy) NSData *allowedTargetsBytes;
 @property (nonatomic, copy) NSString *imsgPath;
@@ -1047,7 +1052,7 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
         @"IMESSAGE_PROXY_IMSG_SHA256", @"IMESSAGE_PROXY_MAX_CONCURRENCY", @"IMESSAGE_PROXY_READ_TIMEOUT_SECONDS",
         @"IMESSAGE_PROXY_SEND_TIMEOUT_SECONDS", @"IMESSAGE_PROXY_SOCKET_TIMEOUT_SECONDS", @"IMESSAGE_PROXY_API_KEY",
         @"IMESSAGE_PROXY_CONFIG", @"IMESSAGE_PROXY_HOME", @"IMESSAGE_PROXY_SOURCE_DIR", @"IMESSAGE_PROXY_UI_DIR",
-        @"IMESSAGE_PROXY_URL", @"IMESSAGE_PROXY_VERSION"
+        @"IMESSAGE_PROXY_MESSAGES_READ", @"IMESSAGE_PROXY_URL", @"IMESSAGE_PROXY_VERSION"
     ]];
     for (NSString *name in environment) {
         if ([name hasPrefix:@"IMESSAGE_PROXY_"] && ![recognized containsObject:name]) {
@@ -1065,6 +1070,8 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
     configuration.allowedTargetsPath = environment[@"IMESSAGE_PROXY_ALLOWED_TARGETS_FILE"] ?: @"";
     configuration.imsgPath = environment[@"IMESSAGE_PROXY_IMSG_BIN"] ?: @"/opt/homebrew/bin/imsg";
     configuration.imsgSHA256 = environment[@"IMESSAGE_PROXY_IMSG_SHA256"] ?: @"";
+    // Absent means enabled, so an existing installation keeps its reads.
+    configuration.messagesReadEnabled = ![environment[@"IMESSAGE_PROXY_MESSAGES_READ"] isEqualToString:@"disabled"];
     configuration.messagesDatabasePath =
         environment[@"IMESSAGE_PROXY_MESSAGES_DATABASE_PATH"]
             ?: [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Messages/chat.db"];
@@ -2066,6 +2073,42 @@ static BOOL IsValidSenderIdentifier(NSString *value) {
     return [value.lowercaseString rangeOfCharacterFromSet:notRoman].location == NSNotFound;
 }
 
+// Reading was declined at installation, not broken. The answer says so and says
+// how to change it, because a caller - or a console - that only learns "503"
+// cannot tell a missing permission from an outage, and the operator reading it
+// is the one person who can fix it.
+static IMPHTTPResponse *MessagesReadDisabledProblem(void) {
+    IMPHTTPResponse *response = Problem(409, @"messages-read-disabled",
+                                        @"Reading Messages is turned off for this installation. Turn it on with: "
+                                        @"imessage-proxy enable-messages-read");
+    return response;
+}
+
+// Every route whose answer comes out of the Messages database. Sending is not
+// here: it uses Apple Events and works without Full Disk Access, except when a
+// chat_id has to be resolved, which is handled at the send itself.
+static BOOL RequestReadsMessages(IMPHTTPRequest *request) {
+    return [request.path isEqualToString:@"/api/chats"] || [request.path hasPrefix:@"/api/chats/"] ||
+           [request.path isEqualToString:@"/api/scheduled-messages"] ||
+           [request.path isEqualToString:@"/api/statistics/messages"];
+}
+
+static NSString *MessagesReadAuditAction(IMPHTTPRequest *request) {
+    if ([request.path isEqualToString:@"/api/scheduled-messages"]) {
+        return @"scheduled.list";
+    }
+    if ([request.path isEqualToString:@"/api/statistics/messages"]) {
+        return @"statistics.read";
+    }
+    if ([request.path hasSuffix:@"/messages"]) {
+        return @"messages.history";
+    }
+    if ([request.path hasSuffix:@"/background"]) {
+        return @"background.read";
+    }
+    return [request.path isEqualToString:@"/api/chats"] ? @"chats.list" : @"chats.read";
+}
+
 static NSDictionary *KeyDTO(IMPAPIKeyRecord *record) {
     return @{
         @"id": record.uuid,
@@ -2484,14 +2527,21 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
             NSError *versionError = nil;
             NSString *dependencyVersion = DependencyVersion(self.configuration, &versionError);
             NSError *readinessError = nil;
-            if (dependencyVersion == nil || !CheckMessagesReadPath(self.configuration, &readinessError)) {
+            BOOL readsDisabled = !self.configuration.messagesReadEnabled;
+            if (dependencyVersion == nil ||
+                (!readsDisabled && !CheckMessagesReadPath(self.configuration, &readinessError))) {
                 response = Problem(503, @"messages-unavailable", @"The Messages read path is unavailable.");
             } else {
                 response = JSONResponse(200, @{
                     @"status": @"ok",
                     @"version": ServerVersion,
                     @"uptime_seconds": @((NSUInteger) - [self.startedAt timeIntervalSinceNow]),
-                    @"messages": @{@"status": @"ready", @"dependency_version": dependencyVersion},
+                    @"messages": readsDisabled ? @{
+                        @"status": @"disabled",
+                        @"dependency_version": dependencyVersion,
+                        @"enable_with": @"imessage-proxy enable-messages-read"
+                    }
+                                               : @{@"status": @"ready", @"dependency_version": dependencyVersion},
                     @"key": @{
                         @"id": actor.uuid,
                         @"name": actor.name,
@@ -2502,6 +2552,9 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
                 });
             }
         }
+    } else if (!self.configuration.messagesReadEnabled && RequestReadsMessages(request)) {
+        auditAction = MessagesReadAuditAction(request);
+        response = MessagesReadDisabledProblem();
     } else if ([request.method isEqualToString:@"GET"] && [request.path isEqualToString:@"/api/chats"]) {
         auditAction = @"chats.list";
         if (![actor hasScope:IMPAPIKeyScopeMessagesRead]) {
@@ -2843,6 +2896,11 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
                         !validService || !validOptOut) {
                         response = Problem(400, @"invalid-message",
                                            @"Exactly one valid target and message text are required.");
+                    } else if (chatIDPresent && !self.configuration.messagesReadEnabled) {
+                        response = Problem(409, @"messages-read-disabled",
+                                           @"Sending to a chat_id needs to read Messages, which is turned off for this "
+                                           @"installation. Send to a recipient instead, or turn reading on with: "
+                                           @"imessage-proxy enable-messages-read");
                     } else if (identifierOptOutPresent && ![actor hasScope:IMPAPIKeyScopeAdmin]) {
                         // Refused rather than ignored: a caller that believed it
                         // had suppressed the marker must not be told the send
@@ -3413,7 +3471,10 @@ static BOOL RunServer(IMPConfiguration *configuration, NSError **error) {
     // never appeared. Serving anyway lets /api/status name the failure and lets the
     // operator restore Full Disk Access without reinstalling anything.
     NSError *messagesError = nil;
-    if (!CheckMessagesReadPath(configuration, &messagesError)) {
+    if (!configuration.messagesReadEnabled) {
+        fprintf(stderr, "NOTICE  Reading Messages is turned off for this installation; sending is unaffected.\n");
+        fprintf(stderr, "        Turn it on with: imessage-proxy enable-messages-read\n");
+    } else if (!CheckMessagesReadPath(configuration, &messagesError)) {
         const char *detail = messagesError.localizedDescription.UTF8String;
         LogOperationalFailure("server.start", "messages_read_unavailable", messagesError);
         fprintf(stderr, "WARNING: the Messages read path is unavailable; serving in a degraded state.\n");
