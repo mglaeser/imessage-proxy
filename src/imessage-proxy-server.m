@@ -586,9 +586,9 @@ static void DrainProcessPipe(int *descriptor, NSMutableData *captured, NSUIntege
 
 static BOOL PumpProcess(pid_t processID, int *outputDescriptor, int *diagnosticDescriptor,
                         NSMutableData *standardOutput, NSMutableData *standardError, NSUInteger *outputBytes,
-                        NSUInteger *diagnosticBytes,
-                        BOOL *outputExceeded, BOOL *diagnosticExceeded, BOOL *readFailed, int *waitStatus, BOOL *reaped,
-                        BOOL *waitFailed, NSTimeInterval deadline, BOOL *deadlineReached) {
+                        NSUInteger *diagnosticBytes, BOOL *outputExceeded, BOOL *diagnosticExceeded, BOOL *readFailed,
+                        int *waitStatus, BOOL *reaped, BOOL *waitFailed, NSTimeInterval deadline,
+                        BOOL *deadlineReached) {
     while (YES) {
         DrainProcessPipe(outputDescriptor, standardOutput, MaxCommandOutputBytes, outputBytes, outputExceeded,
                          readFailed);
@@ -882,12 +882,11 @@ static IMPProcessResult *RunProcess(NSString *executable, NSString *expectedDige
     BOOL childReaped = NO;
     BOOL waitFailed = NO;
     BOOL deadlineReached = NO;
-    BOOL completed = setupFailed
-                         ? NO
-                         : PumpProcess(processID, &outputPipe[0], &diagnosticPipe[0], stdoutData, stderrData,
-                                       &stdoutBytes, &stderrBytes, &stdoutExceeded, &stderrExceeded, &readFailed,
-                                       &waitStatus,
-                                       &childReaped, &waitFailed, MonotonicSeconds() + timeout, &deadlineReached);
+    BOOL completed =
+        setupFailed ? NO
+                    : PumpProcess(processID, &outputPipe[0], &diagnosticPipe[0], stdoutData, stderrData, &stdoutBytes,
+                                  &stderrBytes, &stdoutExceeded, &stderrExceeded, &readFailed, &waitStatus,
+                                  &childReaped, &waitFailed, MonotonicSeconds() + timeout, &deadlineReached);
     BOOL timedOut = !completed && deadlineReached;
     if (!completed) {
         kill(-processID, SIGTERM);
@@ -1599,11 +1598,11 @@ static NSString *DependencyDiagnostic(IMPProcessResult *result) {
     NSData *captured = result.standardError;
     NSString *text =
         captured.length == 0 ? @"" : [[NSString alloc] initWithData:captured encoding:NSUTF8StringEncoding];
-    NSArray<NSString *> *lines = [Trim(text ?: @"")
-        componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet];
+    NSArray<NSString *> *lines =
+        [Trim(text ?: @"") componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet];
     NSString *line = Trim(lines.firstObject ?: @"");
-    line = [[line componentsSeparatedByCharactersInSet:NSCharacterSet.controlCharacterSet]
-        componentsJoinedByString:@" "];
+    line =
+        [[line componentsSeparatedByCharactersInSet:NSCharacterSet.controlCharacterSet] componentsJoinedByString:@" "];
     if (line.length > 200) {
         line = [[line substringToIndex:200] stringByAppendingString:@"..."];
     }
