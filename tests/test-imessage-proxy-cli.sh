@@ -75,6 +75,8 @@ for expected in \
   'api-key bootstrap-admin' \
   'targets add TARGET' \
   'targets remove TARGET' \
+  'enable-messages-read' \
+  "disable-messages-read --confirm 'DISABLE MESSAGES READ'" \
   'server-install' \
   'RESTART IMESSAGE PROXY SERVER' \
   'server-logs'; do
@@ -231,6 +233,19 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
       fail 'optional mode demanded a complete reviewed configuration'
     load_service_config "$service_config"
 
+    # Full Disk Access is never prompted for, so an installation may decline
+    # reading and only send. That decision has to survive a reboot, which means
+    # the reviewed configuration must be allowed to carry it.
+    read_disabled_config="$security_dir/service-messages-read.env"
+    cp "$service_config" "$read_disabled_config"
+    printf '%s\n' 'IMESSAGE_PROXY_MESSAGES_READ=disabled' >> "$read_disabled_config"
+    (
+      unset IMESSAGE_PROXY_MESSAGES_READ
+      load_service_config "$read_disabled_config"
+      [[ "$IMESSAGE_PROXY_MESSAGES_READ" == disabled ]] ||
+        fail 'the reviewed configuration could not carry the Messages-read setting'
+    )
+
     # The port is the whole of require_api_settings now. It must reject what the
     # server itself would reject, so a bad value fails in the CLI rather than in
     # a LaunchAgent that then crash-loops.
@@ -243,6 +258,23 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
       expect_failure 'must be canonical base-10 in the range 1024-65535' require_api_settings
       export IMESSAGE_PROXY_PORT=08765
       expect_failure 'must be canonical base-10 in the range 1024-65535' require_api_settings
+    )
+    # The server reads only the exact word "disabled" as off and treats every
+    # other value, including a misspelling, as on. An installation that meant to
+    # be send-only must not be able to say so in a word the service ignores.
+    (
+      export IMESSAGE_PROXY_PORT=18765
+      unset IMESSAGE_PROXY_MESSAGES_READ
+      require_api_settings || fail 'an absent Messages-read setting was rejected'
+      messages_read_enabled || fail 'an absent Messages-read setting must mean enabled'
+      export IMESSAGE_PROXY_MESSAGES_READ=enabled
+      require_api_settings || fail 'an explicitly enabled Messages-read setting was rejected'
+      messages_read_enabled || fail 'the enabled Messages-read setting did not read as enabled'
+      export IMESSAGE_PROXY_MESSAGES_READ=disabled
+      require_api_settings || fail 'a disabled Messages-read setting was rejected'
+      ! messages_read_enabled || fail 'the disabled Messages-read setting read as enabled'
+      export IMESSAGE_PROXY_MESSAGES_READ=off
+      expect_failure 'must be enabled or disabled' require_api_settings
     )
 
     expect_failure 'private file must be a regular non-symlink' \
@@ -377,6 +409,20 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     fail 'the rendered native LaunchAgent passes unexpected extra arguments'
   plutil -extract ProgramArguments json -o - "$rendered_server_agent" > "$temporary/server-argv.json"
   assert_not_contains '__' "$temporary/server-argv.json"
+  # The service decides once, when it starts, from the environment its LaunchAgent
+  # hands it. A render that dropped this setting would leave an installation that
+  # declined reading reading again on its next start, with nothing to show for it.
+  [[ "$(plutil -extract EnvironmentVariables.IMESSAGE_PROXY_MESSAGES_READ raw -o - \
+    "$rendered_server_agent")" == enabled ]] ||
+    fail 'the rendered native LaunchAgent does not carry the default Messages-read setting'
+  (
+    export IMESSAGE_PROXY_MESSAGES_READ=disabled
+    rendered_read_disabled="$temporary/rendered-server-agent-read-disabled.plist"
+    render_server_agent_to "$rendered_read_disabled"
+    [[ "$(plutil -extract EnvironmentVariables.IMESSAGE_PROXY_MESSAGES_READ raw -o - \
+      "$rendered_read_disabled")" == disabled ]] ||
+      fail 'the rendered native LaunchAgent does not carry a disabled Messages-read setting'
+  )
   # A lint-clean plist with a truncated, padded, or mistyped vector must be
   # rejected: that is exactly the shape launchd accepts and the server cannot
   # run. Each fixture is built through the same append path the renderer uses,
@@ -413,6 +459,26 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     "${HOME}/Library/Messages/chat.db"$'\n8\n30\n180\n10' ]] ||
     fail 'run_server accepted ambient native configuration drift'
 
+  # This one setting is the operator's, not the CLI's, so it is passed through
+  # rather than pinned: check-config and the bootstrap commands have to see the
+  # same mode the installed LaunchAgent will.
+  messages_read_capture="$temporary/server-messages-read.capture"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    # shellcheck disable=SC2016
+    printf '%s\n' 'printf "%s\n" "$IMESSAGE_PROXY_MESSAGES_READ" > "$IMESSAGE_PROXY_TEST_CAPTURE"'
+  } > "$SERVER_BIN"
+  chmod 700 "$SERVER_BIN"
+  IMESSAGE_PROXY_TEST_CAPTURE="$messages_read_capture" run_server check-config
+  [[ "$(< "$messages_read_capture")" == enabled ]] ||
+    fail 'run_server did not give the server the default Messages-read setting'
+  (
+    export IMESSAGE_PROXY_MESSAGES_READ=disabled
+    IMESSAGE_PROXY_TEST_CAPTURE="$messages_read_capture" run_server check-config
+  )
+  [[ "$(< "$messages_read_capture")" == disabled ]] ||
+    fail 'run_server did not give the server the configured Messages-read setting'
+
   printf '#!/usr/bin/env bash\nexit 0\n' > "$SERVER_BIN"
   chmod 700 "$SERVER_BIN"
   bootstrap_capture="$temporary/bootstrap.args"
@@ -423,6 +489,40 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
   assert_contains '<45>' "$bootstrap_capture"
   : > "$DATABASE_PATH"
   chmod 600 "$DATABASE_PATH"
+
+  # Both host reports must state which mode the next start will use. Reading off
+  # is a decision, not a fault, and it explains a whole class of 409s that is
+  # otherwise visible only through GET /api/status, which needs a key to ask.
+  (
+    codesign() { :; }
+    require_staged_imsg() { :; }
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "%s"\n' "$VERSION" > "$SERVER_BIN"
+    chmod 700 "$SERVER_BIN"
+    check_host > "$temporary/check-host-read-enabled.out"
+    assert_contains 'INFO reading Messages: enabled' "$temporary/check-host-read-enabled.out"
+    export IMESSAGE_PROXY_MESSAGES_READ=disabled
+    check_host > "$temporary/check-host-read-disabled.out"
+    assert_contains 'INFO reading Messages: disabled' "$temporary/check-host-read-disabled.out"
+    assert_contains 'imessage-proxy enable-messages-read' "$temporary/check-host-read-disabled.out"
+  )
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$SERVER_BIN"
+  chmod 700 "$SERVER_BIN"
+
+  (
+    doctor > "$temporary/doctor-read-enabled.out" 2>&1 || true
+    assert_contains 'INFO reading Messages: enabled' "$temporary/doctor-read-enabled.out"
+    assert_contains 'no Messages database' "$temporary/doctor-read-enabled.out"
+  )
+  # A send-only installation never opens the Messages database, and bootstrap runs
+  # doctor first, so judging that database would refuse to install exactly the
+  # installation this setting exists for.
+  (
+    export IMESSAGE_PROXY_MESSAGES_READ=disabled
+    doctor > "$temporary/doctor-read-disabled.out" 2>&1 || true
+    assert_contains 'INFO reading Messages: disabled' "$temporary/doctor-read-disabled.out"
+    assert_contains 'imessage-proxy enable-messages-read' "$temporary/doctor-read-disabled.out"
+    assert_not_contains 'no Messages database' "$temporary/doctor-read-disabled.out"
+  )
 
   # The checkpoint exists so a human reads the sentence, not to test typing. A
   # single mistyped character used to discard a completed build and install, so
@@ -1070,6 +1170,69 @@ chat_id:42' ]] || fail "targets list did not report the file: $listed"
     grep -Fq "$member" "$REPOSITORY/scripts/install.sh" ||
       fail "the installer does not name the payload member: $member"
   done
+)
+
+# Full Disk Access is the one macOS permission that is never prompted for, so an
+# installation may legitimately decline it and only send. Switching that off and
+# on is therefore an operator action, and it has to be written where it survives
+# a reboot and reaches the LaunchAgent.
+# shellcheck disable=SC2030,SC2031,SC2329
+(
+  export HOME="$temporary/messages-read-home"
+  export IMESSAGE_PROXY_HOME="$HOME/imessage-proxy"
+  export IMESSAGE_PROXY_SOURCE_DIR="$REPOSITORY"
+  export IMESSAGE_PROXY_CONFIG="$HOME/.config/imessage-proxy/service.env"
+  mkdir -p "$HOME/.config/imessage-proxy" "$IMESSAGE_PROXY_HOME"
+  chmod 700 "$HOME" "$HOME/.config" "$HOME/.config/imessage-proxy" "$IMESSAGE_PROXY_HOME"
+  printf '%s\n' \
+    '# reviewed service configuration' \
+    'IMESSAGE_PROXY_PORT=18765' > "$IMESSAGE_PROXY_CONFIG"
+  chmod 600 "$IMESSAGE_PROXY_CONFIG"
+
+  # shellcheck source=/dev/null
+  source "$CLI" >/dev/null 2>&1
+  require_macos() { return 0; }
+
+  # Turning reading off takes it from every existing key at once, so it is
+  # confirmed like the other actions that change what a running service answers.
+  expect_failure 'disable-messages-read confirmation did not match' \
+    disable_messages_read 'not confirmed'
+  assert_not_contains 'IMESSAGE_PROXY_MESSAGES_READ' "$IMESSAGE_PROXY_CONFIG"
+
+  disable_messages_read 'DISABLE MESSAGES READ' > "$temporary/disable-messages-read.out"
+  assert_contains 'IMESSAGE_PROXY_MESSAGES_READ=disabled' "$IMESSAGE_PROXY_CONFIG"
+  # The file is rewritten whole, so everything else in it has to come back.
+  assert_contains '# reviewed service configuration' "$IMESSAGE_PROXY_CONFIG"
+  assert_contains 'IMESSAGE_PROXY_PORT=18765' "$IMESSAGE_PROXY_CONFIG"
+  [[ "$(stat -f '%Lp' "$IMESSAGE_PROXY_CONFIG")" == 600 ]] ||
+    fail 'switching Messages reads left the reviewed configuration readable'
+  assert_contains '409 messages-read-disabled' "$temporary/disable-messages-read.out"
+  # server-restart reinstalls the staged plist unchanged, so an operator told to
+  # restart would watch the old mode survive and conclude the setting does
+  # nothing. The action has to name the commands that actually apply it.
+  assert_contains 'server-restart reuses the installed' "$temporary/disable-messages-read.out"
+  assert_contains 'imessage-proxy prepare' "$temporary/disable-messages-read.out"
+  assert_contains 'imessage-proxy server-install' "$temporary/disable-messages-read.out"
+
+  enable_messages_read > "$temporary/enable-messages-read.out"
+  assert_contains 'IMESSAGE_PROXY_MESSAGES_READ=enabled' "$IMESSAGE_PROXY_CONFIG"
+  # Turning the switch on does not grant Full Disk Access, and nothing else will
+  # ask for it.
+  assert_contains 'Full Disk Access' "$temporary/enable-messages-read.out"
+  assert_contains 'imessage-proxy prepare' "$temporary/enable-messages-read.out"
+  # A second assignment would make load_service_config refuse the whole file, so
+  # every action would then fail on a configuration this CLI wrote itself.
+  [[ "$(grep -c '^IMESSAGE_PROXY_MESSAGES_READ=' "$IMESSAGE_PROXY_CONFIG")" == 1 ]] ||
+    fail 'switching Messages reads twice left more than one assignment'
+  (
+    unset IMESSAGE_PROXY_MESSAGES_READ
+    load_service_config "$IMESSAGE_PROXY_CONFIG" optional
+    [[ "$IMESSAGE_PROXY_MESSAGES_READ" == enabled ]] ||
+      fail 'the rewritten configuration does not load its Messages-read setting'
+  )
+
+  rm -f -- "$IMESSAGE_PROXY_CONFIG"
+  expect_failure 'reviewed service configuration is missing' enable_messages_read
 )
 
 printf '%s\n' 'iMessage Proxy CLI lifecycle tests passed.'

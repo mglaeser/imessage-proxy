@@ -1096,7 +1096,7 @@ main() {
   step "Reading Messages"
   offer_messages_read
   if [[ "$messages_read" == disabled ]]; then
-    run_quietly "Turning reading off" "$cli" disable-messages-read
+    run_quietly "Turning reading off" "$cli" disable-messages-read --confirm 'DISABLE MESSAGES READ'
     run_quietly "Applying the setting" "$cli" prepare
   fi
 
