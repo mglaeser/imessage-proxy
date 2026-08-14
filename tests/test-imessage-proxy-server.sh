@@ -1450,7 +1450,17 @@ for private_value in \
 done
 
 # The fake argv proves fixed direct commands, one database, no files, and no SMS fallback.
-grep -Fq -- '--service imessage --no-sms-fallback' "$fake_imsg_log"
+grep -Eq -- '--service imessage( |$)' "$fake_imsg_log"
+grep -Fq -- '--no-sms-fallback' "$fake_imsg_log"
+# Every send carries the sending key's identifier: a message that reached imsg
+# without it would be unattributable to its recipient, which is the whole point.
+# bash renders the marker as raw UTF-8 or as an escape depending on the build,
+# so both spellings count and nothing else does.
+if ! grep -Eq -- "--text .*($(printf '\U0001F516')|\\\\U0001[fF]516)[a-z]{2,8}" "$fake_imsg_log"; then
+  printf 'ERROR: a send reached imsg without the sender identifier\n' >&2
+  grep -F -- '--text' "$fake_imsg_log" | head -3 >&2
+  exit 1
+fi
 grep -Fq -- "--db $messages_database_path --json" "$fake_imsg_log"
 grep -Fq -- 'imsg chat-background status --chat-id 42' "$fake_imsg_log"
 grep -Fq -- '--participants +15551234567\,me@example.test' "$fake_imsg_log"
