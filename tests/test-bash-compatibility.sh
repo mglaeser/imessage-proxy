@@ -101,6 +101,19 @@ report fda_spaced    full_disk_access_acknowledgement_matches '  full disk acces
 report fda_wrong     full_disk_access_acknowledgement_matches 'FULL DISK ACCESS'
 report key_allowed   service_config_key_allowed IMESSAGE_PROXY_PORT
 report key_refused   service_config_key_allowed IMESSAGE_PROXY_API_HOST
+report key_read      service_config_key_allowed IMESSAGE_PROXY_MESSAGES_READ
+# Reading Messages is the one capability an installation may decline outright,
+# and the server reads only the exact word "disabled" as off. A value that this
+# accepts but the service ignores would leave a send-only Mac reading.
+report read_enabled  messages_read_setting_valid enabled
+report read_disabled messages_read_setting_valid disabled
+report read_off      messages_read_setting_valid off
+report read_upper    messages_read_setting_valid DISABLED
+report read_spaced   messages_read_setting_valid ' disabled'
+report read_empty    messages_read_setting_valid ''
+report read_absent   messages_read_enabled
+( export IMESSAGE_PROXY_MESSAGES_READ=disabled; report read_switched messages_read_enabled )
+printf 'read_setting=%s\n' "$(messages_read_setting)"
 # The send allowlist decides who this machine may message, so the predicate that
 # guards it must not answer differently on a stock Mac than on a Homebrew bash.
 report target_email    target_is_valid 'person@example.net'

@@ -1450,7 +1450,11 @@ for private_value in \
 done
 
 # The fake argv proves fixed direct commands, one database, no files, and no SMS fallback.
-grep -Eq -- '--service imessage( |$)' "$fake_imsg_log"
+if ! grep -Fq -- '--service imessage' "$fake_imsg_log"; then
+  printf 'ERROR: no iMessage send reached the dependency\n' >&2
+  grep -F -- 'imsg send' "$fake_imsg_log" | head -3 >&2
+  exit 1
+fi
 grep -Fq -- '--no-sms-fallback' "$fake_imsg_log"
 # Every send carries the sending key's identifier: a message that reached imsg
 # without it would be unattributable to its recipient, which is the whole point.

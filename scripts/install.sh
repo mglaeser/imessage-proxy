@@ -8,6 +8,13 @@
 # to standard error. On success standard output is exactly the first
 # administrator API key.
 #
+# Sending is proved before reading is discussed. Sending is guarded by Apple
+# Events, which macOS prompts for, so a test send raises that prompt while the
+# operator is watching and leaves them with a message they can point at. Reading
+# is guarded by Full Disk Access, which macOS never prompts for, so it is a
+# question with a manual checkpoint behind it - and one an installation may
+# answer with no and still be complete.
+#
 # The service listens on 127.0.0.1 only. Publishing it is the operator's job,
 # with their own TLS proxy in front.
 
