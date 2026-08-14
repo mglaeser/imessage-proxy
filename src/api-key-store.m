@@ -1513,6 +1513,8 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
                                                                        name:name
                                                                   keyPrefix:prefix
                                                                      scopes:scopes
+                                                           senderIdentifier:normalizedIdentifier
+                                                   senderIdentifierAssigned:identifierAssigned
                                                                   createdAt:createdAt
                                                                   expiresAt:expiresAt
                                                                   revokedAt:nil
@@ -1609,6 +1611,8 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
                                                              name:matchedRecord.name
                                                         keyPrefix:matchedRecord.keyPrefix
                                                            scopes:matchedRecord.scopes
+                                                 senderIdentifier:matchedRecord.senderIdentifier
+                                         senderIdentifierAssigned:matchedRecord.senderIdentifierAssigned
                                                         createdAt:matchedRecord.createdAt
                                                         expiresAt:matchedRecord.expiresAt
                                                         revokedAt:nil
