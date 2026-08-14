@@ -498,10 +498,13 @@ sqlite3 "$database_path" \
   "WITH RECURSIVE sequence(value) AS (
      VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<1000
    )
-   INSERT INTO api_keys(uuid,name,key_prefix,key_hash,scopes,created_at)
+   INSERT INTO api_keys(uuid,name,key_prefix,key_hash,scopes,sender_identifier,
+                        sender_identifier_assigned,created_at)
    SELECT printf('00000000-0000-4000-8000-%012d',value),
           'capacity-fixture',printf('imp_%08d',value),
-          CAST(printf('%032d',value) AS BLOB),'messages:read',1000000+value
+          CAST(printf('%032d',value) AS BLOB),'messages:read',
+          char(97+((value-1)/676)%26, 97+((value-1)/26)%26, 97+(value-1)%26),1,
+          1000000+value
    FROM sequence;"
 if run_native check-bootstrap-admin capacity-admin 30 \
   > "$temporary/bootstrap-capacity.out" 2> "$temporary/bootstrap-capacity.err"; then
@@ -522,9 +525,10 @@ sqlite3 "$database_path" "DELETE FROM api_keys WHERE name='capacity-fixture';"
 # A token that cannot be written completely rolls its transaction back before
 # failure is reported, leaving unrelated keys intact and a clean retry path.
 sqlite3 "$database_path" \
-  "INSERT INTO api_keys(uuid,name,key_prefix,key_hash,scopes,created_at)
+  "INSERT INTO api_keys(uuid,name,key_prefix,key_hash,scopes,sender_identifier,
+                        sender_identifier_assigned,created_at)
    VALUES('11111111-1111-4111-8111-111111111111','cleanup-sentinel',
-          'imp_sentinel',zeroblob(32),'messages:read',2000000);"
+          'imp_sentinel',zeroblob(32),'messages:read','zzz',0,2000000);"
 closed_pipe="$temporary/bootstrap-delivery.pipe"
 mkfifo "$closed_pipe"
 # Open the FIFO read-write first: that never blocks and makes fd 8 a reader, so
