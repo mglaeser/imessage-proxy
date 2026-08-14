@@ -425,7 +425,15 @@ static BOOL IsAllowedTargetLine(NSString *line) {
 
 @interface IMPProcessResult : NSObject
 @property (nonatomic, copy) NSData *standardOutput;
+// The dependency's own account of its failure. It was read and discarded before,
+// which is why an operator whose imsg died on a missing resource bundle saw only
+// an opaque 502 and had to reproduce the command by hand to learn anything.
+@property (nonatomic, copy) NSData *standardError;
 @property (nonatomic) int terminationStatus;
+// Nonzero when the child was killed by a signal. Folding that into
+// 128 + signal made a crash indistinguishable from an ordinary exit with the
+// same number, and a Swift fatalError is exactly such a crash.
+@property (nonatomic) int terminatingSignal;
 @property (nonatomic) BOOL launched;
 @end
 
@@ -577,14 +585,15 @@ static void DrainProcessPipe(int *descriptor, NSMutableData *captured, NSUIntege
 }
 
 static BOOL PumpProcess(pid_t processID, int *outputDescriptor, int *diagnosticDescriptor,
-                        NSMutableData *standardOutput, NSUInteger *outputBytes, NSUInteger *diagnosticBytes,
-                        BOOL *outputExceeded, BOOL *diagnosticExceeded, BOOL *readFailed, int *waitStatus, BOOL *reaped,
-                        BOOL *waitFailed, NSTimeInterval deadline, BOOL *deadlineReached) {
+                        NSMutableData *standardOutput, NSMutableData *standardError, NSUInteger *outputBytes,
+                        NSUInteger *diagnosticBytes, BOOL *outputExceeded, BOOL *diagnosticExceeded, BOOL *readFailed,
+                        int *waitStatus, BOOL *reaped, BOOL *waitFailed, NSTimeInterval deadline,
+                        BOOL *deadlineReached) {
     while (YES) {
         DrainProcessPipe(outputDescriptor, standardOutput, MaxCommandOutputBytes, outputBytes, outputExceeded,
                          readFailed);
-        DrainProcessPipe(diagnosticDescriptor, nil, MaxCommandDiagnosticBytes, diagnosticBytes, diagnosticExceeded,
-                         readFailed);
+        DrainProcessPipe(diagnosticDescriptor, standardError, MaxCommandDiagnosticBytes, diagnosticBytes,
+                         diagnosticExceeded, readFailed);
         ReapChildNonblocking(processID, waitStatus, reaped, waitFailed);
         if (*reaped && *outputDescriptor < 0 && *diagnosticDescriptor < 0)
             return YES;
@@ -863,6 +872,7 @@ static IMPProcessResult *RunProcess(NSString *executable, NSString *expectedDige
     RegisterChildProcessGroup(processID);
     BOOL setupFailed = !SetNonblocking(outputPipe[0]) || !SetNonblocking(diagnosticPipe[0]);
     NSMutableData *stdoutData = [NSMutableData data];
+    NSMutableData *stderrData = [NSMutableData data];
     NSUInteger stdoutBytes = 0;
     NSUInteger stderrBytes = 0;
     BOOL stdoutExceeded = NO;
@@ -872,11 +882,11 @@ static IMPProcessResult *RunProcess(NSString *executable, NSString *expectedDige
     BOOL childReaped = NO;
     BOOL waitFailed = NO;
     BOOL deadlineReached = NO;
-    BOOL completed = setupFailed
-                         ? NO
-                         : PumpProcess(processID, &outputPipe[0], &diagnosticPipe[0], stdoutData, &stdoutBytes,
-                                       &stderrBytes, &stdoutExceeded, &stderrExceeded, &readFailed, &waitStatus,
-                                       &childReaped, &waitFailed, MonotonicSeconds() + timeout, &deadlineReached);
+    BOOL completed =
+        setupFailed ? NO
+                    : PumpProcess(processID, &outputPipe[0], &diagnosticPipe[0], stdoutData, stderrData, &stdoutBytes,
+                                  &stderrBytes, &stdoutExceeded, &stderrExceeded, &readFailed, &waitStatus,
+                                  &childReaped, &waitFailed, MonotonicSeconds() + timeout, &deadlineReached);
     BOOL timedOut = !completed && deadlineReached;
     if (!completed) {
         kill(-processID, SIGTERM);
@@ -906,6 +916,8 @@ static IMPProcessResult *RunProcess(NSString *executable, NSString *expectedDige
     }
     IMPProcessResult *result = [IMPProcessResult new];
     result.standardOutput = stdoutData;
+    result.standardError = stderrData;
+    result.terminatingSignal = WIFSIGNALED(waitStatus) ? WTERMSIG(waitStatus) : 0;
     result.terminationStatus =
         WIFEXITED(waitStatus) ? WEXITSTATUS(waitStatus) : (WIFSIGNALED(waitStatus) ? 128 + WTERMSIG(waitStatus) : 1);
     result.launched = YES;
@@ -1578,6 +1590,44 @@ static IMPProcessResult *RunConfiguredIMSGArguments(IMPConfiguration *configurat
     return RunProcess(configuration.imsgPath, configuration.imsgSHA256, complete, NSHomeDirectory(), timeout, error);
 }
 
+// The first line of the dependency's stderr, bounded and stripped of control
+// characters. A Swift fatalError puts its whole explanation there, which is the
+// case worth reporting; taking only the first line also keeps anything the tool
+// might echo about the message itself out of the log.
+static NSString *DependencyDiagnostic(IMPProcessResult *result) {
+    NSData *captured = result.standardError;
+    NSString *text =
+        captured.length == 0 ? @"" : [[NSString alloc] initWithData:captured encoding:NSUTF8StringEncoding];
+    NSArray<NSString *> *lines =
+        [Trim(text ?: @"") componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet];
+    NSString *line = Trim(lines.firstObject ?: @"");
+    line =
+        [[line componentsSeparatedByCharactersInSet:NSCharacterSet.controlCharacterSet] componentsJoinedByString:@" "];
+    if (line.length > 200) {
+        line = [[line substringToIndex:200] stringByAppendingString:@"..."];
+    }
+    return line;
+}
+
+// A dependency that dies has already explained itself; the server used to read
+// that explanation and throw it away, so an operator could not tell a crash from
+// a refusal without reproducing the command by hand. A signal is reported as a
+// signal: folding it into 128 + signal made a Swift fatalError indistinguishable
+// from an ordinary exit with the same number.
+static void LogDependencyFailure(const char *action, IMPProcessResult *result) {
+    NSString *diagnostic = DependencyDiagnostic(result);
+    const char *detail = diagnostic.length > 0 ? diagnostic.UTF8String : "(the dependency wrote nothing)";
+    if (result.terminatingSignal != 0) {
+        os_log_with_type(ServerOperationalLog(), OS_LOG_TYPE_ERROR,
+                         "action=%{public}s reason=dependency_crashed signal=%d detail=%{public}s", action,
+                         result.terminatingSignal, detail);
+        return;
+    }
+    os_log_with_type(ServerOperationalLog(), OS_LOG_TYPE_ERROR,
+                     "action=%{public}s reason=dependency_failed exit=%d detail=%{public}s", action,
+                     result.terminationStatus, detail);
+}
+
 static NSArray<NSDictionary *> *RunConfiguredJSONLines(IMPConfiguration *configuration, NSArray<NSString *> *arguments,
                                                        NSUInteger maximumItems, NSTimeInterval timeout,
                                                        NSError **error) {
@@ -1586,10 +1636,14 @@ static NSArray<NSDictionary *> *RunConfiguredJSONLines(IMPConfiguration *configu
         return nil;
     }
     if (result.terminationStatus != 0) {
+        // A chat that does not exist is an ordinary answer, not a malfunction.
+        BOOL notFound = IsPinnedChatNotFoundResult(result, arguments);
+        if (!notFound) {
+            LogDependencyFailure("dependency.run", result);
+        }
         if (error != NULL) {
-            *error = IsPinnedChatNotFoundResult(result, arguments)
-                         ? ServerError(IMPServerErrorNotFound, @"chat not found")
-                         : ServerError(IMPServerErrorUpstream, @"dependency command failed");
+            *error = notFound ? ServerError(IMPServerErrorNotFound, @"chat not found")
+                              : ServerError(IMPServerErrorUpstream, @"dependency command failed");
         }
         return nil;
     }

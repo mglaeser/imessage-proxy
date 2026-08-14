@@ -352,6 +352,44 @@ require_api_settings() {
     die "IMESSAGE_PROXY_PORT must be canonical base-10 in the range 1024-65535, not: $IMESSAGE_PROXY_PORT"
 }
 
+# imsg is a payload, not a binary. The executable dlopens a sidecar bridge dylib
+# and reads SwiftPM resource bundles from its own directory, and it does neither
+# until a send: `--version` and `chats` touch none of them. So an executable
+# staged alone reports the right version, passes its digest, lists chats, serves
+# a healthy status - and then kills itself with
+#   PhoneNumberKit/resource_bundle_accessor.swift: Fatal error: unable to find
+#   bundle named PhoneNumberKit_PhoneNumberKit
+# on the first send. That shipped. Every guard here was satisfied by a dependency
+# that could not send at all.
+#
+# The members are named rather than globbed so that a future imsg which adds one
+# fails at install time instead of at an operator's first send. Presence is not
+# loadability - a quarantined, unsigned, or truncated member passes this and
+# still traps - which is why the server also reports what the dependency said
+# when it dies, rather than only that it died.
+IMSG_PAYLOAD_MEMBERS=(
+  'imsg-bridge-helper.dylib'
+  'PhoneNumberKit_PhoneNumberKit.bundle'
+  'SQLite.swift_SQLite.bundle'
+)
+
+require_imsg_payload() {
+  local directory executable="$1" label="${2:-imsg}" member path
+  directory="$(dirname "$executable")"
+  for member in "${IMSG_PAYLOAD_MEMBERS[@]}"; do
+    path="$directory/$member"
+    [[ -e "$path" && ! -L "$path" ]] ||
+      die "the $label payload is incomplete: $member is missing from $directory
+  imsg reports its version and reads chats without it, and cannot send at all"
+    if [[ -d "$path" ]]; then
+      [[ -n "$(ls -A "$path" 2>/dev/null)" ]] ||
+        die "the $label payload member $member is an empty directory"
+    else
+      [[ -s "$path" ]] || die "the $label payload member $member is empty"
+    fi
+  done
+}
+
 require_imsg_source() {
   local actual digest source version_output
   source="${IMESSAGE_PROXY_IMSG_BIN:-}"
@@ -363,6 +401,9 @@ require_imsg_source() {
   actual="$(shasum -a 256 "$source" | awk '{print $1}')"
   [[ "$actual" == "$digest" ]] ||
     die 'the configured imsg binary SHA-256 does not match the reviewed digest'
+  # Checked before the binary is executed, not after: an incomplete payload is a
+  # property of the file tree and needs no process to observe it.
+  require_imsg_payload "$source" 'configured imsg'
   version_output="$("$source" --version 2>/dev/null)" ||
     die 'the configured imsg binary did not report a version'
   [[ "$version_output" == "$EXPECTED_IMSG_VERSION" ]] ||
@@ -439,18 +480,40 @@ install_prepared_asset() {
   mv -f "$temporary" "$destination"
 }
 
+# The whole payload is staged, not just the executable. Copying the executable
+# alone is the defect described above require_imsg_payload: it produced an
+# installation that passed every check and could not send.
 stage_imsg_binary() {
-  local source temporary version_output
+  local member source source_directory temporary version_output
   source="$(require_imsg_source)"
+  source_directory="$(dirname "$source")"
   temporary="$(mktemp "$BIN_DIR/imsg.XXXXXX")"
   install -m 0500 "$source" "$temporary"
   [[ "$(shasum -a 256 "$temporary" | awk '{print $1}')" == "$IMESSAGE_PROXY_IMSG_SHA256" ]] ||
     die 'the staged imsg binary changed while being copied'
-  version_output="$("$temporary" --version 2>/dev/null)" ||
+  # Members are replaced whole rather than merged, so a member left behind by an
+  # earlier version can never sit beside a newer executable. Only the exact
+  # names above are ever removed, and only from the runtime bin directory, whose
+  # shape require_safe_runtime_root has already established.
+  for member in "${IMSG_PAYLOAD_MEMBERS[@]}"; do
+    [[ -e "$source_directory/$member" && ! -L "$source_directory/$member" ]] ||
+      die "the imsg payload member $member disappeared while staging"
+    rm -rf -- "${BIN_DIR:?}/$member"
+    cp -R "$source_directory/$member" "${BIN_DIR:?}/$member" ||
+      die "could not stage the imsg payload member $member"
+  done
+  mv -f "$temporary" "$IMSG_BIN"
+  # An archive can carry group- or world-readable modes; the runtime keeps its
+  # own. Directories need traversal, so X rather than x.
+  for member in "${IMSG_PAYLOAD_MEMBERS[@]}"; do
+    chmod -R u+rwX,go-rwx "${BIN_DIR:?}/$member" ||
+      die "could not secure the staged imsg payload member $member"
+  done
+  version_output="$("$IMSG_BIN" --version 2>/dev/null)" ||
     die 'the staged imsg binary did not report a version'
   [[ "$version_output" == "$EXPECTED_IMSG_VERSION" ]] ||
     die "expected imsg $EXPECTED_IMSG_VERSION, found ${version_output:-unknown}"
-  mv -f "$temporary" "$IMSG_BIN"
+  require_imsg_payload "$IMSG_BIN" 'staged imsg'
 }
 
 # "plutil -replace ProgramArguments.0 -string X" is not a replacement on every
@@ -1253,6 +1316,9 @@ require_staged_imsg() {
     die 'the staged imsg binary did not report a version'
   [[ "$version_output" == "$EXPECTED_IMSG_VERSION" ]] ||
     die 'the staged imsg version is not the reviewed version'
+  # The version this just proved is the one thing an incomplete payload still
+  # answers correctly, so it proves nothing about sending on its own.
+  require_imsg_payload "$IMSG_BIN" 'staged imsg'
 }
 
 server_logs() {

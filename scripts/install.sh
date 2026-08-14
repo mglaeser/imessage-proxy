@@ -633,6 +633,15 @@ install_pinned_imsg() {
   unzip -q -o "$archive" -d "$payload" || die 'could not extract the imsg archive'
   [[ -f "$payload/imsg" && ! -L "$payload/imsg" ]] ||
     die 'the imsg archive did not contain the expected executable'
+  # The executable alone is not the dependency. It dlopens the bridge dylib and
+  # reads the resource bundles from its own directory, and only when sending, so
+  # an archive missing one of these still reports its version and reads chats
+  # while being unable to send a single message. Name them, so a future imsg that
+  # renames or adds one fails here rather than at an operator's first send.
+  for member in imsg-bridge-helper.dylib PhoneNumberKit_PhoneNumberKit.bundle SQLite.swift_SQLite.bundle; do
+    [[ -e "$payload/$member" && ! -L "$payload/$member" ]] ||
+      die "the imsg archive is missing the payload member $member"
+  done
   chmod 700 "$payload/imsg"
   imsg_reports_expected_version "$payload/imsg" ||
     die "the downloaded imsg executable is not $EXPECTED_IMSG_VERSION"

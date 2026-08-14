@@ -45,6 +45,20 @@ expect_status() {
     fail "expected status $expected, got $actual from: $*"
 }
 
+# imsg ships as a payload: the executable plus a sidecar dylib and two SwiftPM
+# resource bundles it loads from its own directory. A fake without them models
+# the broken installation this project shipped, not a working one, and would let
+# the payload guards pass vacuously.
+write_fake_imsg_payload() {
+  local directory="$1"
+  install -d -m 700 "$directory/PhoneNumberKit_PhoneNumberKit.bundle/Contents/Resources"
+  install -d -m 700 "$directory/SQLite.swift_SQLite.bundle/Contents/Resources"
+  printf '%s\n' '{}' > "$directory/PhoneNumberKit_PhoneNumberKit.bundle/Contents/Resources/PhoneNumberMetadata.json"
+  printf '%s\n' 'fixture' > "$directory/imsg-bridge-helper.dylib"
+  chmod 600 "$directory/imsg-bridge-helper.dylib" \
+    "$directory/PhoneNumberKit_PhoneNumberKit.bundle/Contents/Resources/PhoneNumberMetadata.json"
+}
+
 assert_rollback() {
   local domain label="$1" path="$2"
   domain="gui/$(id -u)/$label"
@@ -110,6 +124,7 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     printf '%s\n' "printf '%s\\n' '0.13.4'"
   } > "$fake_imsg"
   chmod 700 "$fake_imsg"
+  write_fake_imsg_payload "$temporary/tools"
   export IMESSAGE_PROXY_IMSG_BIN="$fake_imsg"
   export IMESSAGE_PROXY_IMSG_SHA256
   IMESSAGE_PROXY_IMSG_SHA256="$(shasum -a 256 "$fake_imsg" | awk '{print $1}')"
@@ -981,6 +996,80 @@ chat_id:42' ]] || fail "targets list did not report the file: $listed"
   chmod 600 "$targets_file"
   rm -f -- "$targets_file"
   expect_failure 'recipient allowlist is missing' targets list
+)
+
+# The bug this guards against: imsg was staged as a lone executable, so it
+# reported the reviewed version, matched its digest, listed chats, and then died
+# with a Swift fatalError on the first send because PhoneNumberKit's metadata
+# bundle was not beside it. Every check in this file passed. The distinguishing
+# property is not anything the binary says about itself - it is whether its
+# siblings are on disk next to it.
+# shellcheck disable=SC2030,SC2031,SC2329
+(
+  export HOME="$temporary/payload-home"
+  export IMESSAGE_PROXY_HOME="$HOME/imessage-proxy"
+  export IMESSAGE_PROXY_SOURCE_DIR="$REPOSITORY"
+  mkdir -p "$HOME" "$temporary/payload-source"
+  chmod 700 "$HOME"
+
+  payload_source="$temporary/payload-source"
+  payload_imsg="$payload_source/imsg"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    # shellcheck disable=SC2016
+    printf '%s\n' '[[ "${1:-}" == --version ]] || exit 64'
+    printf '%s\n' "printf '%s\\n' '0.13.4'"
+  } > "$payload_imsg"
+  chmod 700 "$payload_imsg"
+
+  # shellcheck source=../bin/imessage-proxy
+  source "$CLI" >/dev/null 2>&1
+
+  reset_payload() {
+    local member
+    for member in "${IMSG_PAYLOAD_MEMBERS[@]}"; do
+      rm -rf -- "${payload_source:?}/$member"
+    done
+    write_fake_imsg_payload "$payload_source"
+  }
+
+  # Each member missing in turn must be refused. A lone executable is the
+  # shipped-broken state, and no check may accept it.
+  for missing in "${IMSG_PAYLOAD_MEMBERS[@]}"; do
+    reset_payload
+    rm -rf -- "${payload_source:?}/$missing"
+    expect_failure "$missing is missing" require_imsg_payload "$payload_imsg"
+  done
+
+  # An empty member is as useless as an absent one.
+  reset_payload
+  : > "$payload_source/imsg-bridge-helper.dylib"
+  expect_failure 'is empty' require_imsg_payload "$payload_imsg"
+  reset_payload
+  rm -rf -- "$payload_source/PhoneNumberKit_PhoneNumberKit.bundle"
+  install -d -m 700 "$payload_source/PhoneNumberKit_PhoneNumberKit.bundle"
+  expect_failure 'is an empty directory' require_imsg_payload "$payload_imsg"
+
+  # A symlinked member is refused: the payload must be the reviewed files, not a
+  # pointer at something replaceable underneath them.
+  reset_payload
+  rm -rf -- "$payload_source/PhoneNumberKit_PhoneNumberKit.bundle"
+  ln -s "$payload_source/SQLite.swift_SQLite.bundle" \
+    "$payload_source/PhoneNumberKit_PhoneNumberKit.bundle"
+  expect_failure 'PhoneNumberKit_PhoneNumberKit.bundle is missing' \
+    require_imsg_payload "$payload_imsg"
+
+  # The complete payload is accepted.
+  reset_payload
+  require_imsg_payload "$payload_imsg" ||
+    fail 'a complete imsg payload was rejected'
+
+  # The member list must agree with the archive the installer actually unpacks,
+  # or staging would silently omit whatever the two disagree about.
+  for member in "${IMSG_PAYLOAD_MEMBERS[@]}"; do
+    grep -Fq "$member" "$REPOSITORY/scripts/install.sh" ||
+      fail "the installer does not name the payload member: $member"
+  done
 )
 
 printf '%s\n' 'iMessage Proxy CLI lifecycle tests passed.'
