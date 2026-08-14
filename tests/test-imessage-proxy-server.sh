@@ -51,6 +51,20 @@ readonly fake_imsg_driver="$temporary/fake-imsg-driver.sh"
 readonly fake_imsg_log="${fake_imsg}.log"
 server_pid=''
 
+# imsg ships as a payload: the executable plus a sidecar dylib and two SwiftPM
+# resource bundles it loads from its own directory. A fake without them models
+# the broken installation this project shipped, not a working one, and would let
+# the payload guards pass vacuously.
+write_fake_imsg_payload() {
+  local directory="$1"
+  install -d -m 700 "$directory/PhoneNumberKit_PhoneNumberKit.bundle/Contents/Resources"
+  install -d -m 700 "$directory/SQLite.swift_SQLite.bundle/Contents/Resources"
+  printf '%s\n' '{}' > "$directory/PhoneNumberKit_PhoneNumberKit.bundle/Contents/Resources/PhoneNumberMetadata.json"
+  printf '%s\n' 'fixture' > "$directory/imsg-bridge-helper.dylib"
+  chmod 600 "$directory/imsg-bridge-helper.dylib" \
+    "$directory/PhoneNumberKit_PhoneNumberKit.bundle/Contents/Resources/PhoneNumberMetadata.json"
+}
+
 report_failure() {
   local exit_code="$1" line="$2"
   printf 'ERROR: native-server integration test failed with exit %s at line %s\n' \
@@ -130,6 +144,10 @@ xcrun clang \
   -o "$fake_imsg" \
   "$FIXTURES/fake-imsg-launcher.c"
 chmod 0500 "$fake_imsg"
+# The real dependency is a payload directory, so the fake carries the same
+# siblings. Without them the CLI's payload guards would pass vacuously here while
+# a real installation could not send - which is exactly what shipped.
+write_fake_imsg_payload "$(dirname "$fake_imsg")"
 fake_imsg_sha256="$(openssl dgst -sha256 "$fake_imsg" | awk '{print $NF}')"
 readonly fake_imsg_sha256
 [[ "$fake_imsg_sha256" =~ ^[0-9a-f]{64}$ ]]
