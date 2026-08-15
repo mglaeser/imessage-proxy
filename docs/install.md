@@ -66,6 +66,14 @@ a specific bound address — and `0.0.0.0` adds none, because guessing them woul
 accept anything that resolves to this machine. API clients send no `Origin` and
 are unaffected.
 
+A console reached at anything other than `127.0.0.1` or `localhost` is not a
+[secure context](https://developer.mozilla.org/docs/Web/Security/Secure_Contexts),
+so the browser withholds part of its crypto and clipboard APIs there. Sending
+works — idempotency keys come from `crypto.getRandomValues`, which is not gated —
+but **Copy key** falls back to selecting the key for you to copy by hand. Putting
+a TLS proxy in front restores both, since an `https://` origin is a secure
+context.
+
 Full Disk Access is the one step that cannot be automated. macOS grants it only
 through System Settings or an MDM configuration profile; no flag and no script
 can do it, and no probe here could prove it either, since a read from the

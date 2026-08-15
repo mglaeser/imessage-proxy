@@ -316,7 +316,10 @@ function anonymousScopeControls(document) {
   });
 }
 
-function createHarness({ initialResponses = [], storedKey = "" } = {}) {
+// secureContext: false drops crypto.randomUUID and leaves getRandomValues, which
+// is the shape a browser has at http://192.168.0.10:8765 - randomUUID and
+// crypto.subtle are secure-context only, getRandomValues is not.
+function createHarness({ initialResponses = [], storedKey = "", secureContext = true } = {}) {
   const document = new FakeDocument();
   const ids = Array.from(markup.matchAll(/\bid="([a-z0-9-]+)"/g), (match) => match[1]);
   for (const id of ids) {
@@ -409,12 +412,23 @@ function createHarness({ initialResponses = [], storedKey = "" } = {}) {
     },
   };
   const crypto = {
-    randomUUID() {
+    getRandomValues(target) {
+      // Deterministic, so the assertions can name the bytes; the layout the
+      // console applies over the top is what is being tested, not the source.
+      for (let index = 0; index < target.length; index += 1) {
+        target[index] = (nextUUID * 7 + index * 31) % 256;
+      }
+      nextUUID += 1;
+      return target;
+    },
+  };
+  if (secureContext) {
+    crypto.randomUUID = () => {
       const suffix = String(nextUUID).padStart(12, "0");
       nextUUID += 1;
       return `00000000-0000-4000-8000-${suffix}`;
-    },
-  };
+    };
+  }
   const context = vm.createContext({
     AbortController,
     Date,
@@ -1309,4 +1323,41 @@ test("network, API, clipboard, and authentication failures remain actionable and
   assert.equal(harness.element("signin-error").textContent, "The API key is invalid, expired, or revoked.");
   assert.equal(harness.sessionStorage.getItem(storageKey), null);
   assert.equal(harness.element("created-key").value, "");
+});
+
+test("a console reached over the network can still send", async () => {
+  // Serving an address other than loopback puts the console on an origin that is
+  // not a secure context, where crypto.randomUUID does not exist. Refusing to
+  // send there declared the browser incapable of something it can do: only the
+  // convenience wrapper is gated, and crypto.getRandomValues - the same CSPRNG -
+  // is not. This is what an operator hits opening the console from another
+  // machine on their network.
+  const harness = createHarness({ secureContext: false });
+  await authenticate(harness);
+  harness.element("playground-operation").value = "send-message";
+  await harness.element("playground-operation").emit("change");
+  harness.element("send-target-kind").value = "recipient";
+  harness.element("send-target").value = "first-last@example.net";
+  harness.element("send-text").value = "Hello from the network";
+
+  await harness.element("playground-form").emit("submit");
+  assert.equal(harness.element("send-dialog").open, true);
+  await harness.element("send-confirm-form").emit("submit");
+  await settle();
+
+  const sent = harness.fetchMock.requests.at(-1);
+  assert.equal(sent.path, "/api/messages", "the send must reach the API");
+  const key = sent.options.headers.get("Idempotency-Key");
+  assert.match(key, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    "the fallback must be a real version-4 UUID, not random hex shaped like one");
+  assert.equal(harness.element("playground-error").textContent, "",
+    "no error may be shown when the key could be generated");
+
+  // A second logical send must not reuse the first key, or a retry of one
+  // message would be treated as a replay of the other.
+  harness.element("send-text").value = "A different message";
+  await harness.element("playground-form").emit("submit");
+  await harness.element("send-confirm-form").emit("submit");
+  await settle();
+  assert.notEqual(harness.fetchMock.requests.at(-1).options.headers.get("Idempotency-Key"), key);
 });

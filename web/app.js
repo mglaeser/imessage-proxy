@@ -1313,6 +1313,34 @@ function closeSendDialog() {
   elements.sendDialog.close();
 }
 
+// A version-4 UUID from the strongest source this context has.
+//
+// crypto.randomUUID() exists only in a secure context, and a console reached at
+// http://192.168.0.10:8765 - which is what serving an address other than
+// loopback produces - is not one. Refusing to send there was the browser being
+// declared incapable of something it can do perfectly well:
+// crypto.getRandomValues() is not gated on secure contexts, so the same CSPRNG
+// is still available and only the convenience wrapper around it is missing.
+//
+// The bytes are laid out as RFC 9562 requires - version 4 in the high nibble of
+// byte 6, variant 10 in the top bits of byte 8 - so the result is a real v4
+// UUID rather than random hex shaped like one. Null only when there is no
+// randomness to be had at all, which is the case the message was written for.
+function newIdempotencyKey() {
+  if (typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  if (typeof crypto.getRandomValues !== "function") {
+    return null;
+  }
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 function handleSendConfirmation(event) {
   event.preventDefault();
   if (!pendingPlaygroundRequest) {
@@ -1320,12 +1348,13 @@ function handleSendConfirmation(event) {
   }
   const request = pendingPlaygroundRequest;
   if (!sendAttempt || sendAttempt.signature !== request.signature) {
-    if (typeof crypto.randomUUID !== "function") {
+    const key = newIdempotencyKey();
+    if (key === null) {
       closeSendDialog();
       setFormError(elements.playgroundError, "This browser cannot generate a secure idempotency key.");
       return;
     }
-    sendAttempt = { key: crypto.randomUUID(), signature: request.signature };
+    sendAttempt = { key, signature: request.signature };
   }
   request.headers = { "Idempotency-Key": sendAttempt.key };
   pendingPlaygroundRequest = null;
