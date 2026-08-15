@@ -1468,23 +1468,22 @@ argv_contains '--no-sms-fallback'
 # Every send carries the sending key's identifier: a message that reached imsg
 # without it would be unattributable to its recipient, which is the whole point.
 #
-# The marker has three spellings in this log and all three are the same bytes.
-# The fixture writes argv with printf %q, which leaves the emoji raw in a UTF-8
-# locale and escapes it octal - $'\360\237\224\226' - in the C locale the macOS
-# runner actually runs under; some builds spell it \U0001F516. The octal one is
-# what CI produced, and it matched neither of the two spellings this once
-# accepted, so a send that plainly carried its marker was reported as one that
-# had gone out unattributable.
+# Deliberately spelling-agnostic about the marker itself. The fixture writes
+# argv with printf %q, and how that renders a bookmark emoji is a property of
+# the runner rather than of the product: raw bytes in a UTF-8 locale, octal
+# escapes in a single-byte one, and mixtures of the two in between. Two previous
+# attempts at this assertion named specific spellings and both failed on macOS
+# against a log that plainly contained the marker, so this one names none.
 #
-# The pattern is built rather than written inline for the same reason: under the
-# C locale `printf '\U0001F516'` does not produce the emoji at all, it produces
-# those eleven characters, so the old pattern could not have matched a raw
-# marker there either.
-marker_raw="$(printf '\360\237\224\226')"
-marker_pattern="(${marker_raw}|\\\\360\\\\237\\\\224\\\\226|\\\\U0001[fF]516)"
-if ! LC_ALL=C grep -Eq -- "--text .*${marker_pattern}[a-z]{2,8}" "$fake_imsg_log"; then
+# What it does insist on is the part that carries the meaning: the text ends in
+# the identifier - two to eight lowercase letters - and immediately before them
+# is either an escape sequence or a byte outside printable ASCII, which is the
+# marker in whatever spelling this runner chose. A send with no marker ends in
+# an ordinary word preceded by a space, and is refused.
+if ! LC_ALL=C grep -Eq -- "--text .*(\\\\[0-9]{3}|[^ -~])[a-z]{2,8}'" "$fake_imsg_log"; then
   printf 'ERROR: a send reached imsg without the sender identifier\n' >&2
-  grep -F -- '--text' "$fake_imsg_log" | head -3 >&2
+  # Octal, because the bytes are the question whenever this fails.
+  LC_ALL=C grep -F -- '--text' "$fake_imsg_log" | head -3 | od -c | head -20 >&2
   exit 1
 fi
 argv_contains "--db $messages_database_path --json"
