@@ -865,8 +865,8 @@ api_key_bootstrap() {
     esac
   done
   [[ -n "$name" && "${#name}" -le 80 ]] || die '--name must contain 1-80 characters'
-  if ! [[ "$expires_days" =~ ^[1-9][0-9]{0,2}$ ]] || ((10#$expires_days > 365)); then
-    die '--expires-in-days must be in the range 1-365'
+  if ! [[ "$expires_days" =~ ^[1-9][0-9]{0,3}$ ]] || ((10#$expires_days > 1461)); then
+    die '--expires-in-days must be in the range 1-1461'
   fi
   require_macos
   require_safe_runtime_root
@@ -1129,8 +1129,8 @@ validate_bootstrap_key_arguments() {
   [[ -n "$name" && "${#name}" -le 80 &&
     "$name" != ' '* && "$name" != *' ' && "$name" != *[![:print:]]* ]] ||
     die '--admin-name must contain 1-80 printable ASCII bytes without surrounding spaces'
-  if ! [[ "$expires_days" =~ ^[1-9][0-9]{0,2}$ ]] || ((10#$expires_days > 365)); then
-    die '--expires-in-days must be in the range 1-365'
+  if ! [[ "$expires_days" =~ ^[1-9][0-9]{0,3}$ ]] || ((10#$expires_days > 1461)); then
+    die '--expires-in-days must be in the range 1-1461'
   fi
 }
 
@@ -1156,7 +1156,7 @@ bootstrap_failure_rollback() {
 }
 
 bootstrap() {
-  local admin_name='' config_path='' create_admin_key=yes expires_days=30
+  local admin_name='' config_path='' create_admin_key=yes expires_days=30 require_terminal=yes
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --config)
@@ -1178,6 +1178,10 @@ bootstrap() {
         create_admin_key=no
         shift
         ;;
+      --unattended)
+        require_terminal=no
+        shift
+        ;;
       *) die "unknown bootstrap argument: $1" ;;
     esac
   done
@@ -1185,7 +1189,13 @@ bootstrap() {
   [[ -n "$admin_name" ]] || die 'bootstrap requires --admin-name NAME'
   validate_bootstrap_key_arguments "$admin_name" "$expires_days"
   load_service_config "$config_path"
-  require_bootstrap_tty
+  # The terminal gate stops an automated context changing runtime state by
+  # accident. An install that answered every question on the command line is the
+  # opposite of an accident, so it waives the gate explicitly rather than the
+  # gate guessing from whether a tty happens to exist - `ssh mac 'curl ... |
+  # bash'` has no controlling terminal, and that is the shape of an unattended
+  # install rather than a reason to refuse one.
+  [[ "$require_terminal" == no ]] || require_bootstrap_tty
 
   printf 'Running the reviewed iMessage Proxy bootstrap. Progress is sent to stderr; the key is stdout only.\n' >&2
   doctor >&2

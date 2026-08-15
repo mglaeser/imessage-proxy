@@ -61,6 +61,9 @@ bold=''
 dim=''
 cyan=''
 green=''
+yellow=''
+red=''
+magenta=''
 reset=''
 verbose='no'
 # Both questions have a flag equivalent, and both resolve to what a bare Enter
@@ -84,7 +87,7 @@ fi
 readonly SCRIPT_DIR="$script_directory"
 
 die() {
-  printf 'ERROR: %s\n' "$*" >&2
+  printf '%sERROR:%s %s\n' "${bold}${red}" "$reset" "$*" >&2
   exit 1
 }
 
@@ -93,7 +96,7 @@ note() {
 }
 
 step() {
-  printf '\n==> %s\n' "$*" >&2
+  printf '\n%s==>%s %s%s%s\n' "${bold}${cyan}" "$reset" "$bold" "$*" "$reset" >&2
 }
 
 # Compiler command lines and install manifests are the loudest thing an operator
@@ -113,14 +116,14 @@ run_quietly() {
   printf '  %s ... ' "$description" >&2
   "$@" > "$log" 2>&1 || status=$?
   if ((status != 0)); then
-    printf 'failed\n' >&2
+    printf '%sfailed%s\n' "${bold}${red}" "$reset" >&2
     note ''
-    note "$description failed. Full output:"
+    note "${red}${bold}$description failed. Full output:${reset}"
     cat "$log" >&2 || true
     rm -f -- "$log"
     return "$status"
   fi
-  printf 'done\n' >&2
+  printf '%sdone%s\n' "$green" "$reset" >&2
   rm -f -- "$log"
 }
 
@@ -135,7 +138,7 @@ Options:
                          the pinned one (a symlink such as a Homebrew shim is
                          resolved to its real target)
   --admin-name NAME      First administrator label (default: local-bootstrap)
-  --expires-in-days N    First administrator lifetime, 1-365 (default: 30)
+  --expires-in-days N    First administrator lifetime, 1-1461 (default: 30)
   --tag vMAJOR.MINOR.PATCH
                          Release to install (default: the pinned release)
   --source DIR           Install from an existing reviewed source tree
@@ -202,7 +205,7 @@ admin_name_valid() {
 
 expires_days_valid() {
   local days="$1"
-  [[ "$days" =~ ^[1-9][0-9]{0,2}$ ]] && ((10#$days <= 365))
+  [[ "$days" =~ ^[1-9][0-9]{0,3}$ ]] && ((10#$days <= 1461))
 }
 
 sha256_valid() {
@@ -371,7 +374,7 @@ validate_arguments() {
   admin_name_valid "$admin_name" ||
     die '--admin-name must contain 1-80 printable ASCII bytes without surrounding spaces'
   expires_days_valid "$expires_days" ||
-    die '--expires-in-days must be in the range 1-365'
+    die '--expires-in-days must be in the range 1-1461'
   [[ -z "$release_tag" ]] || release_tag_valid "$release_tag" ||
     die '--tag must have the form vMAJOR.MINOR.PATCH'
   [[ -z "$archive_sha256" ]] || sha256_valid "$archive_sha256" ||
@@ -400,7 +403,11 @@ validate_arguments() {
   # with the one credential it produces already gone.
   if [[ -n "$key_file" ]]; then
     key_file_valid "$key_file" || die "--key-file must be an absolute path to a file, not: $key_file"
-    [[ ! -e "$key_file" ]] || die "--key-file already exists, and will not be overwritten: $key_file"
+    # -e is false for a symlink whose target does not exist, so a dangling one
+    # would pass the overwrite check and then be followed by the redirection,
+    # putting the credential wherever it points. Both are refused by name.
+    [[ ! -e "$key_file" && ! -L "$key_file" ]] ||
+      die "--key-file already exists, and will not be overwritten: $key_file"
     [[ -d "${key_file%/*}" ]] || die "--key-file directory does not exist: ${key_file%/*}"
     [[ -w "${key_file%/*}" ]] || die "--key-file directory is not writable: ${key_file%/*}"
   fi
@@ -457,7 +464,9 @@ ask_line() {
     printf '\n'
     return 0
   }
-  printf '  %s' "$1" >&2
+  # The prompt is the only line on screen waiting for a person, so it is the only
+  # one printed in the question colour.
+  printf '  %s%s%s' "${bold}${yellow}" "$1" "$reset" >&2
   IFS= read -r answer < /dev/tty || answer=''
   printf '%s\n' "$answer"
 }
@@ -889,8 +898,13 @@ write_service_config() {
 
 # Colour only where it is wanted: NO_COLOR and a dumb TERM are honoured, and so
 # is a redirect, because a log file full of escape sequences helps nobody.
+# Colour is decoration everywhere except on the two things an operator has to act
+# on - the question about reading their Messages, and the Full Disk Access steps
+# behind it - which is why those get the strongest colour in the palette. An
+# unattended run has no terminal on stderr, so every one of these is the empty
+# string and the output is byte-identical to what it was before.
 setup_colour() {
-  bold='' dim='' cyan='' green='' reset=''
+  bold='' dim='' cyan='' green='' yellow='' red='' magenta='' reset=''
   [[ -t 2 ]] || return 0
   [[ -z "${NO_COLOR:-}" ]] || return 0
   [[ "${TERM:-dumb}" != dumb ]] || return 0
@@ -898,6 +912,9 @@ setup_colour() {
   dim=$'\033[2m'
   cyan=$'\033[36m'
   green=$'\033[32m'
+  yellow=$'\033[33m'
+  red=$'\033[31m'
+  magenta=$'\033[35m'
   reset=$'\033[0m'
 }
 
@@ -992,22 +1009,23 @@ server_binary_path() {
 print_full_disk_access_instructions() {
   local checkpoint="${1:-no}"
   note ''
-  heading 'FULL DISK ACCESS'
-  note '  The Messages database at ~/Library/Messages/chat.db requires Full Disk'
-  note '  Access permission.'
+  note "  ${bold}${yellow}FULL DISK ACCESS - THE ONE STEP YOU HAVE TO DO BY HAND${reset}"
   note ''
-  note '  To grant it:'
-  note '  1. Open System Settings > Privacy & Security > Full Disk Access'
-  note '  2. Add this exact binary, which is the one that reads the database:'
-  note "       ${cyan}$(server_binary_path)${reset}"
-  note '  3. Turn its switch on'
-  note '  4. Toggle a stale entry off and on after the binary is rebuilt, since'
+  note "  The Messages database at ${cyan}~/Library/Messages/chat.db${reset} requires"
+  note "  ${bold}${yellow}Full Disk Access${reset} permission."
+  note ''
+  note "  ${bold}To grant it:${reset}"
+  note "  ${bold}${yellow}1.${reset} Open ${bold}System Settings > Privacy & Security > Full Disk Access${reset}"
+  note "  ${bold}${yellow}2.${reset} Add this exact binary, which is the one that reads the database:"
+  note "       ${bold}${cyan}$(server_binary_path)${reset}"
+  note "  ${bold}${yellow}3.${reset} Turn its switch ${green}on${reset}"
+  note "  ${bold}${yellow}4.${reset} Toggle a stale entry off and on after the binary is rebuilt, since"
   note '     the grant follows its code signature'
-  note '  5. Restart the service, then try again:'
+  note "  ${bold}${yellow}5.${reset} Restart the service, then try again:"
   note "       ${dim}imessage-proxy server-restart --confirm 'RESTART IMESSAGE PROXY SERVER'${reset}"
   note ''
-  note '  macOS never prompts for Full Disk Access, so nothing will ask you for'
-  note '  this later. It is the one step that has to be done by hand.'
+  note "  ${yellow}macOS never prompts for Full Disk Access, so nothing will ask you for${reset}"
+  note "  ${yellow}this later.${reset}"
   # A checkpoint rather than a prompt: there is nothing to answer, and no probe
   # this script could run would prove the grant, since a read from here would
   # only ever prove the terminal's own permissions. It pauses solely to keep the
@@ -1024,10 +1042,16 @@ print_full_disk_access_instructions() {
 # has watched sending work and can weigh the broad grant against what it buys.
 offer_messages_read() {
   local answer asked='no'
-  note 'Reading the Messages database lists your chats, returns message history,'
-  note 'answers the statistics routes and finds scheduled messages. Sending never'
-  note 'needs it, on either transport.'
-  note 'It needs Full Disk Access, which macOS never asks for.'
+  note ''
+  note "  ${bold}${magenta}READING YOUR MESSAGES${reset}"
+  note ''
+  note "  Reading the Messages database lists your ${cyan}chats${reset}, returns"
+  note "  ${cyan}message history${reset}, answers the ${cyan}statistics${reset} routes and finds"
+  note "  ${cyan}scheduled messages${reset}."
+  note "  ${green}Sending never needs it${reset}, on either transport."
+  note "  It needs ${bold}${yellow}Full Disk Access${reset}, which ${yellow}macOS never asks for${reset} -"
+  note "  ${yellow}you grant it by hand, or reading stays off.${reset}"
+  note ''
   if [[ "$messages_read" == ask ]]; then
     asked='yes'
     answer="$(ask_line 'Read your Messages as well? Type y, or Enter to skip: ')"
@@ -1041,7 +1065,7 @@ offer_messages_read() {
     return 0
   fi
   note ''
-  note 'Reading stays off. Sending is unaffected on both transports.'
+  note "  ${green}Reading stays off.${reset} Sending is unaffected on both transports."
 }
 
 # The service reads the switch once, when it starts, from the environment its
@@ -1260,8 +1284,8 @@ self_test() {
       die "self-test accepted an invalid administrator name: ${candidate:-<empty>}"
   done
   expires_days_valid 1 || die 'self-test rejected a one-day credential'
-  expires_days_valid 365 || die 'self-test rejected a 365-day credential'
-  for candidate in '' 0 366 -1 30d 007; do
+  expires_days_valid 1461 || die 'self-test rejected a four-year credential'
+  for candidate in '' 0 1462 -1 30d 007 10000; do
     ! expires_days_valid "$candidate" ||
       die "self-test accepted an invalid expiry: ${candidate:-<empty>}"
   done
@@ -1342,6 +1366,7 @@ main() {
   make_temporary_root
 
   local cli config_path imsg_binary source_is_temporary source_tree
+  local -a bootstrap_terminal
   setup_colour
   note 'iMessage Proxy installer'
   note 'Everything stays on this Mac.'
@@ -1371,11 +1396,19 @@ main() {
   export IMESSAGE_PROXY_CONFIG="$config_path"
 
   step 'Starting the service'
+  # Waived only when this run has nothing left to ask. A run that still has a
+  # question keeps the gate, so `bootstrap` refuses in a context that could not
+  # have answered one either.
+  bootstrap_terminal=()
+  if [[ "$send_test" != ask && "$messages_read" != ask ]]; then
+    bootstrap_terminal=(--unattended)
+  fi
   "$cli" bootstrap \
     --config "$config_path" \
     --admin-name "$admin_name" \
     --expires-in-days "$expires_days" \
-    --without-admin-key
+    --without-admin-key \
+    "${bootstrap_terminal[@]+"${bootstrap_terminal[@]}"}"
   ensure_path_entry
 
   step 'Proving that sending works'
@@ -1397,11 +1430,22 @@ main() {
   # created empty and private first, so it never exists world-readable, not even
   # for the moment between creation and the write.
   if [[ -n "$key_file" ]]; then
+    # noclobber makes the creation O_EXCL, so it fails rather than following a
+    # symlink or truncating a file that appeared since validation - the window
+    # between that check and here is the whole install. umask 077 applies to the
+    # creation, which is this one; the redirection below only writes to the file
+    # that already exists, so the mode stands.
     (
       umask 077
+      set -o noclobber
       : > "$key_file"
-    ) || die "could not create the key file: $key_file"
-    "$cli" api-key bootstrap-admin --name "$admin_name" --expires-in-days "$expires_days" > "$key_file"
+    ) || die "could not create the key file, or something already exists at: $key_file"
+    if ! "$cli" api-key bootstrap-admin --name "$admin_name" --expires-in-days "$expires_days" > "$key_file"; then
+      # An empty file at the path the summary just named would read as a key
+      # that failed to arrive, and would block the retry by existing.
+      rm -f -- "$key_file"
+      die 'the administrator key could not be issued'
+    fi
     return 0
   fi
   "$cli" api-key bootstrap-admin --name "$admin_name" --expires-in-days "$expires_days"

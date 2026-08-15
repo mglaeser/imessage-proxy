@@ -439,7 +439,8 @@ curl --fail-with-body \
 ### Create
 
 `POST /api/keys` accepts a display name, one or more unique scopes, an expiry of
-`1-365` days, and an optional `sender_identifier`. The default expiry is 90 days.
+`1-1461` days (four years), and an optional `sender_identifier`. The default
+expiry is 90 days.
 Leading and trailing whitespace is removed from the name; the normalized value
 must encode to `1-80` UTF-8 bytes and contain no Unicode control characters.
 Storage is capped at 1000 keys. Before enforcing that cap, creation deletes at

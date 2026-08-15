@@ -74,10 +74,10 @@ expect_failure '--key-file requires a path' run_installer --key-file
 # Argument validation must fail before the installer touches the host.
 expect_failure '--admin-name must contain 1-80 printable ASCII bytes' \
   run_installer --admin-name ' leading'
-expect_failure '--expires-in-days must be in the range 1-365' \
+expect_failure '--expires-in-days must be in the range 1-1461' \
   run_installer --expires-in-days 0
-expect_failure '--expires-in-days must be in the range 1-365' \
-  run_installer --expires-in-days 366
+expect_failure '--expires-in-days must be in the range 1-1461' \
+  run_installer --expires-in-days 1462
 expect_failure '--tag must have the form vMAJOR.MINOR.PATCH' \
   run_installer --tag latest
 expect_failure '--sha256 must be a 64-character lowercase SHA-256 digest' \

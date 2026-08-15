@@ -3272,7 +3272,7 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
                                                                                           : (daysPresent ? nil : @90);
             BOOL validDays = daysValue != nil && CFGetTypeID((__bridge CFTypeRef)daysValue) != CFBooleanGetTypeID() &&
                              daysValue.doubleValue == daysValue.unsignedIntegerValue &&
-                             daysValue.unsignedIntegerValue >= 1 && daysValue.unsignedIntegerValue <= 365;
+                             daysValue.unsignedIntegerValue >= 1 && daysValue.unsignedIntegerValue <= 1461;
             NSSet *validScopes =
                 [NSSet setWithArray:@[IMPAPIKeyScopeMessagesRead, IMPAPIKeyScopeMessagesSend, IMPAPIKeyScopeAdmin]];
             NSSet *scopeSet = scopes == nil ? nil : [NSSet setWithArray:scopes];

@@ -122,6 +122,9 @@ static const char *const kIMPAuditIndexesDDL =
 static const NSUInteger kIMPRawKeyLength = 32;
 static const NSUInteger kIMPRequestHashLength = 32;
 static const NSUInteger kIMPMaximumNameBytes = 80;
+// Four years, counted in days including a leap day, so "four years from today"
+// always validates rather than falling one short in three years out of four.
+static const NSUInteger kIMPMaximumExpiryDays = 1461;
 static const NSUInteger kIMPMaximumIdempotencyKeyBytes = 128;
 static const NSUInteger kIMPMaximumStoredResponseBytes = 1024 * 1024;
 static const NSUInteger kIMPMaximumAPIKeys = 1000;
@@ -508,7 +511,7 @@ static BOOL IMPValidateName(NSString *name, NSString **normalizedName, NSError *
 
 static BOOL IMPValidateBootstrapArguments(NSString *name, NSUInteger expiresDays, NSString **normalizedName,
                                           NSError **error) {
-    if (expiresDays < 1 || expiresDays > 365) {
+    if (expiresDays < 1 || expiresDays > kIMPMaximumExpiryDays) {
         IMPSetError(error, IMPAPIKeyStoreErrorInvalidArgument, @"The API key expiry is invalid.");
         return NO;
     }

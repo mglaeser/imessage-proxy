@@ -1450,8 +1450,8 @@ async function handleCreate(event) {
     setFormError(elements.createError, "Select at least one scope.");
     return;
   }
-  if (!Number.isInteger(expiresInDays) || expiresInDays < 1 || expiresInDays > 365) {
-    setFormError(elements.createError, "Expiry must be between 1 and 365 days.");
+  if (!Number.isInteger(expiresInDays) || expiresInDays < 1 || expiresInDays > 1461) {
+    setFormError(elements.createError, "Expiry must be between 1 and 1461 days.");
     elements.createForm.elements.expires_in_days.focus();
     return;
   }
