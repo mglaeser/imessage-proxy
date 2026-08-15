@@ -386,8 +386,14 @@ require_supported_host() {
     die 'the Xcode Command Line Tools are incomplete; run xcode-select --install'
 }
 
+# A terminal exists is not the same as somebody is watching. A CI runner keeps a
+# controlling terminal while its output goes to a log, so /dev/tty opens happily
+# and a read on it blocks until the job is killed - which is exactly what
+# happened: the macOS job hit its 25 minute timeout on a question nobody could
+# see. Progress goes to stderr, so a stderr that is a terminal is the signal that
+# somebody is there to answer.
 terminal_available() {
-  [[ -r /dev/tty && -w /dev/tty ]]
+  [[ -t 2 ]] && [[ -r /dev/tty && -w /dev/tty ]]
 }
 
 # Only a run that still has something to ask needs a terminal. Both questions
@@ -405,6 +411,12 @@ require_terminal() {
 # treats as the skip.
 ask_line() {
   local answer=''
+  # Checked again here rather than trusted from the caller: a question that
+  # cannot be seen must return the skip, never wait for it.
+  terminal_available || {
+    printf '\n'
+    return 0
+  }
   printf '  %s' "$1" >&2
   IFS= read -r answer < /dev/tty || answer=''
   printf '%s\n' "$answer"
