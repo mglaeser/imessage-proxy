@@ -29,6 +29,15 @@ and operational model described below.
   listener is plain HTTP — unencrypted, with the bearer key the only control —
   which `docs/security.md` now says where it used to promise loopback.
 
+  A console reached at anything other than loopback is not a secure context, so
+  the browser withholds `crypto.randomUUID` there. The console now builds its
+  idempotency key from `crypto.getRandomValues`, which is not gated and is the
+  same generator, rather than reporting that the browser "cannot generate a
+  secure idempotency key" and refusing to send — which is what an operator
+  opening the console from another machine on their network actually hit. Copy
+  key still falls back to selecting the key, because the clipboard API is gated
+  too and there is no ungated equivalent.
+
   Exposing the port exposes the API, not the console. The browser origins the
   server accepts are derived from what it bound: the loopback origin, the
   `localhost` spelling, and a specific bound address. `0.0.0.0` adds none,
