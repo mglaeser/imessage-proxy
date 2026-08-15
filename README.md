@@ -28,9 +28,22 @@ On the Mac that is signed in to Messages:
 curl -fsSL https://raw.githubusercontent.com/mglaeser/imessage-proxy/main/scripts/install.sh | bash
 ```
 
-It asks nothing. macOS prompts once for Full Disk Access — that is the only
-manual step — and the installer prints your administrator key and the console
-URL when it finishes.
+It asks two questions — whether to send a test message, and whether to read your
+Messages database as well — then prints your administrator key and the console
+URL. Sending never needs Full Disk Access; only reading does, and the installer
+prints those steps if you say yes.
+
+Answer both on the command line and nothing is asked, which is what an
+unattended install needs. `--key-file` puts the key somewhere private instead of
+on stdout:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mglaeser/imessage-proxy/main/scripts/install.sh | bash -s -- \
+  --no-send-test --messages-read --key-file "$HOME/imessage-proxy-admin.key"
+```
+
+Full Disk Access still has to be granted by hand afterwards: macOS has no way to
+grant it from a script.
 
 ## Send your first message
 
@@ -60,8 +73,9 @@ It went by iMessage because that is the default; add `"service":"sms"` to send
 it over the carrier instead, and nothing ever falls back from one to the other.
 And it arrived tagged with the sending key's identifier, so whoever receives it
 can tell which automation wrote to them: a key identified as `aut` ends its
-messages with `🔖aut` over iMessage and `^aut` over SMS. Only an administrator
-key can send without that tag, one message at a time. See
+messages with `🔖aut` over iMessage and `^aut` over SMS. The administrator key
+the installer prints is `adm`, so that first message ends with `🔖adm`. Only an
+administrator key can send without the tag, one message at a time. See
 [the sender identifier](docs/api.md#the-sender-identifier).
 
 ## Console and API

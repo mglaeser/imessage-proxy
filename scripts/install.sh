@@ -53,6 +53,7 @@ archive_sha256=''
 expires_days='30'
 imsg_path=''
 install_prefix="${HOME:-}/.local"
+key_file=''
 release_tag=''
 run_tests='auto'
 service_port='8765'
@@ -150,12 +151,23 @@ Options:
   --messages-read        Read the Messages database, and print the Full Disk
                          Access instructions, without asking
   --no-messages-read     Install a send-only service without asking
+  --key-file PATH        Write the administrator key to this absolute path,
+                         created private to you, instead of printing it
   --verbose              Show the full output of each build and install step
   --self-test            Validate this installer's own logic and exit
   -h, --help             Show this help and exit
 
 Without --send-test/--no-send-test and --messages-read/--no-messages-read the
 installer asks for both, so an unattended run needs them on the command line.
+Adding --key-file leaves an unattended run with nothing on stdout at all, which
+is the whole shape of one:
+
+  curl -fsSL .../install.sh | bash -s -- --no-send-test --messages-read \
+    --key-file "$HOME/imessage-proxy-admin.key"
+
+Full Disk Access still has to be granted by hand afterwards. macOS has no way to
+grant it from a script, and --messages-read prints the steps rather than pausing
+on them when the questions were answered here.
 
 The service listens on 127.0.0.1 only. Put your own TLS proxy in front of it if
 you want to publish it.
@@ -235,6 +247,18 @@ prefix_is_safe() {
       return 1
       ;;
   esac
+}
+
+# An absolute path that names a file rather than a directory. Nothing here is
+# re-evaluated by a later shell, so unlike the prefix it needs no quoting rules -
+# only that it is somewhere this installer can put a credential and find it
+# again.
+key_file_valid() {
+  local value="$1"
+  [[ "$value" == /* ]] || return 1
+  [[ "$value" != */ ]] || return 1
+  [[ "$value" != *$'\n'* ]] || return 1
+  [[ "${value##*/}" != '.' && "${value##*/}" != '..' ]]
 }
 
 node_version_supported() {
@@ -321,6 +345,11 @@ parse_arguments() {
         messages_read='disabled'
         shift
         ;;
+      --key-file)
+        [[ $# -ge 2 ]] || die '--key-file requires a path'
+        key_file="$2"
+        shift 2
+        ;;
       --verbose)
         verbose='yes'
         shift
@@ -364,6 +393,17 @@ validate_arguments() {
     die 'use either --source or --archive, not both'
   [[ "$send_test" != yes ]] || send_target_valid "$send_test_target" ||
     die '--send-test must be +digits (7-15, no leading zero) or one address containing a single @'
+  # Absolute, because the published shape of this installer is `curl ... | bash`
+  # and a relative path would land wherever that shell happened to be. The
+  # directory is checked here, before anything is built, so a run that cannot
+  # deliver the key fails in the first second rather than after the install and
+  # with the one credential it produces already gone.
+  if [[ -n "$key_file" ]]; then
+    key_file_valid "$key_file" || die "--key-file must be an absolute path to a file, not: $key_file"
+    [[ ! -e "$key_file" ]] || die "--key-file already exists, and will not be overwritten: $key_file"
+    [[ -d "${key_file%/*}" ]] || die "--key-file directory does not exist: ${key_file%/*}"
+    [[ -w "${key_file%/*}" ]] || die "--key-file directory is not writable: ${key_file%/*}"
+  fi
 }
 
 require_supported_host() {
@@ -1064,7 +1104,15 @@ print_next_steps() {
   print_path_result
   note ''
   heading 'YOUR ADMINISTRATOR KEY'
-  note "  ${dim}Shown once, on the line below. Store it in a password manager.${reset}"
+  if [[ -n "$key_file" ]]; then
+    note "  ${dim}Written to ${key_file}, readable only by you.${reset}"
+    note "  ${dim}It is not printed here. Its sender identifier is adm, so every${reset}"
+    note "  ${dim}message it sends ends with 🔖adm, or ^adm over SMS.${reset}"
+  else
+    note "  ${dim}Shown once, on the line below. Store it in a password manager.${reset}"
+    note "  ${dim}Its sender identifier is adm, so every message it sends ends${reset}"
+    note "  ${dim}with 🔖adm, or ^adm over SMS.${reset}"
+  fi
   note ''
 }
 
@@ -1253,6 +1301,13 @@ self_test() {
     ! send_target_valid "$candidate" ||
       die "self-test accepted an invalid send target: ${candidate:-<empty>}"
   done
+  for candidate in /tmp/admin.key "$HOME/keys/admin key.txt" /a; do
+    key_file_valid "$candidate" || die "self-test rejected a valid key file: $candidate"
+  done
+  for candidate in '' relative/path ./admin.key /trailing/slash/ /dots/.. /dots/. "$(printf '/new\nline')"; do
+    ! key_file_valid "$candidate" ||
+      die "self-test accepted an invalid key file: ${candidate:-<empty>}"
+  done
   config_value_valid /opt/homebrew/bin/caddy || die 'self-test rejected a valid config value'
   for candidate in '' "$(printf 'value\nsecond=1')" "$(printf 'value\r')" 'value # comment'; do
     ! config_value_valid "$candidate" ||
@@ -1331,10 +1386,24 @@ main() {
   [[ "$messages_read" == enabled ]] || apply_send_only "$cli"
 
   print_next_steps "$service_port" "$("$cli" version)"
-  # Deliberately the last command, uncaptured and unredirected. The key is the
-  # only thing this script ever writes to stdout, so a pipeline can take it and
-  # nothing here can leak it into a log or a trace - and because it runs last it
-  # lands directly under the heading printed above.
+  # Deliberately the last command, and never captured. The key is the only thing
+  # this script writes to stdout, so a pipeline can take it and nothing here can
+  # leak it into a log or a trace - and because it runs last it lands directly
+  # under the heading printed above.
+  #
+  # --key-file redirects that same stdout into a file instead. Redirected, not
+  # captured: the key never becomes a shell variable, so it cannot reach an
+  # error trace or the environment of anything this script runs. The file is
+  # created empty and private first, so it never exists world-readable, not even
+  # for the moment between creation and the write.
+  if [[ -n "$key_file" ]]; then
+    (
+      umask 077
+      : > "$key_file"
+    ) || die "could not create the key file: $key_file"
+    "$cli" api-key bootstrap-admin --name "$admin_name" --expires-in-days "$expires_days" > "$key_file"
+    return 0
+  fi
   "$cli" api-key bootstrap-admin --name "$admin_name" --expires-in-days "$expires_days"
 }
 

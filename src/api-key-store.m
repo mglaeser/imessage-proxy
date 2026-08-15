@@ -32,6 +32,11 @@ static const int kIMPSchemaVersion = 7;
 static const int kIMPMigratableSchemaVersion = 6;
 static const NSUInteger kIMPMinimumSenderIdentifierLength = 2;
 static const NSUInteger kIMPMaximumSenderIdentifierLength = 8;
+// The first administrator's identifier. Its messages are the first any recipient
+// of a new installation sees, and this says what wrote them; the sequential
+// assignment would have said "aa". Not reserved: it is simply taken first, and
+// any key may be given it once this one is gone.
+static NSString *const kIMPBootstrapSenderIdentifier = @"adm";
 // SHA-256 of the ordered non-internal sqlite_master object signature; update only
 // with a schema bump. tests/test-schema-fingerprint.mjs recomputes this from the
 // DDL in this file and fails if the two disagree, because a stale value here
@@ -211,6 +216,7 @@ static const NSTimeInterval kIMPLastUsedWriteInterval = 5.0 * 60.0;
 - (nullable NSString *)nextSenderIdentifier:(NSError **)error;
 - (BOOL)migrateVersion6Keys:(NSError **)error;
 - (BOOL)refuseTakenSenderIdentifier:(NSString *)identifier error:(NSError **)error;
+- (BOOL)senderIdentifierTaken:(NSString *)identifier result:(BOOL *)taken error:(NSError **)error;
 - (nullable IMPAPIKeyRecord *)recordLockedForUUID:(NSString *)uuid error:(NSError **)error;
 @end
 
@@ -1393,15 +1399,26 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
         ok = [self ensureKeyCapacityLockedAtDate:now pruneIfNeeded:YES error:error];
     }
     if (ok) {
-        NSString *bootstrapIdentifier = [self nextSenderIdentifier:error];
-        creation = bootstrapIdentifier == nil ? nil
-                                              : [self createKeyLockedNamed:normalizedName
-                                                                    scopes:@[IMPAPIKeyScopeAdmin]
-                                                                 expiresAt:expiresAt
-                                                          senderIdentifier:bootstrapIdentifier
-                                                        identifierAssigned:YES
-                                                                     error:error];
-        ok = creation != nil;
+        // "adm" unless a revoked administrator still holds it - the column is
+        // unique across every key on record, not only the live ones - in which
+        // case the sequential identifier is used rather than failing a bootstrap
+        // over a name. Recorded as assigned either way: nobody chose it.
+        NSString *bootstrapIdentifier = kIMPBootstrapSenderIdentifier;
+        BOOL taken = NO;
+        ok = [self senderIdentifierTaken:bootstrapIdentifier result:&taken error:error];
+        if (ok && taken) {
+            bootstrapIdentifier = [self nextSenderIdentifier:error];
+            ok = bootstrapIdentifier != nil;
+        }
+        if (ok) {
+            creation = [self createKeyLockedNamed:normalizedName
+                                           scopes:@[IMPAPIKeyScopeAdmin]
+                                        expiresAt:expiresAt
+                                 senderIdentifier:bootstrapIdentifier
+                               identifierAssigned:YES
+                                            error:error];
+            ok = creation != nil;
+        }
     }
     if (ok) {
         record = creation[IMPAPIKeyCreationRecordKey];
@@ -1472,7 +1489,7 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
 // Every key on record holds its identifier, revoked and expired ones included:
 // a marker a recipient has already seen must not come back meaning a different
 // key, so the row is what reserves it, not the row's state.
-- (BOOL)refuseTakenSenderIdentifier:(NSString *)identifier error:(NSError **)error {
+- (BOOL)senderIdentifierTaken:(NSString *)identifier result:(BOOL *)taken error:(NSError **)error {
     sqlite3_stmt *statement = NULL;
     if (!IMPPrepare(_database, "SELECT 1 FROM api_keys WHERE sender_identifier=? LIMIT 1", &statement, error)) {
         return NO;
@@ -1483,16 +1500,25 @@ static IMPAPIKeyRecord *_Nullable IMPRecordFromStatement(sqlite3_stmt *statement
     }
     int result = sqlite3_step(statement);
     int finalResult = sqlite3_finalize(statement);
-    if (result == SQLITE_ROW) {
-        IMPSetError(error, IMPAPIKeyStoreErrorSenderIdentifierTaken,
-                    @"That sender identifier already belongs to another API key.");
-        return NO;
-    }
-    if (result != SQLITE_DONE) {
+    if (result != SQLITE_ROW && result != SQLITE_DONE) {
         return IMPSetSQLiteError(error, result);
     }
     if (finalResult != SQLITE_OK) {
         return IMPSetSQLiteError(error, finalResult);
+    }
+    *taken = result == SQLITE_ROW;
+    return YES;
+}
+
+- (BOOL)refuseTakenSenderIdentifier:(NSString *)identifier error:(NSError **)error {
+    BOOL taken = NO;
+    if (![self senderIdentifierTaken:identifier result:&taken error:error]) {
+        return NO;
+    }
+    if (taken) {
+        IMPSetError(error, IMPAPIKeyStoreErrorSenderIdentifierTaken,
+                    @"That sender identifier already belongs to another API key.");
+        return NO;
     }
     return YES;
 }

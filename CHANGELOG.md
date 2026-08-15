@@ -7,6 +7,20 @@ and operational model described below.
 
 ### Added
 
+- `install.sh --key-file PATH` writes the administrator key to a file instead of
+  stdout. With the two questions already answerable by flag, this is the last
+  thing that made an unattended run interactive: the key is redirected, never
+  captured, into a file created private to you before anything is written to it.
+  The run refuses at the outset if the path is not absolute, if its directory
+  does not exist or is not writable, or if the file is already there — so an
+  install that cannot deliver the key fails before it generates one.
+- The first administrator key is identified as `adm`, so the first messages an
+  installation sends end with `🔖adm` rather than the sequential `🔖aa`. Not
+  reserved: a bootstrap that finds `adm` held by a revoked administrator takes
+  the sequential identifier instead, and once the key is gone any key may be
+  given it. Existing installations are unaffected; keys keep the identifier they
+  were issued with.
+
 - `make test-bash-compat`, a portable suite that runs the shell sources under
   every bash compatibility level from 3.2 to 5.2 and asserts the validators give
   identical answers. macOS ships bash 3.2 as `/bin/bash` and every script starts
@@ -43,6 +57,11 @@ and operational model described below.
 
 ### Fixed
 
+- The README and install guide describe the installer that ships. The README
+  still said the installer "asks nothing" and that Full Disk Access was the only
+  manual step, which stopped being true when the test send and the Messages-read
+  choice became questions and the Full Disk Access checkpoint left bootstrap;
+  the install guide still listed that checkpoint in the bootstrap sequence.
 - An existing installation upgrades instead of refusing to start. The sender
   identifier arrived as schema 7 with no way forward from schema 6, so the store
   refused the database every operator already had: the server would not start,
