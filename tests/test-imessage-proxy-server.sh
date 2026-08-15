@@ -1467,9 +1467,22 @@ fi
 argv_contains '--no-sms-fallback'
 # Every send carries the sending key's identifier: a message that reached imsg
 # without it would be unattributable to its recipient, which is the whole point.
-# bash renders the marker as raw UTF-8 or as an escape depending on the build,
-# so both spellings count and nothing else does.
-if ! LC_ALL=C grep -Eq -- "--text .*($(printf '\U0001F516')|\\\\U0001[fF]516)[a-z]{2,8}" "$fake_imsg_log"; then
+#
+# The marker has three spellings in this log and all three are the same bytes.
+# The fixture writes argv with printf %q, which leaves the emoji raw in a UTF-8
+# locale and escapes it octal - $'\360\237\224\226' - in the C locale the macOS
+# runner actually runs under; some builds spell it \U0001F516. The octal one is
+# what CI produced, and it matched neither of the two spellings this once
+# accepted, so a send that plainly carried its marker was reported as one that
+# had gone out unattributable.
+#
+# The pattern is built rather than written inline for the same reason: under the
+# C locale `printf '\U0001F516'` does not produce the emoji at all, it produces
+# those eleven characters, so the old pattern could not have matched a raw
+# marker there either.
+marker_raw="$(printf '\360\237\224\226')"
+marker_pattern="(${marker_raw}|\\\\360\\\\237\\\\224\\\\226|\\\\U0001[fF]516)"
+if ! LC_ALL=C grep -Eq -- "--text .*${marker_pattern}[a-z]{2,8}" "$fake_imsg_log"; then
   printf 'ERROR: a send reached imsg without the sender identifier\n' >&2
   grep -F -- '--text' "$fake_imsg_log" | head -3 >&2
   exit 1
