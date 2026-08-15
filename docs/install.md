@@ -12,9 +12,9 @@ hand, and publishing the service behind your own proxy.
 3. Builds the native server, installs the CLI to `~/.local`, and ad-hoc signs
    the binary.
 4. Installs `imsg` 0.13.4, verified against a recorded SHA-256.
-5. Writes `~/.config/imessage-proxy/service.env` with three keys.
-6. Pauses once for Full Disk Access, then starts the LaunchAgent and issues your
-   first administrator key.
+5. Writes `~/.config/imessage-proxy/service.env`.
+6. Proves sending works, asks whether to read Messages as well, then starts the
+   LaunchAgent and issues your first administrator key.
 
 Each build step prints one line. Pass `--verbose` to see the full output, which
 is also printed automatically when a step fails.
@@ -22,6 +22,30 @@ is also printed automatically when a step fails.
 Useful options: `--port N` (default 8765), `--prefix DIR`, `--imsg PATH` to use
 your own reviewed executable, `--source DIR` or `--archive FILE` to install from
 a tree you already reviewed, `--no-tests`, and `--self-test`.
+
+### Unattended
+
+The installer asks two questions — the test send and Messages reading — and
+answering both on the command line is what makes a run unattended. `--key-file`
+takes the last thing it would otherwise put on stdout:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mglaeser/imessage-proxy/main/scripts/install.sh | bash -s -- \
+  --no-send-test --messages-read --key-file "$HOME/imessage-proxy-admin.key"
+```
+
+The file is created private to you before the key is written to it, and the run
+refuses at the outset if it already exists, if its directory does not, or if the
+path is not absolute — so a run that cannot deliver the key fails before it
+generates one rather than after.
+
+Full Disk Access is the one step that cannot be automated. macOS grants it only
+through System Settings or an MDM configuration profile; no flag and no script
+can do it, and no probe here could prove it either, since a read from the
+installer would only test the terminal's own permissions. `--messages-read`
+prints the steps and, because the questions were answered on the command line,
+does not pause on them. Until the grant is in place `/api/status` reports
+`messages-unavailable` and sending is unaffected.
 
 ## Install from a checkout
 
@@ -33,10 +57,15 @@ make install                    # into ~/.local
 imessage-proxy bootstrap --config ~/.config/imessage-proxy/service.env --admin-name first-admin
 ```
 
-`bootstrap` runs `doctor`, `prepare`, `build-host`, the Full Disk Access
-checkpoint, `check-host` and `server-install` in order, then issues the first
-key. Pass `--without-admin-key` to skip the credential, which is what the
+`bootstrap` runs `doctor`, `prepare`, `build-host`, `check-host` and
+`server-install` in order, then issues the first key. It does not ask for Full
+Disk Access: sending never needs it, and demanding it before the operator has
+been asked whether they want reading at all made a send-only install look
+broken. Pass `--without-admin-key` to skip the credential, which is what the
 installer does so it can print its summary before the key.
+
+The first key is identified as `adm`, so every message it sends ends with
+`🔖adm` over iMessage and `^adm` over SMS.
 
 ## Lifecycle
 

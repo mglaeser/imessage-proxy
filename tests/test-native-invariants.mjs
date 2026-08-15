@@ -188,3 +188,31 @@ test("the previous schema is carried forward rather than refused", () => {
   const refusal = store.match(/if \(!fresh && !current && !migratable\) \{[\s\S]{0,600}?\}/)[0];
   assert.ok(refusal.includes("uninstall.sh --purge"), "the refusal must name the recovery command");
 });
+
+test("the first administrator is identified as adm", () => {
+  // The bootstrap key's messages are the first any recipient of a new
+  // installation sees, so the marker says what wrote them rather than "aa".
+  assert.match(store, /kIMPBootstrapSenderIdentifier = @"adm"/,
+    "the bootstrap identifier must be adm");
+  const bootstrap = store.match(/- \(IMPAPIKeyRecord \*\)bootstrapAdminNamed:[\s\S]*?\n}/)?.[0];
+  assert.ok(bootstrap, "bootstrapAdminNamed: must be present");
+  assert.ok(bootstrap.includes("kIMPBootstrapSenderIdentifier"),
+    "the bootstrap must take the named identifier, not the next sequential one");
+  // A revoked administrator keeps its identifier, and the column is unique over
+  // every key on record - so the name can be taken, and a bootstrap must not
+  // fail over it.
+  assert.ok(bootstrap.includes("senderIdentifierTaken"),
+    "the bootstrap must check whether the identifier is already held");
+  assert.ok(bootstrap.includes("nextSenderIdentifier"),
+    "the bootstrap must fall back to a sequential identifier when adm is taken");
+  // Whatever it lands on, nobody chose it.
+  assert.match(bootstrap, /identifierAssigned:YES/,
+    "a bootstrap identifier is assigned by the service, not supplied");
+  // The value has to satisfy the column it is written to.
+  const ddl = store.match(/static const char \*const kIMPAPIKeysDDL =[\s\S]*?";/)?.[0] ?? "";
+  const bounds = ddl.match(/length\(sender_identifier\) BETWEEN (\d+) AND (\d+)/);
+  assert.ok(bounds, "the identifier length constraint must be present");
+  assert.ok("adm".length >= Number(bounds[1]) && "adm".length <= Number(bounds[2]),
+    "adm must satisfy the identifier length constraint");
+  assert.ok(/^[a-z]+$/.test("adm"), "adm must satisfy the roman-letters constraint");
+});

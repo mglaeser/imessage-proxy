@@ -465,6 +465,11 @@ identifier any key on record still holds is refused with `409`
 that has meant two different senders is worse than no marker. Choose another, or
 omit the field and take the assigned one.
 
+The first administrator, the one the installer issues, is `adm` rather than the
+first sequential pair. It is not reserved: once that key is gone the identifier
+can be taken like any other, and a bootstrap that finds it already held by a
+revoked administrator takes the sequential one instead.
+
 The response returns the new `imp_…` credential once. Store it immediately; it
 cannot be recovered from the database later. Its `Location` header identifies
 the metadata-only `GET /api/keys/{key_id}` resource:

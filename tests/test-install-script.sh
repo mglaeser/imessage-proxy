@@ -59,6 +59,7 @@ for expected in \
   '--no-send-test' \
   '--messages-read' \
   '--no-messages-read' \
+  '--key-file PATH' \
   '--self-test'; do
   assert_contains "$expected" "$help_text"
 done
@@ -68,6 +69,7 @@ expect_failure '--port requires a number' run_installer --port
 expect_failure '--sha256 requires a digest' run_installer --sha256
 expect_failure '--expires-in-days requires a value' run_installer --expires-in-days
 expect_failure '--send-test requires a number or email' run_installer --send-test
+expect_failure '--key-file requires a path' run_installer --key-file
 
 # Argument validation must fail before the installer touches the host.
 expect_failure '--admin-name must contain 1-80 printable ASCII bytes' \
@@ -92,6 +94,31 @@ expect_failure 'use either --source or --archive, not both' \
 for bad_target in nope 'chat_id:42' '+0155512345' 'a@b@c' 'has space@example.com'; do
   expect_failure '--send-test must be +digits' run_installer --send-test "$bad_target"
 done
+# The key file is the one credential the run produces, so every reason it could
+# not be delivered is found before anything is built rather than after the key
+# has already been generated and lost.
+expect_failure '--key-file must be an absolute path to a file' \
+  run_installer --key-file relative/admin.key
+expect_failure '--key-file must be an absolute path to a file' \
+  run_installer --key-file /trailing/slash/
+expect_failure '--key-file directory does not exist' \
+  run_installer --key-file /no-such-directory-for-tests/admin.key
+existing_key_file="$temporary/already-there.key"
+: > "$existing_key_file"
+expect_failure '--key-file already exists' run_installer --key-file "$existing_key_file"
+
+# The key must reach the file by redirection and never through a variable: a
+# captured credential can reach an error trace, a set -x log, or the environment
+# of anything the script runs afterwards.
+# shellcheck disable=SC2016  # the pattern intentionally matches literal shell syntax
+if ! grep -Fq 'bootstrap-admin --name "$admin_name" --expires-in-days "$expires_days" > "$key_file"' "$INSTALLER"; then
+  fail 'the installer must redirect the key into --key-file rather than capturing it'
+fi
+# Created private before it is written, so it is never briefly world-readable.
+if ! grep -Fq 'umask 077' "$INSTALLER"; then
+  fail 'the installer must create the key file with a private umask'
+fi
+
 # A run that answered both questions on the command line must get past validation
 # and fail only on the host check, which is what an unattended install does.
 #
