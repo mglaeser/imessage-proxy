@@ -234,7 +234,7 @@ class Handler(BaseHTTPRequestHandler):
             or any(not isinstance(scope, str) or scope not in valid_scopes for scope in scopes)
             or isinstance(expires_in_days, bool)
             or not isinstance(expires_in_days, int)
-            or not 1 <= expires_in_days <= 365
+            or not 1 <= expires_in_days <= 1461
         ):
             self.respond_problem(400, "Bad Request", "The API key request is invalid.")
             return

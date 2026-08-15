@@ -616,7 +616,7 @@ assert_runtime_root_rejected "$temporary/home/not-the-product"
     for invalid_request in \
       '--admin-name|   |--expires-in-days|30' \
       '--admin-name|administrator|--expires-in-days|0' \
-      '--admin-name|administrator|--expires-in-days|366'; do
+      '--admin-name|administrator|--expires-in-days|1462'; do
       IFS='|' read -r name_flag name expiry_flag expiry <<< "$invalid_request"
       expect_failure '--' bootstrap --config /private/service.env \
         "$name_flag" "$name" "$expiry_flag" "$expiry"

@@ -786,7 +786,7 @@ assert_problem 400
 status="$(request /api/keys \
   --header "Authorization: Bearer $admin_key" \
   --header 'Content-Type: application/json' \
-  --data '{"name":"too-long","scopes":["messages:read"],"expires_in_days":366}')"
+  --data '{"name":"expiry-too-far","scopes":["messages:read"],"expires_in_days":1462}')"
 assert_status 400 "$status"
 assert_problem 400
 for invalid_expiry in '"90"' null '[]'; do
