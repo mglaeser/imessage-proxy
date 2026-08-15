@@ -39,6 +39,33 @@ refuses at the outset if it already exists, if its directory does not, or if the
 path is not absolute — so a run that cannot deliver the key fails before it
 generates one rather than after.
 
+### Who can reach it
+
+The service answers on `127.0.0.1` only, unless you name another address:
+
+```bash
+curl -fsSL .../install.sh | bash -s -- --bind 192.168.1.50 --no-send-test --no-messages-read
+```
+
+The guided install asks the same question, and Enter keeps it on this Mac.
+
+An address other than loopback puts the API on that network in **plain HTTP** —
+unencrypted, with the API key the only thing protecting it. `0.0.0.0` is every
+interface, including networks this Mac joins later, so it needs `--expose-confirm`
+as well, or the word `EXPOSE` at the prompt. Put your own TLS proxy in front for
+anything beyond a network you trust.
+
+The address is checked before anything is built, the server verifies with
+`getsockname()` that it bound exactly that address, and `imessage-proxy
+server-status` asserts the same thing — a listener that widened beyond what the
+configuration asks for fails readiness rather than being reported healthy.
+
+Reaching the **console** in a browser means binding the address you browse to.
+The accepted origins are derived from what was bound — loopback, `localhost`, and
+a specific bound address — and `0.0.0.0` adds none, because guessing them would
+accept anything that resolves to this machine. API clients send no `Origin` and
+are unaffected.
+
 Full Disk Access is the one step that cannot be automated. macOS grants it only
 through System Settings or an MDM configuration profile; no flag and no script
 can do it, and no probe here could prove it either, since a read from the

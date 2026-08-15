@@ -15,8 +15,9 @@
 # question with a manual checkpoint behind it - and one an installation may
 # answer with no and still be complete.
 #
-# The service listens on 127.0.0.1 only. Publishing it is the operator's job,
-# with their own TLS proxy in front.
+# The service listens on 127.0.0.1 unless --bind names another address, and it
+# speaks plain HTTP either way. Publishing it is the operator's job, with their
+# own TLS proxy in front.
 
 set -Eeuo pipefail
 # Captured before the hardened PATH below replaces it. Deciding whether the
@@ -53,6 +54,8 @@ archive_sha256=''
 expires_days='30'
 imsg_path=''
 install_prefix="${HOME:-}/.local"
+bind_address='127.0.0.1'
+bind_confirmed='no'
 key_file=''
 release_tag=''
 run_tests='auto'
@@ -154,6 +157,11 @@ Options:
   --messages-read        Read the Messages database, and print the Full Disk
                          Access instructions, without asking
   --no-messages-read     Install a send-only service without asking
+  --bind ADDRESS         Serve on this IPv4 address instead of 127.0.0.1. Any
+                         value other than loopback exposes the API to that
+                         interface over plain HTTP; 0.0.0.0 is every interface
+                         and additionally needs --expose-confirm
+  --expose-confirm       Acknowledge that --bind 0.0.0.0 serves every interface
   --key-file PATH        Write the administrator key to this absolute path,
                          created private to you, instead of printing it
   --verbose              Show the full output of each build and install step
@@ -172,8 +180,8 @@ Full Disk Access still has to be granted by hand afterwards. macOS has no way to
 grant it from a script, and --messages-read prints the steps rather than pausing
 on them when the questions were answered here.
 
-The service listens on 127.0.0.1 only. Put your own TLS proxy in front of it if
-you want to publish it.
+The service listens on 127.0.0.1 unless --bind names another address, and speaks
+plain HTTP either way. Put your own TLS proxy in front of it to publish it.
 USAGE
 }
 
@@ -264,6 +272,20 @@ key_file_valid() {
   [[ "${value##*/}" != '.' && "${value##*/}" != '..' ]]
 }
 
+# A dotted quad and nothing else, matching bin/imessage-proxy's validator and the
+# inet_pton the server parses this with. A hostname would only produce a service
+# that refuses to start, so it is refused here where the message can say why.
+bind_address_valid() {
+  local octet value="$1"
+  [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  local -a octets
+  IFS='.' read -r -a octets <<< "$value"
+  for octet in "${octets[@]}"; do
+    [[ "$octet" == '0' || "$octet" =~ ^[1-9][0-9]{0,2}$ ]] || return 1
+    ((10#$octet <= 255)) || return 1
+  done
+}
+
 node_version_supported() {
   local version="$1"
   [[ "$version" =~ ^v22\.([0-9]+)\.([0-9]+)$ ]] || return 1
@@ -348,6 +370,15 @@ parse_arguments() {
         messages_read='disabled'
         shift
         ;;
+      --bind)
+        [[ $# -ge 2 ]] || die '--bind requires an IPv4 address'
+        bind_address="$2"
+        shift 2
+        ;;
+      --expose-confirm)
+        bind_confirmed='yes'
+        shift
+        ;;
       --key-file)
         [[ $# -ge 2 ]] || die '--key-file requires a path'
         key_file="$2"
@@ -396,6 +427,16 @@ validate_arguments() {
     die 'use either --source or --archive, not both'
   [[ "$send_test" != yes ]] || send_target_valid "$send_test_target" ||
     die '--send-test must be +digits (7-15, no leading zero) or one address containing a single @'
+  # The address is checked here, before anything is built, because a run that
+  # cannot bind is a run that produces a service which will not start.
+  bind_address_valid "$bind_address" ||
+    die "--bind must be a dotted-quad IPv4 address, not: $bind_address"
+  # 0.0.0.0 is every interface this Mac has, including whatever network it joins
+  # next. That is a different decision from naming one address, so it is a
+  # different flag rather than a wider value of the same one.
+  if [[ "$bind_address" == '0.0.0.0' && "$bind_confirmed" != yes ]]; then
+    die '--bind 0.0.0.0 serves every interface, including networks this Mac joins later; add --expose-confirm to accept that, or name one address'
+  fi
   # Absolute, because the published shape of this installer is `curl ... | bash`
   # and a relative path would land wherever that shell happened to be. The
   # directory is checked here, before anything is built, so a run that cannot
@@ -884,9 +925,10 @@ write_service_config() {
 
   install -d -m 700 "$config_directory"
   temporary="$(mktemp "$config_directory/service.env.XXXXXX")"
-  # Three keys: the one an operator might change, and the two that pin imsg.
+  # Four keys: the two an operator might change, and the two that pin imsg.
   {
     printf '%s\n' "IMESSAGE_PROXY_PORT=$service_port"
+    printf '%s\n' "IMESSAGE_PROXY_BIND_ADDRESS=$bind_address"
     printf '%s\n' "IMESSAGE_PROXY_IMSG_BIN=$imsg_binary"
     printf '%s\n' "IMESSAGE_PROXY_IMSG_SHA256=$imsg_digest"
   } > "$temporary"
@@ -1040,6 +1082,50 @@ print_full_disk_access_instructions() {
 # installation that declines it is a supported configuration rather than a
 # half-finished one. Asked after the send test on purpose: by now the operator
 # has watched sending work and can weigh the broad grant against what it buys.
+# Asked only when --bind was not given, and only of somebody who can see it. The
+# default is Enter, and Enter keeps loopback: the question exists to make the
+# choice visible, not to talk anybody into it.
+offer_network_exposure() {
+  local answer
+  [[ "$bind_address" == '127.0.0.1' ]] || return 0
+  terminal_available || return 0
+  note ''
+  note "  ${bold}${magenta}WHO CAN REACH THIS SERVICE${reset}"
+  note ''
+  note "  By default it answers only on ${green}this Mac${reset} - nothing on your network"
+  note "  can reach it, and that is what almost everyone wants."
+  note ''
+  note "  Serving another address puts the API on that network in ${bold}${yellow}plain HTTP${reset}:"
+  note "  ${yellow}unencrypted, with the API key the only thing protecting it.${reset}"
+  note "  ${dim}Anyone who can reach the port and guess a key can read and send${reset}"
+  note "  ${dim}your messages. Put your own TLS proxy in front if you need this.${reset}"
+  note ''
+  answer="$(ask_line 'Address to serve on, or Enter to keep it to this Mac: ')"
+  [[ -n "$answer" ]] || {
+    note ''
+    note "  ${green}Staying on this Mac only.${reset}"
+    return 0
+  }
+  bind_address_valid "$answer" ||
+    die "that is not a dotted-quad IPv4 address: $answer"
+  if [[ "$answer" == '0.0.0.0' ]]; then
+    note ''
+    note "  ${bold}${yellow}0.0.0.0 is every interface${reset}, including networks this Mac joins later."
+    answer="$(ask_line "Type ${bold}EXPOSE${reset} to accept that, or Enter to keep it to this Mac: ")"
+    [[ "$answer" == 'EXPOSE' ]] || {
+      note ''
+      note "  ${green}Staying on this Mac only.${reset}"
+      return 0
+    }
+    bind_address='0.0.0.0'
+    bind_confirmed='yes'
+  else
+    bind_address="$answer"
+  fi
+  note ''
+  note "  ${yellow}Serving on ${bold}${bind_address}${reset}${yellow} - reachable from your network.${reset}"
+}
+
 offer_messages_read() {
   local answer asked='no'
   note ''
@@ -1335,6 +1421,13 @@ self_test() {
     ! key_file_valid "$candidate" ||
       die "self-test accepted an invalid key file: ${candidate:-<empty>}"
   done
+  for candidate in 127.0.0.1 0.0.0.0 192.168.1.50 255.255.255.255 10.0.0.1; do
+    bind_address_valid "$candidate" || die "self-test rejected a valid bind address: $candidate"
+  done
+  for candidate in '' localhost 1.2.3 1.2.3.4.5 256.1.1.1 01.2.3.4 '1.2.3.-1' '::1' 'example.com'; do
+    ! bind_address_valid "$candidate" ||
+      die "self-test accepted an invalid bind address: ${candidate:-<empty>}"
+  done
   config_value_valid /opt/homebrew/bin/caddy || die 'self-test rejected a valid config value'
   for candidate in '' "$(printf 'value\nsecond=1')" "$(printf 'value\r')" 'value # comment'; do
     ! config_value_valid "$candidate" ||
@@ -1390,6 +1483,12 @@ main() {
   step 'Installing the native dependency'
   imsg_binary="$(resolve_imsg)"
   link_imsg "$imsg_binary"
+
+  # Asked before the configuration is written, because the answer goes into it
+  # and the LaunchAgent rendered from it. Asking later would mean rewriting both.
+  step 'Choosing who can reach it'
+  offer_network_exposure
+
   config_path="$(write_service_config "$imsg_binary")"
   # Every action but bootstrap reads the reviewed configuration from
   # IMESSAGE_PROXY_CONFIG, and disable-messages-read writes to it. Pinning it to

@@ -95,9 +95,12 @@ readonly IMSG_BIN="$BIN_DIR/imsg"
 readonly DATABASE_PATH="$PRIVATE/api-keys.sqlite3"
 readonly MESSAGES_DATABASE_PATH="$HOME/Library/Messages/chat.db"
 readonly TARGETS_FILE="$PRIVATE/allowed-targets.txt"
-# The single network setting. Loopback is not configurable: the server binds
-# INADDR_LOOPBACK as a compile-time constant and asserts it after listen().
+# The two network settings. The address defaults to loopback and stays there
+# unless an operator names another one; the server binds exactly what this says
+# and asserts it with getsockname() after listen(), so a widened bind refuses to
+# serve rather than quietly exposing the API.
 IMESSAGE_PROXY_PORT="${IMESSAGE_PROXY_PORT:-8765}"
+IMESSAGE_PROXY_BIND_ADDRESS="${IMESSAGE_PROXY_BIND_ADDRESS:-127.0.0.1}"
 readonly UI_DIR="$STATE/ui"
 readonly SERVER_LABEL='io.github.mglaeser.imessage-proxy'
 readonly SERVER_PLIST_STATE="$STATE/io.github.mglaeser.imessage-proxy.plist"
@@ -288,6 +291,22 @@ unprivileged_port_valid() {
   [[ "$1" =~ ^[1-9][0-9]{3,4}$ ]] && ((10#$1 >= 1024 && 10#$1 <= 65535))
 }
 
+# A dotted quad and nothing else. Not a hostname, not "localhost", not an IPv6
+# literal: the server parses this with inet_pton and refuses anything it cannot
+# read as an address, so accepting a name here would only produce a service that
+# fails to start. Each octet is bounded, and leading zeroes are refused because
+# 010 is 8 to some resolvers and 10 to others.
+bind_address_valid() {
+  local LC_ALL=C octet value="$1"
+  [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  local -a octets
+  IFS='.' read -r -a octets <<< "$value"
+  for octet in "${octets[@]}"; do
+    [[ "$octet" == '0' || "$octet" =~ ^[1-9][0-9]{0,2}$ ]] || return 1
+    ((10#$octet <= 255)) || return 1
+  done
+}
+
 # The server reads only the exact word "disabled" as off and treats everything
 # else, including a misspelling, as on. A configuration saying "off" or "false"
 # would therefore read as off to the person who wrote it and as on to the
@@ -311,6 +330,7 @@ messages_read_enabled() {
 service_config_key_allowed() {
   case "$1" in
     IMESSAGE_PROXY_PORT | \
+      IMESSAGE_PROXY_BIND_ADDRESS | \
       IMESSAGE_PROXY_MESSAGES_READ | \
       IMESSAGE_PROXY_IMSG_BIN | \
       IMESSAGE_PROXY_IMSG_SHA256) return 0 ;;
@@ -379,6 +399,8 @@ load_service_config() {
 require_api_settings() {
   unprivileged_port_valid "$IMESSAGE_PROXY_PORT" ||
     die "IMESSAGE_PROXY_PORT must be canonical base-10 in the range 1024-65535, not: $IMESSAGE_PROXY_PORT"
+  bind_address_valid "$IMESSAGE_PROXY_BIND_ADDRESS" ||
+    die "IMESSAGE_PROXY_BIND_ADDRESS must be a dotted-quad IPv4 address, not: $IMESSAGE_PROXY_BIND_ADDRESS"
   messages_read_setting_valid "$(messages_read_setting)" ||
     die "IMESSAGE_PROXY_MESSAGES_READ must be enabled or disabled, not: ${IMESSAGE_PROXY_MESSAGES_READ:-}"
 }
@@ -614,6 +636,7 @@ render_server_agent_to() {
   # key, and every render starts from a fresh copy of that template, so the key is
   # always absent here. The service decides once, at start, from what this writes.
   plutil -insert EnvironmentVariables.IMESSAGE_PROXY_MESSAGES_READ -string "$(messages_read_setting)" "$destination"
+  plutil -replace EnvironmentVariables.IMESSAGE_PROXY_BIND_ADDRESS -string "$IMESSAGE_PROXY_BIND_ADDRESS" "$destination"
   plutil -replace EnvironmentVariables.IMESSAGE_PROXY_PORT -string "$IMESSAGE_PROXY_PORT" "$destination"
   plutil -replace EnvironmentVariables.IMESSAGE_PROXY_UI_DIR -string "$UI_DIR" "$destination"
   plutil -replace StandardErrorPath -string "$SERVER_LOG" "$destination"
@@ -713,11 +736,29 @@ listener_owned_by_pid() {
 }
 
 # Asserts both that the listener belongs to the agent's own process and that it
-# is bound to loopback specifically. A wildcard bind would not match 127.0.0.1
-# exactly, so an accidentally exposed listener fails readiness rather than being
-# reported healthy.
+# is bound to the address this installation configured - exactly that address,
+# not merely something answering on the port. A listener that widened its bind
+# beyond what the configuration asks for therefore fails readiness rather than
+# being reported healthy, which is the same guarantee as before for the
+# installations that never set this and the only guarantee worth having for the
+# ones that did.
 server_socket_owned_by_pid() {
-  listener_owned_by_pid "$1" 127.0.0.1 "$IMESSAGE_PROXY_PORT"
+  listener_owned_by_pid "$1" "$IMESSAGE_PROXY_BIND_ADDRESS" "$IMESSAGE_PROXY_PORT"
+}
+
+# Where this machine reaches its own service. A wildcard bind answers on every
+# interface, so loopback is the address to talk to; anything else answers only on
+# what it bound.
+service_address() {
+  if [[ "$IMESSAGE_PROXY_BIND_ADDRESS" == '0.0.0.0' ]]; then
+    printf '127.0.0.1\n'
+  else
+    printf '%s\n' "$IMESSAGE_PROXY_BIND_ADDRESS"
+  fi
+}
+
+service_origin() {
+  printf 'http://%s:%s\n' "$(service_address)" "$IMESSAGE_PROXY_PORT"
 }
 
 wait_for_service_absent() {
@@ -820,6 +861,7 @@ run_server() {
     IMESSAGE_PROXY_MAX_CONCURRENCY=8 \
     IMESSAGE_PROXY_MESSAGES_DATABASE_PATH="$MESSAGES_DATABASE_PATH" \
     IMESSAGE_PROXY_MESSAGES_READ="$(messages_read_setting)" \
+    IMESSAGE_PROXY_BIND_ADDRESS="$IMESSAGE_PROXY_BIND_ADDRESS" \
     IMESSAGE_PROXY_PORT="$IMESSAGE_PROXY_PORT" \
     IMESSAGE_PROXY_READ_TIMEOUT_SECONDS="$SERVER_READ_TIMEOUT_SECONDS" \
     IMESSAGE_PROXY_SEND_TIMEOUT_SECONDS=180 \
@@ -1226,7 +1268,7 @@ socket_ready() {
   status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
     --connect-timeout 0.5 \
     --max-time 1 \
-    "http://127.0.0.1:$IMESSAGE_PROXY_PORT/api/status" 2>/dev/null || true)"
+    "$(service_origin)/api/status" 2>/dev/null || true)"
   [[ "$status" == 401 ]]
 }
 
@@ -1390,7 +1432,7 @@ server_restart() {
     report_server_start_failure "$log_offset"
     die 'restarted native LaunchAgent was not ready and was disabled again'
   fi
-  printf 'Restarted %s on http://127.0.0.1:%s\n' "$SERVER_LABEL" "$IMESSAGE_PROXY_PORT"
+  printf 'Restarted %s on %s\n' "$SERVER_LABEL" "$(service_origin)"
   report_degraded_start "$log_offset"
 }
 

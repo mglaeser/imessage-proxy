@@ -216,3 +216,50 @@ test("the first administrator is identified as adm", () => {
     "adm must satisfy the identifier length constraint");
   assert.ok(/^[a-z]+$/.test("adm"), "adm must satisfy the roman-letters constraint");
 });
+
+test("the listener binds what it was configured to bind, and proves it", () => {
+  // The bind address stopped being a compile-time constant when it became
+  // configurable. The guarantee that replaced it is narrower but not weaker: the
+  // listener must prove with getsockname() that it is on the address that was
+  // asked for, so a setting that widened the bind still refuses to serve.
+  assert.match(server, /address\.sin_addr\.s_addr = configuration\.bindAddress;/,
+    "the socket must bind the configured address");
+  const proof = server.match(/struct sockaddr_in bound = \{0\};[\s\S]*?socket_not_configured_address"\);/)?.[0];
+  assert.ok(proof, "the bind must be verified after listen()");
+  assert.ok(proof.includes("getsockname"), "the verification must read the socket, not the request");
+  assert.ok(proof.includes("bound.sin_addr.s_addr != configuration.bindAddress"),
+    "the verification must compare against the configured address");
+  assert.ok(proof.includes("ntohs(bound.sin_port) != configuration.port"),
+    "the verification must still compare the port");
+});
+
+test("loopback is what an unconfigured installation gets", () => {
+  // Every path to another address has to be one an operator asked for by name.
+  assert.match(server, /environment\[@"IMESSAGE_PROXY_BIND_ADDRESS"\] \?: @"127\.0\.0\.1"/,
+    "the server must default to loopback");
+  assert.match(server, /@"IMESSAGE_PROXY_BIND_ADDRESS"\n?\s*\]\]|@"IMESSAGE_PROXY_BIND_ADDRESS"/,
+    "the setting must be in the recognized set or the server refuses the plist");
+  // inet_pton is what decides the text is an address, so a hostname cannot be
+  // resolved into something the operator did not write.
+  assert.match(server, /inet_pton\(AF_INET, bindText\.UTF8String, &parsedBind\) != 1/,
+    "the address must be parsed by inet_pton, not accepted as text");
+});
+
+test("a wildcard bind does not widen the console's origins", () => {
+  // Enumerating interfaces to guess an origin would turn the allowlist into
+  // "anything that resolves here". Exposing the port exposes the API; reaching
+  // the console over an interface means binding that interface.
+  const derivation = server.match(/NSMutableArray<NSString \*> \*origins =[\s\S]*?configuration\.allowedOrigins = origins;/)?.[0];
+  assert.ok(derivation, "the allowed origins must be derived where the bind is parsed");
+  assert.ok(derivation.includes("INADDR_ANY"),
+    "0.0.0.0 must be excluded from the origins explicitly");
+  assert.ok(derivation.includes("INADDR_LOOPBACK"),
+    "loopback must not be added twice");
+  // And the check must consult that list rather than rebuilding one beside it.
+  const check = server.match(/- \(BOOL\)originAllowed:[\s\S]*?\n}/)?.[0];
+  assert.ok(check, "originAllowed: must exist");
+  assert.ok(check.includes("self.configuration.allowedOrigins containsObject:origin"),
+    "the origin check must use the derived list");
+  assert.ok(!/127\.0\.0\.1|localhost/.test(check),
+    "the origin check must not hardcode an origin beside the derived list");
+});

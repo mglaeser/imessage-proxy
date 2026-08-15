@@ -16,9 +16,9 @@
 
 One process on your Mac reads conversations and sends messages — iMessage or
 SMS — over a REST API, with a browser console for day-to-day use. It listens on
-`127.0.0.1` only, authenticates every request with a scoped revocable key, sends
-only to recipients you have allowlisted, and marks every message it sends with
-the key that sent it.
+`127.0.0.1` unless you name another address, authenticates every request with a
+scoped revocable key, sends only to recipients you have allowlisted, and marks
+every message it sends with the key that sent it.
 
 ## Get started
 
@@ -151,10 +151,12 @@ terminal before destroying anything. Add `--yes` to skip that question, or
 
 ## Reaching it from elsewhere
 
-The service binds loopback and will not bind anything else. To reach it from
-another machine, put your own TLS terminator in front of `127.0.0.1:8765` — a
-reverse proxy, a container, or a tunnel — and make it responsible for
-certificates, HSTS and access control. That boundary is deliberately yours:
+The service binds loopback unless you name another address — `install.sh --bind
+ADDRESS`, or the question the guided install asks. Doing so puts the API on that
+network in plain HTTP, with the API key the only thing protecting it, so it suits
+a network you trust and nothing more. For anything else, put your own TLS
+terminator in front of `127.0.0.1:8765` — a reverse proxy, a container, or a
+tunnel — and make it responsible for certificates, HSTS and access control. That boundary is deliberately yours:
 shipping it would mean shipping a second daemon, a certificate authority
 client, and a public port. See [Install and operate](docs/install.md).
 

@@ -14,6 +14,26 @@ and operational model described below.
   The run refuses at the outset if the path is not absolute, if its directory
   does not exist or is not writable, or if the file is already there — so an
   install that cannot deliver the key fails before it generates one.
+- `install.sh --bind ADDRESS` and `IMESSAGE_PROXY_BIND_ADDRESS` serve the API on
+  an address other than loopback, with a guided question that keeps loopback on
+  Enter. The default is unchanged and every path away from it is one an operator
+  asked for by name. `0.0.0.0` means every interface, including networks the Mac
+  joins later, so it needs `--expose-confirm` or the word `EXPOSE` at the prompt
+  rather than being one more address.
+
+  The bind address stopped being a compile-time constant, and the guarantee that
+  replaced it is narrower rather than weaker: the server still calls
+  `getsockname()` after `listen()` and refuses to serve unless the listener is on
+  exactly the configured address and port, and `server-status` asserts the same,
+  so a bind that widened without being asked to still fails closed. An exposed
+  listener is plain HTTP — unencrypted, with the bearer key the only control —
+  which `docs/security.md` now says where it used to promise loopback.
+
+  Exposing the port exposes the API, not the console. The browser origins the
+  server accepts are derived from what it bound: the loopback origin, the
+  `localhost` spelling, and a specific bound address. `0.0.0.0` adds none,
+  because enumerating interfaces to guess would accept anything that resolves to
+  the machine. Clients that send no `Origin` are unaffected.
 - API keys may expire up to four years out, `1-1461` days, rather than one year.
   1461 rather than 1460 because four calendar years contain a leap day, so "four
   years from today" always validates instead of falling one short in three years
