@@ -65,7 +65,9 @@ broken. Pass `--without-admin-key` to skip the credential, which is what the
 installer does so it can print its summary before the key.
 
 The first key is identified as `adm`, so every message it sends ends with
-`🔖adm` over iMessage and `^adm` over SMS.
+`🔖adm` over iMessage and `^adm` over SMS. If a revoked administrator still holds
+that identifier the next free one is assigned instead, because the marker is
+unique over every key on record; `GET /api/keys` reports the one it got.
 
 ## Lifecycle
 

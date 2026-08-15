@@ -1129,14 +1129,17 @@ print_next_steps() {
   note ''
   heading 'YOUR ADMINISTRATOR KEY'
   if [[ -n "$key_file" ]]; then
-    note "  ${dim}Written to ${key_file}, readable only by you.${reset}"
-    note "  ${dim}It is not printed here. Its sender identifier is adm, so every${reset}"
-    note "  ${dim}message it sends ends with 🔖adm, or ^adm over SMS.${reset}"
+    note "  ${dim}Written to ${bold}${key_file}${reset}${dim}, readable only by you.${reset}"
+    note "  ${dim}It is not printed here.${reset}"
   else
     note "  ${dim}Shown once, on the line below. Store it in a password manager.${reset}"
-    note "  ${dim}Its sender identifier is adm, so every message it sends ends${reset}"
-    note "  ${dim}with 🔖adm, or ^adm over SMS.${reset}"
   fi
+  # Not stated as a fact: this runs before the key is issued, and the store falls
+  # back to a sequential identifier if a revoked administrator still holds adm.
+  # GET /api/keys reports the one it actually got.
+  note "  ${dim}Its sender identifier is normally ${bold}adm${reset}${dim}, so its messages end${reset}"
+  note "  ${dim}with 🔖adm over iMessage and ^adm over SMS. If that identifier is${reset}"
+  note "  ${dim}already held, the next free one is assigned; GET /api/keys shows it.${reset}"
   note ''
 }
 
@@ -1426,25 +1429,32 @@ main() {
   #
   # --key-file redirects that same stdout into a file instead. Redirected, not
   # captured: the key never becomes a shell variable, so it cannot reach an
-  # error trace or the environment of anything this script runs. The file is
-  # created empty and private first, so it never exists world-readable, not even
-  # for the moment between creation and the write.
+  # error trace or the environment of anything this script runs.
   if [[ -n "$key_file" ]]; then
-    # noclobber makes the creation O_EXCL, so it fails rather than following a
-    # symlink or truncating a file that appeared since validation - the window
-    # between that check and here is the whole install. umask 077 applies to the
-    # creation, which is this one; the redirection below only writes to the file
-    # that already exists, so the mode stands.
-    (
+    # One redirection, not two. noclobber makes this open O_CREAT|O_EXCL, which
+    # refuses an existing file and refuses to follow a symlink, and the key is
+    # written by that same open - so there is no moment between creating the
+    # file and filling it in which the path could be swapped. Creating it first
+    # and writing second left exactly that window, and it is the whole install
+    # long: validate_arguments ran before the source download, the build, the
+    # dependency install and the service bootstrap.
+    #
+    # umask 077 is belt and braces. Line 30 already sets it process-wide, so the
+    # mode does not depend on this subshell; it is here so the mode does not
+    # depend on line 30 either.
+    if ! (
       umask 077
       set -o noclobber
-      : > "$key_file"
-    ) || die "could not create the key file, or something already exists at: $key_file"
-    if ! "$cli" api-key bootstrap-admin --name "$admin_name" --expires-in-days "$expires_days" > "$key_file"; then
-      # An empty file at the path the summary just named would read as a key
-      # that failed to arrive, and would block the retry by existing.
-      rm -f -- "$key_file"
-      die 'the administrator key could not be issued'
+      "$cli" api-key bootstrap-admin --name "$admin_name" --expires-in-days "$expires_days" > "$key_file"
+    ); then
+      # Removed only if this run created it and it holds nothing: an empty file
+      # at the path the summary named reads as a key that failed to arrive, and
+      # blocks the retry by existing. A file that noclobber refused belongs to
+      # somebody else and is left alone.
+      if [[ -O "$key_file" && ! -s "$key_file" ]]; then
+        rm -f -- "$key_file"
+      fi
+      die "the administrator key could not be issued, or something already exists at: $key_file"
     fi
     return 0
   fi

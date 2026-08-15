@@ -114,10 +114,34 @@ expect_failure '--key-file already exists' run_installer --key-file "$existing_k
 if ! grep -Fq 'bootstrap-admin --name "$admin_name" --expires-in-days "$expires_days" > "$key_file"' "$INSTALLER"; then
   fail 'the installer must redirect the key into --key-file rather than capturing it'
 fi
-# Created private before it is written, so it is never briefly world-readable.
-if ! grep -Fq 'umask 077' "$INSTALLER"; then
-  fail 'the installer must create the key file with a private umask'
-fi
+# The create and the write must be the same redirection, under noclobber, so the
+# open is O_CREAT|O_EXCL and there is no window in which the path could be
+# swapped for a symlink between the two. Asserted over the key-file block rather
+# than the whole file: a `grep umask 077` over the installer is satisfied by the
+# process-wide umask on line 30 and would pass with this block deleted.
+key_write_block="$(awk '/if \[\[ -n "\$key_file" \]\]; then/,/^  fi$/' "$INSTALLER")"
+[[ -n "$key_write_block" ]] || fail 'could not find the --key-file write in the installer'
+for expected in 'umask 077' 'set -o noclobber' 'bootstrap-admin'; do
+  case "$key_write_block" in
+    *"$expected"*) ;;
+    *) fail "the --key-file write must run under $expected" ;;
+  esac
+done
+# The write must be the very redirection noclobber guards, so assert the line
+# after it is the one that produces the key. Merely appearing in the same block
+# is not enough: creating the file first and writing it second also does that,
+# and that is exactly the form with the window this guards against.
+key_write_next="$(printf '%s\n' "$key_write_block" | awk '/set -o noclobber/{getline line; print line; exit}')"
+# shellcheck disable=SC2016  # the patterns intentionally match literal shell syntax
+case "$key_write_next" in
+  *'bootstrap-admin'*'> "$key_file"'*) ;;
+  *) fail "the key must be written by the redirection noclobber guards, not a later one: ${key_write_next:-<nothing>}" ;;
+esac
+# And nothing may pre-create the file, which is what reopens that window.
+# shellcheck disable=SC2016  # the pattern intentionally matches literal shell syntax
+case "$key_write_block" in
+  *': > "$key_file"'*) fail 'the key file must not be created by a separate redirection before the write' ;;
+esac
 
 # A run that answered both questions on the command line must get past validation
 # and fail only on the host check, which is what an unattended install does.

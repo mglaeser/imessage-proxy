@@ -74,7 +74,9 @@ it over the carrier instead, and nothing ever falls back from one to the other.
 And it arrived tagged with the sending key's identifier, so whoever receives it
 can tell which automation wrote to them: a key identified as `aut` ends its
 messages with `🔖aut` over iMessage and `^aut` over SMS. The administrator key
-the installer prints is `adm`, so that first message ends with `🔖adm`. Only an
+the installer prints is normally `adm`, so that first message ends with `🔖adm`
+— unless a revoked administrator still holds it, in which case the next free
+identifier is assigned and `GET /api/keys` reports it. Only an
 administrator key can send without the tag, one message at a time. See
 [the sender identifier](docs/api.md#the-sender-identifier).
 
