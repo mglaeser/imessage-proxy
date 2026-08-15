@@ -94,10 +94,21 @@ for bad_target in nope 'chat_id:42' '+0155512345' 'a@b@c' 'has space@example.com
 done
 # A run that answered both questions on the command line must get past validation
 # and fail only on the host check, which is what an unattended install does.
-expect_failure 'iMessage Proxy runs only on macOS' \
-  run_installer --no-send-test --no-messages-read
-expect_failure 'iMessage Proxy runs only on macOS' \
-  run_installer --send-test +15551234567 --messages-read
+#
+# Only off macOS. The host check is the thing that stops these runs, and on a Mac
+# it passes - so on the macOS runner these two lines stopped being assertions and
+# became a real installation: building the server, fetching the dependency,
+# writing a LaunchAgent. The job produced no further output and was killed at its
+# 25 minute timeout, which is why every CI run on this branch was cancelled and
+# the Objective-C never reported a result. The property they check is not lost:
+# require_terminal is exercised directly above on every platform, and the Linux
+# job runs this whole suite.
+if [[ "$(uname -s)" != Darwin ]]; then
+  expect_failure 'iMessage Proxy runs only on macOS' \
+    run_installer --no-send-test --no-messages-read
+  expect_failure 'iMessage Proxy runs only on macOS' \
+    run_installer --send-test +15551234567 --messages-read
+fi
 
 # The installer never enables public HTTPS on its own.
 if grep -Eq -- '--public|ENABLE_PUBLIC_HTTPS=yes|EXPOSE IMESSAGE PROXY PUBLICLY' "$INSTALLER"; then
@@ -542,9 +553,11 @@ current="$(
   " 2>&1
 )" || fail 'reporting an existing installation failed'
 assert_contains 'server-status' "$current"
-if [[ "$current" == *'no longer matches'* ]]; then
-  fail "a current installation was reported as needing a re-render: $current"
-fi
+for forbidden in 'refuse until' 'Adopt the new build' 'server-stop --confirm'; do
+  if [[ "$current" == *"$forbidden"* ]]; then
+    fail "a current installation was told to rebuild ($forbidden): $current"
+  fi
+done
 
 log="$(stub_log)"
 stale="$(
@@ -553,10 +566,14 @@ stale="$(
     report_existing_installation '$stub_cli'
   " 2>&1
 )" || fail 'reporting a stale LaunchAgent failed the installation'
-assert_contains 'no longer matches' "$stale"
+assert_contains 'refuse until' "$stale"
+# build-host is the one that must not be dropped: without it the operator stops a
+# working service, and server-install then dies in check_host because the CLI
+# passes the previous binary a setting it refuses by name.
 for expected in \
   "server-stop --confirm 'STOP IMESSAGE PROXY SERVER'" \
   'imessage-proxy prepare' \
+  'imessage-proxy build-host' \
   'imessage-proxy server-install'; do
   assert_contains "$expected" "$stale"
 done

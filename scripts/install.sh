@@ -1154,13 +1154,25 @@ print_path_result() {
   note "  Until then use the full path: $install_prefix/bin/imessage-proxy"
 }
 
-# The refreshed CLI may render a LaunchAgent that this installation predates -
-# this release adds an environment key to it - and the staged plist is still the
-# one the previous CLI wrote. Every lifecycle command compares the two and
-# refuses while they differ, so suggesting server-status here would hand the
-# operator a command that fails on a service that is running perfectly well.
+# This branch refreshes the CLI and the product assets, and deliberately does
+# not rebuild the staged server binary - only build-host does that, and only
+# bootstrap and the explicit subcommand call it. So the operator is left with a
+# new CLI driving the binary the previous release built, and this release parts
+# them: the CLI now passes IMESSAGE_PROXY_MESSAGES_READ on every invocation and
+# renders it into the LaunchAgent, while the previous binary refuses the setting
+# by name and exits. check_host ends in `run_server check-config`, so
+# server-install, server-start and server-restart all die there; server-status
+# and server-restart also fail earlier, on the staged plist no longer matching
+# what this CLI renders.
+#
+# The service that is already running is untouched by any of that and keeps
+# working - until the first stop or reboot, after which nothing starts it again
+# until the binary is rebuilt. Hence build-host in the sequence below: without
+# it the operator stops a working service and cannot start it again, which is a
+# worse outcome than the one they came here with.
+#
 # The CLI is asked, rather than the difference guessed at, because it is the
-# thing that will render the plist and the thing that will refuse.
+# thing that renders the plist and the thing that refuses.
 report_existing_installation() {
   local cli="$1"
   note ''
@@ -1177,11 +1189,14 @@ report_existing_installation() {
     note 'prepare, build-host, and server-install as described in the operations guide.'
     return 0
   fi
-  note 'The service is still running, but this release changes its LaunchAgent,'
-  note 'so the staged one no longer matches the refreshed CLI and the lifecycle'
-  note 'commands refuse until it is rendered again. Nothing is lost; adopt it:'
+  note 'The service is still running, but this release changes both its'
+  note 'LaunchAgent and what the CLI passes the server, so the lifecycle commands'
+  note 'refuse until the staged plist and the server binary are both rebuilt.'
+  note 'Nothing is lost, and the running service is unaffected until you stop it.'
+  note 'Adopt the new build with all four, in this order:'
   note "  imessage-proxy server-stop --confirm 'STOP IMESSAGE PROXY SERVER'"
   note '  imessage-proxy prepare'
+  note '  imessage-proxy build-host'
   note '  imessage-proxy server-install'
   ensure_path_entry
   print_path_result
