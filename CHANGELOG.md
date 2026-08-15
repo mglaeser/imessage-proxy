@@ -43,6 +43,32 @@ and operational model described below.
 
 ### Fixed
 
+- An existing installation upgrades instead of refusing to start. The sender
+  identifier arrived as schema 7 with no way forward from schema 6, so the store
+  refused the database every operator already had: the server would not start,
+  every issued key was unreachable, and the only documented recovery discarded
+  all of them. The refusal also arrived too late to act on, because `prepare`
+  requires the server stopped and restages the runtime before anything opens the
+  database — the working install was already dismantled by the time the message
+  appeared. Schema 6 is now carried forward on first start, in one transaction,
+  keeping every key's token, scopes, expiry and audit history and assigning each
+  key the identifier it lacked. A schema that is genuinely unrecognised is still
+  refused, but now names the recovery command instead of only stating the fact.
+- A `sender_identifier` another key already holds is refused with `409`
+  (`sender-identifier-taken`) rather than reported as a `503` store outage.
+  The uniqueness check existed only where the service assigns an identifier, so
+  a caller-supplied duplicate reached the insert and tripped the constraint;
+  the retry loop there reads any constraint failure as a key-material collision
+  and regenerated the token four times, which cannot resolve a duplicate
+  identifier. A permanent, caller-fixable mistake was answered with a transient
+  status that invites a retry which can never succeed. `docs/api.md` already
+  promised the refusal.
+- `service` is refused when it is present but not one of the two strings.
+  `{"service": null}`, `{"service": 2}` and `{"service": ["sms"]}` were read as
+  absent and silently sent over iMessage — the guess this endpoint exists not to
+  make, over the field that decides what the recipient is charged and which
+  marker they see. They are now `400 invalid-message`. Omitting `service`
+  still means iMessage.
 - The installer no longer writes an unvalidated `--prefix` into a shell startup
   file. A prefix containing a quote ended the quoting of the emitted `export
   PATH` line and left the remainder as code, which then ran in every later

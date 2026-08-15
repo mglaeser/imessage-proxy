@@ -100,6 +100,29 @@ child of your terminal inherits the same refusal. If you want to tighten a
 permissive directory for your own reasons, grant your terminal Full Disk Access
 first — but the service does not require it.
 
+## `The API key database schema is unsupported by this release`
+
+The store opens a database it created (the current schema) and a database the
+immediately preceding release created, which it upgrades in place on the first
+start: every key keeps its token, its scopes and its expiry, and gains the
+[sender identifier](api.md#the-sender-identifier) it did not have before. The
+upgrade is one transaction. If it cannot finish, nothing is written and the
+database still opens on the release you came from.
+
+This message means the file is neither of those — a database from a much older
+release, from a newer one after a downgrade, or a file that is not this store at
+all. There is no upgrade path from an unrecognised schema, so recovery is a
+reinstall, and **it discards every key you have issued**:
+
+```bash
+scripts/uninstall.sh --purge --confirm 'DESTROY IMESSAGE PROXY STATE' && scripts/install.sh
+```
+
+Every caller holding one of the old keys stops working, so reissue them from the
+new administrator key the installer prints. If you did not expect this message,
+check you are not pointing a new binary at an old state directory before you
+purge anything — the database is not modified by a refusal.
+
 ## The native server does not start
 
 Read the native server's own log first. The LaunchAgent writes its standard
@@ -235,6 +258,49 @@ from an older version, which refused to install whenever that interactive probe
 failed. Reinstall from `main` to get the current behavior, in which the service
 installs, issues the key, and reports the condition through `GET /api/status`.
 
+## A read returns `409 messages-read-disabled`
+
+```json
+{
+  "type": "https://github.com/mglaeser/imessage-proxy/problems/messages-read-disabled",
+  "title": "Conflict",
+  "status": 409,
+  "detail": "Reading Messages is turned off for this installation. Turn it on with: imessage-proxy enable-messages-read",
+  "request_id": "1f825d86-1626-4a0c-a163-644a4cebd91b"
+}
+```
+
+Nothing is broken. This installation sends but does not read, so every route
+that answers out of the Messages database refuses with this problem type: chats,
+chat metadata, history, background state, scheduled messages, statistics, and a
+send addressed to a `chat_id`, which has to resolve the chat before it can send
+to it and whose detail says so and points at `recipient`. Sends to a `recipient`
+are unaffected on both transports, and so are keys, the allowlist and audit
+events.
+
+An installation can be in this state on purpose. Sending asks macOS for
+Automation access, which it prompts for at the first send. Reading needs Full
+Disk Access, which macOS never prompts for at all — an unauthorised read of
+`chat.db` just fails, and somebody has to add the binary in System Settings by
+hand. A Mac whose owner would rather not hand over the whole Messages database
+can decline that and still send.
+
+If reading was meant to be on, turn it on and check the result:
+
+```bash
+imessage-proxy enable-messages-read
+imessage-proxy server-status
+```
+
+`GET /api/status` is the quickest confirmation: `messages.status` reads
+`disabled` alongside the exact command above while reading is off, and `ready`
+once it is on.
+
+Do not confuse this with the `503 messages-unavailable` in the previous section.
+`409` means reading was declined and no read was attempted; the answer will not
+change on its own. `503` means a read was attempted and failed, which is almost
+always a Full Disk Access grant that no longer covers the current binary.
+
 ## Full Disk Access fails
 
 Symptoms include readiness failure, database-open errors, or empty reads despite
@@ -309,14 +375,53 @@ the next one and no restart is needed. Then test one harmless consented target.
 A `403` on `/api/targets` itself means the key lacks `admin`. That is
 deliberate: a credential that can send must not be able to add new recipients.
 
+## A send returns `403 identifier-required`
+
+```json
+{
+  "type": "https://github.com/mglaeser/imessage-proxy/problems/identifier-required",
+  "title": "Forbidden",
+  "status": 403,
+  "detail": "Only an administrator may send without the sender identifier.",
+  "request_id": "1f825d86-1626-4a0c-a163-644a4cebd91b"
+}
+```
+
+The body carried `sender_identifier` and the key does not hold `admin`. Remove
+the field; the send then goes out marked with the key's identifier, which is
+what every message from a non-administrator key does.
+
+Both values are refused, not just `false`. The parameter is refused rather than
+ignored so that no caller is ever told a message went out unmarked when it went
+out marked — a silent default would leave the difference invisible exactly where
+it matters. There is therefore no request shape that removes the marker from a
+key that may not suppress it.
+
+If some job genuinely has to send unmarked, it needs an administrator key.
+Weigh that: `admin` also mints and revokes keys, edits the allowlist, and reads
+every conversation on the Mac. An unmarked message is rarely worth that.
+
+To find out which key sent something a recipient is asking about, look the
+marker up in `GET /api/keys`, where every key shows its `sender_identifier`.
+
 ## A send returns `409`
 
 The idempotency value was reused with different content, or its prior attempt is
-pending/ambiguous. Never change the body while retaining the same value.
+pending/ambiguous. Never change the body while retaining the same value. The
+transport and the marker decision count as content, so the same value replayed
+with `"service":"sms"` or `"sender_identifier":false` is a conflict, not a
+replay.
 
 For an ambiguous attempt, inspect the intended thread in Messages.app. If the
 message did not appear and a human chooses to try again, make a new logical send
 with a new idempotency value. The server will not decide that automatically.
+
+Two other conditions answer `409` on a send. `chat-service-mismatch` means the
+`chat_id` names a conversation that does not use the `service` you asked for;
+send it over the service that chat actually uses, or address the person
+directly. `messages-read-disabled` means this installation does not read
+Messages, so it cannot resolve a `chat_id` at all; send to a `recipient`
+instead, or turn reading on as described above.
 
 ## A send returns `504`
 

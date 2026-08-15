@@ -8,6 +8,13 @@ info:
     Every API request uses exactly one scoped API key in the Authorization header
     with the Bearer scheme. The browser console is a same-origin static client of
     this contract. The unversioned routes listed here are the complete API.
+
+
+    Every message a key sends ends with that key's sender identifier, so the
+    person receiving it can tell which key wrote to them. Reading conversations
+    needs Full Disk Access, which macOS never prompts for, so an installation may
+    decline it and only send: the read routes then answer 409
+    messages-read-disabled and everything else keeps working.
   license:
     name: Apache-2.0
     identifier: Apache-2.0
@@ -45,7 +52,9 @@ paths:
       summary: Check service and Messages readiness.
       responses:
         "200":
-          description: The native service and its Messages read path are ready.
+          description: >-
+            The native service is ready. Its Messages read path is either ready
+            or turned off for this installation, which sending is unaffected by.
           content:
             application/json:
               schema:
@@ -104,6 +113,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "408":
           $ref: "#/components/responses/RequestTimeout"
+        "409":
+          $ref: "#/components/responses/ReadDisabled"
         "413":
           $ref: "#/components/responses/TooLarge"
         "429":
@@ -141,6 +152,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "408":
           $ref: "#/components/responses/RequestTimeout"
+        "409":
+          $ref: "#/components/responses/ReadDisabled"
         "413":
           $ref: "#/components/responses/TooLarge"
         "429":
@@ -236,6 +249,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "408":
           $ref: "#/components/responses/RequestTimeout"
+        "409":
+          $ref: "#/components/responses/ReadDisabled"
         "413":
           $ref: "#/components/responses/TooLarge"
         "429":
@@ -277,6 +292,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "408":
           $ref: "#/components/responses/RequestTimeout"
+        "409":
+          $ref: "#/components/responses/ReadDisabled"
         "413":
           $ref: "#/components/responses/TooLarge"
         "429":
@@ -293,11 +310,21 @@ paths:
     post:
       operationId: sendMessage
       tags: [Messages]
-      summary: Send one text as an iMessage.
+      summary: Send one text over iMessage or carrier SMS.
       description: >-
-        Exactly one recipient or chat_id is required. The server always selects
-        iMessage and disables carrier-SMS fallback. The idempotency key makes an
-        accepted or ambiguous attempt safe from automatic duplicate execution.
+        Exactly one recipient or chat_id is required. The transport is the one
+        named by service and no other is tried, so a caller always knows which
+        transport carried the message and which marker the recipient saw. What
+        goes out is the text supplied plus the sending key's identifier; only an
+        administrator may suppress that, and only per message. The idempotency key
+        makes an accepted or ambiguous attempt safe from automatic duplicate
+        execution, and covers the transport and the marker decision as well as the
+        target and text.
+
+
+        Sending to a recipient works whether or not this installation reads
+        Messages. Sending to a chat_id resolves the chat first, so it answers 409
+        messages-read-disabled where reading is turned off.
       x-required-scope: messages:send
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -377,6 +404,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "408":
           $ref: "#/components/responses/RequestTimeout"
+        "409":
+          $ref: "#/components/responses/ReadDisabled"
         "413":
           $ref: "#/components/responses/TooLarge"
         "429":
@@ -434,6 +463,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "408":
           $ref: "#/components/responses/RequestTimeout"
+        "409":
+          $ref: "#/components/responses/ReadDisabled"
         "413":
           $ref: "#/components/responses/TooLarge"
         "429":
@@ -794,7 +825,11 @@ components:
           schema:
             $ref: "#/components/schemas/Problem"
     Forbidden:
-      description: The key lacks scope, the request origin is disallowed, or the send target is not allowlisted.
+      description: >-
+        The key lacks scope (insufficient-scope), the request origin is
+        disallowed (origin-forbidden), the send target is not allowlisted
+        (target-forbidden), or a key without the admin scope asked to send
+        without its sender identifier (identifier-required).
       content:
         application/problem+json:
           schema:
@@ -807,8 +842,24 @@ components:
             $ref: "#/components/schemas/Problem"
     Conflict:
       description: >-
-        The request conflicts with idempotency state, the selected chat service,
-        API-key capacity, or final-administrator protection.
+        The request conflicts with idempotency state (idempotency-conflict,
+        request-in-progress, send-ambiguous), with the service the chat actually
+        uses (chat-service-mismatch, which replaced not-imessage-chat when the
+        transport became a request field), with an installation that does not
+        read Messages (messages-read-disabled), with API-key capacity
+        (key-limit), with a sender identifier another key already holds
+        (sender-identifier-taken), or with final-administrator protection
+        (last-admin).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    ReadDisabled:
+      description: >-
+        This route answers out of the Messages database, and reading it is turned
+        off for this installation (messages-read-disabled). The detail names the
+        host command that turns it back on. Nothing is degraded or retryable
+        here: the answer is the same until an operator changes the installation.
       content:
         application/problem+json:
           schema:
@@ -883,18 +934,40 @@ components:
           type: integer
           minimum: 0
         messages:
-          type: object
-          additionalProperties: false
-          required: [status, dependency_version]
-          properties:
-            status:
-              type: string
-              const: ready
-            dependency_version:
-              type: string
-              example: 0.13.4
+          oneOf:
+            - $ref: "#/components/schemas/MessagesReady"
+            - $ref: "#/components/schemas/MessagesDisabled"
         key:
           $ref: "#/components/schemas/AuthenticatedKey"
+    MessagesReady:
+      type: object
+      additionalProperties: false
+      required: [status, dependency_version]
+      properties:
+        status:
+          type: string
+          const: ready
+        dependency_version:
+          type: string
+          example: 0.13.4
+    MessagesDisabled:
+      type: object
+      additionalProperties: false
+      required: [status, dependency_version, enable_with]
+      description: >-
+        Reading conversations is turned off for this installation. Sending is
+        unaffected, and no read route is served while this is the answer.
+      properties:
+        status:
+          type: string
+          const: disabled
+        dependency_version:
+          type: string
+          example: 0.13.4
+        enable_with:
+          type: string
+          const: imessage-proxy enable-messages-read
+          description: The host command that turns reading back on.
     AuthenticatedKey:
       type: object
       additionalProperties: false
@@ -1311,8 +1384,26 @@ components:
           description: >-
             One to 4000 Unicode code points; tab, line feed, and carriage return
             are allowed, while other control characters and a leading hyphen are
-            rejected.
+            rejected. The sender identifier is appended to this text, so the
+            recipient sees a few characters more than were sent here.
           example: Hello from iMessage Proxy
+        service:
+          type: string
+          enum: [imessage, sms]
+          default: imessage
+          description: >-
+            The transport to use. Nothing falls back to the other one: an
+            iMessage send that cannot be delivered as iMessage fails as an
+            iMessage send, and a chat whose conversation uses the other service
+            answers 409 chat-service-mismatch.
+        sender_identifier:
+          type: boolean
+          description: >-
+            Send false to leave the sender identifier off this one message. This
+            field requires the admin scope: any other key that sends it at all,
+            with either value, is refused 403 identifier-required rather than
+            having it ignored, so no caller is told a message went out unmarked
+            when it did not.
       oneOf:
         - required: [recipient]
           properties:
@@ -1339,10 +1430,34 @@ components:
     Scope:
       type: string
       enum: [messages:read, messages:send, admin]
+    SenderIdentifier:
+      type: string
+      minLength: 2
+      maxLength: 8
+      pattern: "^[a-z]{2,8}$"
+      description: >-
+        The tag every message this key sends ends with, unique across keys. Two
+        to eight roman letters and nothing else, because the marker is written as
+        ^tag over SMS, and an SMS segment holds 160 characters of the GSM-7
+        alphabet but only 70 once one character falls outside it. Over iMessage,
+        which has no such alphabet, the marker is U+1F516 followed by the same
+        tag. Surrounding whitespace is removed and the value is stored in lower
+        case.
+      example: kle
     ApiKeyMetadata:
       type: object
       additionalProperties: false
-      required: [id, name, key_prefix, scopes, created_at, expires_at, revoked_at, last_used_at]
+      required:
+        - id
+        - name
+        - key_prefix
+        - scopes
+        - sender_identifier
+        - sender_identifier_assigned
+        - created_at
+        - expires_at
+        - revoked_at
+        - last_used_at
       properties:
         id:
           type: string
@@ -1361,6 +1476,13 @@ components:
           uniqueItems: true
           items:
             $ref: "#/components/schemas/Scope"
+        sender_identifier:
+          $ref: "#/components/schemas/SenderIdentifier"
+        sender_identifier_assigned:
+          type: boolean
+          description: >-
+            True when the service chose this identifier because the request did
+            not name one, false when the creating administrator asked for it.
         created_at:
           type: string
           format: date-time
@@ -1464,10 +1586,28 @@ components:
           minimum: 1
           maximum: 365
           default: 90
+        sender_identifier:
+          allOf:
+            - $ref: "#/components/schemas/SenderIdentifier"
+          description: >-
+            The identifier this key marks its messages with. Omit it and the
+            service assigns the shortest unused one; it cannot be changed
+            afterwards, and an identifier another key already holds is refused.
     CreatedApiKey:
       type: object
       additionalProperties: false
-      required: [id, name, key_prefix, scopes, created_at, expires_at, revoked_at, last_used_at, key]
+      required:
+        - id
+        - name
+        - key_prefix
+        - scopes
+        - sender_identifier
+        - sender_identifier_assigned
+        - created_at
+        - expires_at
+        - revoked_at
+        - last_used_at
+        - key
       properties:
         id:
           type: string
@@ -1486,6 +1626,13 @@ components:
           uniqueItems: true
           items:
             $ref: "#/components/schemas/Scope"
+        sender_identifier:
+          $ref: "#/components/schemas/SenderIdentifier"
+        sender_identifier_assigned:
+          type: boolean
+          description: >-
+            True when the service chose this identifier because the request did
+            not name one, false when the creating administrator asked for it.
         created_at:
           type: string
           format: date-time

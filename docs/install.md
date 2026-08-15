@@ -90,6 +90,51 @@ Underneath it is one recipient per line at
 `~/Library/Application Support/iMessage Proxy/private/allowed-targets.txt`.
 Wildcards are not supported, by design.
 
+## Sending without reading
+
+Sending and reading are separate macOS grants, and they behave differently.
+Sending goes through Apple Events, which macOS prompts for at the first send.
+Reading needs Full Disk Access, which macOS never prompts for: an unauthorised
+read of `chat.db` simply fails, and somebody has to add the exact binary in
+System Settings by hand. Handing over the whole Messages database is a real
+decision, so an installation is allowed to decline it and run as a send-only
+service. Turn reading on with:
+
+```bash
+imessage-proxy enable-messages-read
+```
+
+The service decides this once, when it starts, from its own environment: reading
+is off when `IMESSAGE_PROXY_MESSAGES_READ` is `disabled` and on for any other
+value, including no value at all, so an installation that never heard of the
+setting keeps reading. A change therefore applies from the next start of the
+service, not from the next request.
+
+While reading is off:
+
+- `GET /api/status` reports `messages.status` as `disabled` and names the
+  command above in `enable_with`;
+- every route that answers out of the Messages database returns `409` with
+  `messages-read-disabled`, and so does a send addressed to a `chat_id`, which
+  has to resolve the chat first; and
+- sends to a `recipient` work normally over both iMessage and SMS, as do keys,
+  the allowlist and audit events.
+
+Turning reading on does not grant Full Disk Access; only System Settings does
+that, for the exact binary the installer names.
+[Troubleshooting](troubleshooting.md) separates the two symptoms: `409` is an
+installation that declined reading, `503` is one that tried to read and could
+not.
+
+## Who your messages come from
+
+Every API key carries a sender identifier of two to eight letters, and every
+message that key sends ends with it — `🔖dep` over iMessage, `^dep` over SMS.
+The recipient can therefore tell one automation from another, and all of them
+from you typing in Messages.app. Only an administrator key can send without it,
+one message at a time. Issue a key per job, keep the identifiers recognisable,
+and see [API](api.md#the-sender-identifier) for the request fields.
+
 ## Publishing it
 
 The server binds loopback and refuses to bind anything else, so publishing means

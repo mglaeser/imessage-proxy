@@ -408,6 +408,11 @@ static BOOL IsAllowedTargetLine(NSString *line) {
 @property (nonatomic, copy) NSString *uiDirectory;
 @property (nonatomic, copy) NSString *databasePath;
 @property (nonatomic, copy) NSString *messagesDatabasePath;
+// NO when the operator declined Full Disk Access. Reading Messages needs a grant
+// macOS never prompts for - it must be added by hand in System Settings - so an
+// installation that only sends is a supported configuration rather than a broken
+// one. Sending needs Apple Events, which is a separate grant and does prompt.
+@property (nonatomic) BOOL messagesReadEnabled;
 @property (nonatomic, copy) NSString *allowedTargetsPath;
 @property (nonatomic, copy) NSData *allowedTargetsBytes;
 @property (nonatomic, copy) NSString *imsgPath;
@@ -1047,7 +1052,7 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
         @"IMESSAGE_PROXY_IMSG_SHA256", @"IMESSAGE_PROXY_MAX_CONCURRENCY", @"IMESSAGE_PROXY_READ_TIMEOUT_SECONDS",
         @"IMESSAGE_PROXY_SEND_TIMEOUT_SECONDS", @"IMESSAGE_PROXY_SOCKET_TIMEOUT_SECONDS", @"IMESSAGE_PROXY_API_KEY",
         @"IMESSAGE_PROXY_CONFIG", @"IMESSAGE_PROXY_HOME", @"IMESSAGE_PROXY_SOURCE_DIR", @"IMESSAGE_PROXY_UI_DIR",
-        @"IMESSAGE_PROXY_URL", @"IMESSAGE_PROXY_VERSION"
+        @"IMESSAGE_PROXY_MESSAGES_READ", @"IMESSAGE_PROXY_URL", @"IMESSAGE_PROXY_VERSION"
     ]];
     for (NSString *name in environment) {
         if ([name hasPrefix:@"IMESSAGE_PROXY_"] && ![recognized containsObject:name]) {
@@ -1065,6 +1070,8 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
     configuration.allowedTargetsPath = environment[@"IMESSAGE_PROXY_ALLOWED_TARGETS_FILE"] ?: @"";
     configuration.imsgPath = environment[@"IMESSAGE_PROXY_IMSG_BIN"] ?: @"/opt/homebrew/bin/imsg";
     configuration.imsgSHA256 = environment[@"IMESSAGE_PROXY_IMSG_SHA256"] ?: @"";
+    // Absent means enabled, so an existing installation keeps its reads.
+    configuration.messagesReadEnabled = ![environment[@"IMESSAGE_PROXY_MESSAGES_READ"] isEqualToString:@"disabled"];
     configuration.messagesDatabasePath =
         environment[@"IMESSAGE_PROXY_MESSAGES_DATABASE_PATH"]
             ?: [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Messages/chat.db"];
@@ -2057,12 +2064,59 @@ static NSArray<NSDictionary *> *MessagesInChronologicalOrder(NSArray<NSDictionar
     }];
 }
 
+static BOOL IsValidSenderIdentifier(NSString *value) {
+    if (![value isKindOfClass:NSString.class] || value.length < 2 || value.length > 8) {
+        return NO;
+    }
+    NSCharacterSet *notRoman =
+        [[NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyz"] invertedSet];
+    return [value.lowercaseString rangeOfCharacterFromSet:notRoman].location == NSNotFound;
+}
+
+// Reading was declined at installation, not broken. The answer says so and says
+// how to change it, because a caller - or a console - that only learns "503"
+// cannot tell a missing permission from an outage, and the operator reading it
+// is the one person who can fix it.
+static IMPHTTPResponse *MessagesReadDisabledProblem(void) {
+    IMPHTTPResponse *response = Problem(409, @"messages-read-disabled",
+                                        @"Reading Messages is turned off for this installation. Turn it on with: "
+                                        @"imessage-proxy enable-messages-read");
+    return response;
+}
+
+// Every route whose answer comes out of the Messages database. Sending is not
+// here: it uses Apple Events and works without Full Disk Access, except when a
+// chat_id has to be resolved, which is handled at the send itself.
+static BOOL RequestReadsMessages(IMPHTTPRequest *request) {
+    return [request.path isEqualToString:@"/api/chats"] || [request.path hasPrefix:@"/api/chats/"] ||
+           [request.path isEqualToString:@"/api/scheduled-messages"] ||
+           [request.path isEqualToString:@"/api/statistics/messages"];
+}
+
+static NSString *MessagesReadAuditAction(IMPHTTPRequest *request) {
+    if ([request.path isEqualToString:@"/api/scheduled-messages"]) {
+        return @"scheduled.list";
+    }
+    if ([request.path isEqualToString:@"/api/statistics/messages"]) {
+        return @"statistics.read";
+    }
+    if ([request.path hasSuffix:@"/messages"]) {
+        return @"messages.history";
+    }
+    if ([request.path hasSuffix:@"/background"]) {
+        return @"background.read";
+    }
+    return [request.path isEqualToString:@"/api/chats"] ? @"chats.list" : @"chats.read";
+}
+
 static NSDictionary *KeyDTO(IMPAPIKeyRecord *record) {
     return @{
         @"id": record.uuid,
         @"name": record.name,
         @"key_prefix": record.keyPrefix ?: @"imp_",
         @"scopes": record.scopes,
+        @"sender_identifier": record.senderIdentifier,
+        @"sender_identifier_assigned": @(record.senderIdentifierAssigned),
         @"created_at": ISO8601(record.createdAt),
         @"expires_at": ISO8601(record.expiresAt) ?: NSNull.null,
         @"revoked_at": ISO8601(record.revokedAt) ?: NSNull.null,
@@ -2473,14 +2527,21 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
             NSError *versionError = nil;
             NSString *dependencyVersion = DependencyVersion(self.configuration, &versionError);
             NSError *readinessError = nil;
-            if (dependencyVersion == nil || !CheckMessagesReadPath(self.configuration, &readinessError)) {
+            BOOL readsDisabled = !self.configuration.messagesReadEnabled;
+            if (dependencyVersion == nil ||
+                (!readsDisabled && !CheckMessagesReadPath(self.configuration, &readinessError))) {
                 response = Problem(503, @"messages-unavailable", @"The Messages read path is unavailable.");
             } else {
                 response = JSONResponse(200, @{
                     @"status": @"ok",
                     @"version": ServerVersion,
                     @"uptime_seconds": @((NSUInteger) - [self.startedAt timeIntervalSinceNow]),
-                    @"messages": @{@"status": @"ready", @"dependency_version": dependencyVersion},
+                    @"messages": readsDisabled ? @{
+                        @"status": @"disabled",
+                        @"dependency_version": dependencyVersion,
+                        @"enable_with": @"imessage-proxy enable-messages-read"
+                    }
+                                               : @{@"status": @"ready", @"dependency_version": dependencyVersion},
                     @"key": @{
                         @"id": actor.uuid,
                         @"name": actor.name,
@@ -2491,6 +2552,9 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
                 });
             }
         }
+    } else if (!self.configuration.messagesReadEnabled && RequestReadsMessages(request)) {
+        auditAction = MessagesReadAuditAction(request);
+        response = MessagesReadDisabledProblem();
     } else if ([request.method isEqualToString:@"GET"] && [request.path isEqualToString:@"/api/chats"]) {
         auditAction = @"chats.list";
         if (![actor hasScope:IMPAPIKeyScopeMessagesRead]) {
@@ -2796,7 +2860,35 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
                     response = Problem(400, @"invalid-body", @"The request body must be a JSON object.");
                 } else {
                     NSDictionary *body = object;
-                    NSSet *allowed = [NSSet setWithArray:@[@"recipient", @"chat_id", @"text"]];
+                    NSSet *allowed =
+                        [NSSet setWithArray:@[@"recipient", @"chat_id", @"text", @"service", @"sender_identifier"]];
+                    // The transport is chosen, never guessed. A silent fallback
+                    // would leave the caller unable to know which transport
+                    // carried the message, and so which marker the recipient saw.
+                    // Absent means iMessage. Present but not a string is refused,
+                    // not read as absent: "service":null or "service":2 is a
+                    // caller who meant to choose, and answering it by picking the
+                    // default would be the guess this endpoint promises never to
+                    // make - over the one field that decides what the recipient
+                    // is charged and which marker they see.
+                    BOOL servicePresent = [body.allKeys containsObject:@"service"];
+                    NSString *requestedService = [body[@"service"] isKindOfClass:NSString.class] ? body[@"service"]
+                                                 : servicePresent                                ? nil
+                                                                                                 : @"imessage";
+                    BOOL sendAsSMS = [requestedService isEqualToString:@"sms"];
+                    BOOL validService = sendAsSMS || [requestedService isEqualToString:@"imessage"];
+                    // Only an administrator may send unmarked, and only by asking
+                    // for it explicitly per message. For every other key the
+                    // marker is not a default that can be overridden - the
+                    // parameter is refused outright, so there is no request shape
+                    // that removes it.
+                    BOOL identifierOptOutPresent = [body.allKeys containsObject:@"sender_identifier"];
+                    NSNumber *identifierOptOut =
+                        [body[@"sender_identifier"] isKindOfClass:NSNumber.class] ? body[@"sender_identifier"] : nil;
+                    BOOL validOptOut = !identifierOptOutPresent ||
+                                       (identifierOptOut != nil &&
+                                        CFGetTypeID((__bridge CFTypeRef)identifierOptOut) == CFBooleanGetTypeID());
+                    BOOL suppressIdentifier = identifierOptOutPresent && validOptOut && !identifierOptOut.boolValue;
                     BOOL recipientPresent = [body.allKeys containsObject:@"recipient"];
                     BOOL chatIDPresent = [body.allKeys containsObject:@"chat_id"];
                     NSString *recipient = [body[@"recipient"] isKindOfClass:NSString.class] ? body[@"recipient"] : nil;
@@ -2808,9 +2900,21 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
                     if (![[NSSet setWithArray:body.allKeys] isSubsetOfSet:allowed] ||
                         recipientPresent == chatIDPresent || (recipientPresent && !validRecipient) ||
                         (chatIDPresent && !validChat) || UnicodeCodePointLength(text) == 0 ||
-                        UnicodeCodePointLength(text) > 4000 || [text hasPrefix:@"-"] || !IsSafeMessageText(text)) {
+                        UnicodeCodePointLength(text) > 4000 || [text hasPrefix:@"-"] || !IsSafeMessageText(text) ||
+                        !validService || !validOptOut) {
                         response = Problem(400, @"invalid-message",
                                            @"Exactly one valid target and message text are required.");
+                    } else if (chatIDPresent && !self.configuration.messagesReadEnabled) {
+                        response = Problem(409, @"messages-read-disabled",
+                                           @"Sending to a chat_id needs to read Messages, which is turned off for this "
+                                           @"installation. Send to a recipient instead, or turn reading on with: "
+                                           @"imessage-proxy enable-messages-read");
+                    } else if (identifierOptOutPresent && ![actor hasScope:IMPAPIKeyScopeAdmin]) {
+                        // Refused rather than ignored: a caller that believed it
+                        // had suppressed the marker must not be told the send
+                        // succeeded as requested when it did not.
+                        response = Problem(403, @"identifier-required",
+                                           @"Only an administrator may send without the sender identifier.");
                     } else {
                         // Re-read rather than trusting the set captured at
                         // startup. The allowlist is editable by the CLI and by
@@ -2833,8 +2937,22 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
                         } else if (!targetAllowed) {
                             response = Problem(403, @"target-forbidden", @"The message target is not allowed.");
                         } else {
-                            NSDictionary *normalized = validChat ? @{@"chat_id": chatID, @"text": text}
-                                                                 : @{@"recipient": recipient, @"text": text};
+                            // The transport and the marker decision are part of what
+                            // was requested: replaying one idempotency key across a
+                            // different service, or with the marker suppressed, must
+                            // be a conflict rather than a silent replay of the first.
+                            NSDictionary *normalized = validChat ? @{
+                                @"chat_id": chatID,
+                                @"text": text,
+                                @"service": requestedService,
+                                @"identified": @(!suppressIdentifier)
+                            }
+                                                                 : @{
+                                                                       @"recipient": recipient,
+                                                                       @"text": text,
+                                                                       @"service": requestedService,
+                                                                       @"identified": @(!suppressIdentifier)
+                                                                   };
                             NSData *requestHash = [IMPAPIKeyStore SHA256ForData:JSONData(normalized, nil)];
                             if (![self recordAttemptForRequestID:requestID
                                                            actor:actor
@@ -2902,9 +3020,9 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
                                                     response =
                                                         [self upstreamProblem:ServerError(IMPServerErrorUpstream,
                                                                                           @"invalid chat response")];
-                                                } else if (![service isEqualToString:@"imessage"]) {
-                                                    response = Problem(409, @"not-imessage-chat",
-                                                                       @"The selected chat is not an iMessage chat.");
+                                                } else if (![service isEqualToString:requestedService]) {
+                                                    response = Problem(409, @"chat-service-mismatch",
+                                                                       @"The chat does not use the requested service.");
                                                 } else {
                                                     [arguments addObjectsFromArray:@[@"--chat-id", chatID.stringValue]];
                                                 }
@@ -2915,9 +3033,20 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
                                     }
                                     IMPIdempotencyState terminalState = IMPIdempotencyStateFailed;
                                     if (response == nil) {
+                                        // SMS is GSM-7, so its marker stays inside that alphabet;
+                                        // iMessage carries no such cost and gets the clearer glyph.
+                                        NSString *outgoing =
+                                            suppressIdentifier
+                                                ? text
+                                                : [text stringByAppendingFormat:@" %@%@",
+                                                                                sendAsSMS ? @"^" : @"\U0001F516",
+                                                                                actor.senderIdentifier];
                                         [arguments addObjectsFromArray:@[
-                                            @"--text", text, @"--service", @"imessage", @"--no-sms-fallback"
+                                            @"--text", outgoing, @"--service", sendAsSMS ? @"sms" : @"imessage"
                                         ]];
+                                        if (!sendAsSMS) {
+                                            [arguments addObject:@"--no-sms-fallback"];
+                                        }
                                         NSTimeInterval remaining = sendDeadline - MonotonicSeconds();
                                         if (remaining <= 0) {
                                             response = Problem(504, @"dependency-timeout",
@@ -3134,7 +3263,7 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
                             ? nil
                             : [NSJSONSerialization JSONObjectWithData:request.body options:0 error:nil];
             NSDictionary *body = [object isKindOfClass:NSDictionary.class] ? object : nil;
-            NSSet *allowed = [NSSet setWithArray:@[@"name", @"scopes", @"expires_in_days"]];
+            NSSet *allowed = [NSSet setWithArray:@[@"name", @"scopes", @"expires_in_days", @"sender_identifier"]];
             NSString *name = nil;
             BOOL validName = IsValidAPIKeyName(body[@"name"], &name);
             NSArray *scopes = [body[@"scopes"] isKindOfClass:NSArray.class] ? body[@"scopes"] : nil;
@@ -3147,9 +3276,15 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
             NSSet *validScopes =
                 [NSSet setWithArray:@[IMPAPIKeyScopeMessagesRead, IMPAPIKeyScopeMessagesSend, IMPAPIKeyScopeAdmin]];
             NSSet *scopeSet = scopes == nil ? nil : [NSSet setWithArray:scopes];
+            // Absent means "assign one", which is not the same as an explicit
+            // empty or wrongly typed value: those are mistakes and are refused.
+            BOOL identifierPresent = [body.allKeys containsObject:@"sender_identifier"];
+            NSString *requestedIdentifier =
+                [body[@"sender_identifier"] isKindOfClass:NSString.class] ? Trim(body[@"sender_identifier"]) : nil;
+            BOOL validIdentifier = !identifierPresent || IsValidSenderIdentifier(requestedIdentifier);
             if (body == nil || ![[NSSet setWithArray:body.allKeys] isSubsetOfSet:allowed] || !validName ||
                 scopes.count == 0 || scopes.count != scopeSet.count || ![scopeSet isSubsetOfSet:validScopes] ||
-                !validDays) {
+                !validDays || !validIdentifier) {
                 response = Problem(400, @"invalid-key", @"The API key request is invalid.");
             } else {
                 NSDate *expiresAt = [NSDate dateWithTimeIntervalSinceNow:daysValue.unsignedIntegerValue * 86400.0];
@@ -3160,17 +3295,24 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
                     NSDictionary *created = [self.keyStore createKeyNamed:name
                                                                    scopes:scopes
                                                                 expiresAt:expiresAt
+                                                         senderIdentifier:requestedIdentifier
                                                                 actorUUID:actor.uuid
                                                                     error:&storeError];
                     if (created == nil) {
-                        NSInteger status = storeError.code == IMPAPIKeyStoreErrorAuthorizationFailed
-                                               ? 403
-                                               : (storeError.code == IMPAPIKeyStoreErrorConflict ? 409 : 503);
+                        BOOL identifierTaken = storeError.code == IMPAPIKeyStoreErrorSenderIdentifierTaken;
+                        NSInteger status =
+                            storeError.code == IMPAPIKeyStoreErrorAuthorizationFailed
+                                ? 403
+                                : ((storeError.code == IMPAPIKeyStoreErrorConflict || identifierTaken) ? 409 : 503);
+                        NSString *identifierName = identifierTaken ? @"sender-identifier-taken" : @"key-limit";
                         response = Problem(status,
                                            status == 403 ? @"administrator-inactive"
-                                                         : (status == 409 ? @"key-limit" : @"key-store-unavailable"),
-                                           status == 403 ? @"An active administrator is required."
-                                                         : @"The API key could not be created.");
+                                                         : (status == 409 ? identifierName : @"key-store-unavailable"),
+                                           status == 403     ? @"An active administrator is required."
+                                           : identifierTaken ? @"That sender identifier already belongs to another "
+                                                               @"API key. Choose another, or omit it and one will be "
+                                                               @"assigned."
+                                                             : @"The API key could not be created.");
                     } else {
                         IMPAPIKeyRecord *record = created[IMPAPIKeyCreationRecordKey];
                         NSMutableDictionary *dto = [KeyDTO(record) mutableCopy];
@@ -3343,7 +3485,10 @@ static BOOL RunServer(IMPConfiguration *configuration, NSError **error) {
     // never appeared. Serving anyway lets /api/status name the failure and lets the
     // operator restore Full Disk Access without reinstalling anything.
     NSError *messagesError = nil;
-    if (!CheckMessagesReadPath(configuration, &messagesError)) {
+    if (!configuration.messagesReadEnabled) {
+        fprintf(stderr, "NOTICE  Reading Messages is turned off for this installation; sending is unaffected.\n");
+        fprintf(stderr, "        Turn it on with: imessage-proxy enable-messages-read\n");
+    } else if (!CheckMessagesReadPath(configuration, &messagesError)) {
         const char *detail = messagesError.localizedDescription.UTF8String;
         LogOperationalFailure("server.start", "messages_read_unavailable", messagesError);
         fprintf(stderr, "WARNING: the Messages read path is unavailable; serving in a degraded state.\n");

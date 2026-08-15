@@ -18,6 +18,10 @@ typedef NS_ERROR_ENUM(IMPAPIKeyStoreErrorDomain, IMPAPIKeyStoreErrorCode){
     IMPAPIKeyStoreErrorNotFound,
     IMPAPIKeyStoreErrorConflict,
     IMPAPIKeyStoreErrorInvalidState,
+    /// A caller asked for a sender identifier another key already holds. Distinct
+    /// from Conflict because the two answer differently: the retention cap says
+    /// delete a key, this says pick another identifier.
+    IMPAPIKeyStoreErrorSenderIdentifierTaken,
 };
 
 typedef NSString *IMPAPIKeyScope NS_TYPED_EXTENSIBLE_ENUM;
@@ -35,6 +39,12 @@ FOUNDATION_EXPORT NSString *const IMPAPIKeyCreationTokenKey;
 /// Non-secret display prefix (`imp_` plus the first eight encoded characters).
 @property (nonatomic, copy, readonly) NSString *keyPrefix;
 @property (nonatomic, copy, readonly) NSArray<IMPAPIKeyScope> *scopes;
+/// Roman-letter tag appended to every message this key sends, so a recipient can
+/// tell which credential wrote to them. Unique across keys and never empty.
+@property (nonatomic, copy, readonly) NSString *senderIdentifier;
+/// YES when the service chose the identifier rather than the operator, either at
+/// creation or when carrying a pre-identifier key forward.
+@property (nonatomic, readonly) BOOL senderIdentifierAssigned;
 @property (nonatomic, copy, readonly) NSDate *createdAt;
 @property (nonatomic, copy, readonly, nullable) NSDate *expiresAt;
 @property (nonatomic, copy, readonly, nullable) NSDate *revokedAt;
@@ -121,9 +131,13 @@ typedef NS_ENUM(NSInteger, IMPAuditPhase) {
 
 /// Returns { IMPAPIKeyCreationRecordKey: IMPAPIKeyRecord,
 ///           IMPAPIKeyCreationTokenKey: NSString }. Only the SHA-256 key hash is persisted.
+/// senderIdentifier may be nil, in which case the service assigns the next free
+/// one. It is never absent: every key is attributable, or the identifier would
+/// only constrain callers who chose to be identified.
 - (nullable NSDictionary<NSString *, id> *)createKeyNamed:(NSString *)name
                                                    scopes:(NSArray<IMPAPIKeyScope> *)scopes
                                                 expiresAt:(nullable NSDate *)expiresAt
+                                         senderIdentifier:(nullable NSString *)senderIdentifier
                                                 actorUUID:(NSString *)actorUUID
                                                     error:(NSError *_Nullable *_Nullable)error;
 

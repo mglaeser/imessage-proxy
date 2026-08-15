@@ -16,8 +16,8 @@ certificate authority client, and no public listener.
 | --- | --- |
 | Any API request | Hash-based key lookup, expiry, immediate revocation, scopes, per-source and per-key rate limits |
 | Browser console | Same-origin policy pinned to the loopback origin the server itself serves; CSP, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store` |
-| Sending | Explicit recipient allowlist, iMessage forced, carrier-SMS fallback disabled, per-send idempotency |
-| Reading | Bounded result sizes; no attachment paths, no arbitrary database access |
+| Sending | Explicit recipient allowlist, the named transport and no fallback to the other, a sender identifier on every message, per-send idempotency |
+| Reading | Bounded result sizes; no attachment paths, no arbitrary database access; declinable for the whole installation |
 | Dependency | `imsg` pinned by SHA-256 and re-verified before every spawn |
 | Audit | Privacy-safe metadata only; no message bodies, no recipients |
 
@@ -74,7 +74,28 @@ access control are its responsibility. The server deliberately does not send
 asserting it for a loopback origin would poison your real hostname later.
 
 **Full Disk Access is broad.** The grant lets the server read the whole Messages
-database. Grant it to the exact binary the installer names and nothing else.
+database. Grant it to the exact binary the installer names and nothing else. It
+is also the one macOS permission that is never prompted for, so nothing can
+acquire it behind your back — and nothing can be repaired without you. An
+installation that does not want to hand over the database can decline it and
+send only; the read routes then answer `409 messages-read-disabled` and sending
+is untouched.
+
+**The sender identifier is attribution, not authentication.** Every message a key
+sends ends with that key's two-to-eight-letter marker, so a recipient can tell
+which automation wrote to them. It proves nothing to them: anyone able to type
+those characters can imitate it, here or from any other phone. What it does
+guarantee is on this side of the boundary — a key cannot quietly drop its own
+marker. Only an `admin` key may suppress it, one message at a time, and any
+other key that asks is refused rather than silently obeyed, so a caller is never
+told a message went out unmarked when it did not.
+
+**An SMS is not an iMessage.** `"service": "sms"` hands the text to the carrier:
+no end-to-end encryption, delivery and retention by operators, and per-message
+cost. The service never chooses that for you — neither transport falls back to
+the other — but it will do it when a caller asks for it, so treat `messages:send`
+as authority to spend money and to send unencrypted text, not only to write to
+allowlisted people.
 
 **A key is a bearer credential.** Anyone holding it has its scopes until you
 revoke it. Issue narrow scopes, set short expiries, and revoke from the console

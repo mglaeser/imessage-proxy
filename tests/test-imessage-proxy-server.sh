@@ -498,10 +498,13 @@ sqlite3 "$database_path" \
   "WITH RECURSIVE sequence(value) AS (
      VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<1000
    )
-   INSERT INTO api_keys(uuid,name,key_prefix,key_hash,scopes,created_at)
+   INSERT INTO api_keys(uuid,name,key_prefix,key_hash,scopes,sender_identifier,
+                        sender_identifier_assigned,created_at)
    SELECT printf('00000000-0000-4000-8000-%012d',value),
           'capacity-fixture',printf('imp_%08d',value),
-          CAST(printf('%032d',value) AS BLOB),'messages:read',1000000+value
+          CAST(printf('%032d',value) AS BLOB),'messages:read',
+          char(97+((value-1)/676)%26, 97+((value-1)/26)%26, 97+(value-1)%26),1,
+          1000000+value
    FROM sequence;"
 if run_native check-bootstrap-admin capacity-admin 30 \
   > "$temporary/bootstrap-capacity.out" 2> "$temporary/bootstrap-capacity.err"; then
@@ -522,9 +525,10 @@ sqlite3 "$database_path" "DELETE FROM api_keys WHERE name='capacity-fixture';"
 # A token that cannot be written completely rolls its transaction back before
 # failure is reported, leaving unrelated keys intact and a clean retry path.
 sqlite3 "$database_path" \
-  "INSERT INTO api_keys(uuid,name,key_prefix,key_hash,scopes,created_at)
+  "INSERT INTO api_keys(uuid,name,key_prefix,key_hash,scopes,sender_identifier,
+                        sender_identifier_assigned,created_at)
    VALUES('11111111-1111-4111-8111-111111111111','cleanup-sentinel',
-          'imp_sentinel',zeroblob(32),'messages:read',2000000);"
+          'imp_sentinel',zeroblob(32),'messages:read','zzz',0,2000000);"
 closed_pipe="$temporary/bootstrap-delivery.pipe"
 mkfifo "$closed_pipe"
 # Open the FIFO read-write first: that never blocks and makes fd 8 a reader, so
@@ -1446,9 +1450,44 @@ for private_value in \
 done
 
 # The fake argv proves fixed direct commands, one database, no files, and no SMS fallback.
-grep -Fq -- '--service imessage --no-sms-fallback' "$fake_imsg_log"
-grep -Fq -- "--db $messages_database_path --json" "$fake_imsg_log"
-grep -Fq -- 'imsg chat-background status --chat-id 42' "$fake_imsg_log"
+#
+# Every grep over this log runs byte-oriented. The log now contains the sender
+# identifier marker, and BSD grep stops matching a file whose bytes are not valid
+# in the current locale - so these assertions failed on macOS against a log that
+# plainly contained what they were looking for, while passing on Linux.
+argv_contains() {
+  LC_ALL=C grep -Fq -- "$1" "$fake_imsg_log"
+}
+
+if ! argv_contains '--service imessage'; then
+  printf 'ERROR: no iMessage send reached the dependency\n' >&2
+  grep -F -- 'imsg send' "$fake_imsg_log" | head -3 >&2
+  exit 1
+fi
+argv_contains '--no-sms-fallback'
+# Every send carries the sending key's identifier: a message that reached imsg
+# without it would be unattributable to its recipient, which is the whole point.
+#
+# Deliberately spelling-agnostic about the marker itself. The fixture writes
+# argv with printf %q, and how that renders a bookmark emoji is a property of
+# the runner rather than of the product: raw bytes in a UTF-8 locale, octal
+# escapes in a single-byte one, and mixtures of the two in between. Two previous
+# attempts at this assertion named specific spellings and both failed on macOS
+# against a log that plainly contained the marker, so this one names none.
+#
+# What it does insist on is the part that carries the meaning: the text ends in
+# the identifier - two to eight lowercase letters - and immediately before them
+# is either an escape sequence or a byte outside printable ASCII, which is the
+# marker in whatever spelling this runner chose. A send with no marker ends in
+# an ordinary word preceded by a space, and is refused.
+if ! LC_ALL=C grep -Eq -- "--text .*(\\\\[0-9]{3}|[^ -~])[a-z]{2,8}'" "$fake_imsg_log"; then
+  printf 'ERROR: a send reached imsg without the sender identifier\n' >&2
+  # Octal, because the bytes are the question whenever this fails.
+  LC_ALL=C grep -F -- '--text' "$fake_imsg_log" | head -3 | od -c | head -20 >&2
+  exit 1
+fi
+argv_contains "--db $messages_database_path --json"
+argv_contains 'imsg chat-background status --chat-id 42'
 grep -Fq -- '--participants +15551234567\,me@example.test' "$fake_imsg_log"
 grep -Fq -- '--start 2026-08-09T11:59:00Z --end 2026-08-09T12:02:00Z' "$fake_imsg_log"
 if grep -Eiq -- '--file|--transport|--region' "$fake_imsg_log"; then

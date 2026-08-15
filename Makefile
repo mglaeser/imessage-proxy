@@ -35,7 +35,7 @@ CONFIG_FILES := \
 	config/io.github.mglaeser.imessage-proxy.plist.in \
 	config/imessage-proxy.env.example
 WEB_FILES := web/index.html web/app.js web/styles.css
-JAVASCRIPT_SOURCES := web/app.js tests/test-web-ui.mjs tests/test-schema-fingerprint.mjs
+JAVASCRIPT_SOURCES := web/app.js tests/test-web-ui.mjs tests/test-schema-fingerprint.mjs tests/test-native-invariants.mjs
 
 CLANG ?= $(shell xcrun --find clang 2>/dev/null)
 MACOS_SDK_PATH ?= $(shell xcrun --sdk macosx --show-sdk-path 2>/dev/null)
@@ -98,8 +98,8 @@ test-uninstaller: ## Run portable uninstaller behavior tests.
 test-bash-compat: ## Run portable interpreter-compatibility tests across bash 3.2-5.2 semantics.
 	bash tests/test-bash-compatibility.sh
 
-test-schema: _require-node ## Verify the key-store schema fingerprint and its migration.
-	node --test tests/test-schema-fingerprint.mjs
+test-schema: _require-node ## Verify the key-store schema fingerprint and the native invariants.
+	node --test tests/test-schema-fingerprint.mjs tests/test-native-invariants.mjs
 
 test-ui: _require-node ## Run dependency-free management-console behavior tests.
 	node --test tests/test-web-ui.mjs

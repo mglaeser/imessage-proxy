@@ -27,7 +27,7 @@ itself speaks plain HTTP on loopback, so the base URL is
 | --- | --- |
 | `messages:read` | Chats, background state, history, scheduled messages, and statistics |
 | `messages:send` | Allowlisted text sends |
-| `admin` | Audit, key, and recipient-allowlist administration, and every read/send operation |
+| `admin` | Audit, key, and recipient-allowlist administration, sending without the sender identifier, and every read/send operation |
 
 `GET /api/status` accepts any valid key. A missing, malformed, expired, revoked,
 or unknown key returns the same `401` response. A valid key without the required
@@ -35,9 +35,9 @@ scope returns `403`.
 
 ## Status
 
-`GET /api/status` exercises the native service, pinned `imsg` dependency, and a
-minimal Messages database read. It is a readiness check, not merely a process
-check.
+`GET /api/status` exercises the native service, the pinned `imsg` dependency,
+and — on an installation that reads Messages — a minimal Messages database read.
+It is a readiness check, not merely a process check.
 
 ```bash
 curl --fail-with-body \
@@ -63,6 +63,53 @@ curl --fail-with-body \
   }
 }
 ```
+
+## When reading is turned off
+
+Reading and sending need different macOS permissions, and only one of them is
+ever asked for. Sending uses Apple Events, which prompts the first time and is
+granted in a dialog. Reading needs Full Disk Access, which macOS never prompts
+for: an unauthorised read of `chat.db` simply fails, and a human has to add the
+binary in System Settings by hand. An installation may therefore decline reading
+altogether and run as a send-only service.
+
+Where reading is off, the `messages` object of `GET /api/status` says so and
+names the command that turns it back on:
+
+```json
+{
+  "status": "disabled",
+  "dependency_version": "0.13.4",
+  "enable_with": "imessage-proxy enable-messages-read"
+}
+```
+
+Every route whose answer comes out of the Messages database then refuses:
+
+| Route | While reading is off |
+| --- | --- |
+| `GET /api/chats`, `/api/chats/{id}`, `/api/chats/{id}/messages`, `/api/chats/{id}/background` | `409 messages-read-disabled` |
+| `GET /api/scheduled-messages` | `409 messages-read-disabled` |
+| `GET /api/statistics/messages` | `409 messages-read-disabled` |
+| `POST /api/messages` with `chat_id` | `409 messages-read-disabled`, because the chat must be resolved first |
+| `POST /api/messages` with `recipient` | Unaffected, on either transport |
+
+```json
+{
+  "type": "https://github.com/mglaeser/imessage-proxy/problems/messages-read-disabled",
+  "title": "Conflict",
+  "status": 409,
+  "detail": "Reading Messages is turned off for this installation. Turn it on with: imessage-proxy enable-messages-read",
+  "request_id": "1f825d86-1626-4a0c-a163-644a4cebd91b"
+}
+```
+
+This is a decision, not an outage, which is why it is `409` and not `503`: it
+answers the same way until an operator changes the installation. Every one of
+those answers names `imessage-proxy enable-messages-read`, because the person
+reading the detail is usually the one person who can act on it. Nothing else is
+affected — keys, the allowlist, audit events and sends to a `recipient` all work
+exactly as they do on a Mac that reads.
 
 ## Chats
 
@@ -186,17 +233,20 @@ stays available per chat without expanding that permission boundary.
 Unicode code points and must be either `+` followed by 7-15 ASCII digits whose
 first digit is nonzero, or an email-like handle containing exactly one `@`.
 Whitespace, control characters, leading hyphens, and contact names are rejected.
-The recipient must exactly match the typed allowlist. The service always requests
-iMessage and disables carrier-SMS fallback. Text may contain tabs and line
-breaks; other control characters and a leading hyphen are rejected because the
-pinned dependency parses dash-prefixed values as options. An allowlisted but
-unknown `chat_id` returns `404` without sending.
+The recipient must exactly match the typed allowlist. Text may contain tabs and
+line breaks; other control characters and a leading hyphen are rejected because
+the pinned dependency parses dash-prefixed values as options. An allowlisted but
+unknown `chat_id` returns `404` without sending. Sending to a `recipient` needs
+nothing read from Messages; sending to a `chat_id` resolves the chat first, so
+it returns `409` where [reading is turned off](#when-reading-is-turned-off).
 
 Every logical send needs an `Idempotency-Key` containing `8-128` ASCII letters,
 digits, periods, underscores, tildes, or hyphens. Generate the value before the
 first attempt and persist it beside the calling job. Reusing it with the same
 request returns the stored outcome; reusing it with different content returns
-`409`.
+`409`. The transport and the marker decision are part of the request, so
+replaying one key as an SMS, or with the marker suppressed, is a conflict rather
+than a replay of what was sent the first time.
 
 ```bash
 curl --fail-with-body \
@@ -223,6 +273,61 @@ chat_id:42
 
 The allowlist has no wildcard. An empty file disables sending without disabling
 reads or key administration.
+
+### Choosing the transport
+
+`service` is `imessage` (the default) or `sms`. The chosen transport is the one
+used and the only one tried: an iMessage that cannot go as an iMessage fails as
+an iMessage, and nothing silently becomes a carrier message with carrier costs
+and no encryption. A caller therefore always knows which transport carried its
+message, and so which marker the recipient saw.
+
+```json
+{"recipient":"+15551234567","text":"Hello","service":"sms"}
+```
+
+Omitting `service` means `imessage`. Sending it as anything other than one of the
+two strings — `null`, a number, a list — is `400` (`invalid-message`) rather than
+the default, because a caller who sent the field meant to choose, and the field
+decides both what the recipient is charged and which marker they see.
+
+A `chat_id` names an existing conversation, which already has a service. Asking
+for the other one returns `409` with `chat-service-mismatch` rather than
+switching transport behind your back. That code replaced `not-imessage-chat`,
+which could only ever mean one thing while iMessage was the only transport.
+
+### The sender identifier
+
+Every key has a `sender_identifier`: two to eight roman letters, unique across
+keys. Every message the key sends ends with it, so the person receiving one can
+tell which automation wrote to them, and tell all of them from you typing in
+Messages.app.
+
+```text
+iMessage   Deploy 41 finished 🔖dep
+SMS        Deploy 41 finished ^dep
+```
+
+The two markers differ because the transports do. An SMS segment holds 160
+characters while the text stays inside the GSM-7 alphabet and 70 as soon as one
+character falls outside it, so an emoji in the marker would more than halve the
+room for the message and charge for it on every message. `^` is in GSM-7.
+iMessage has no such alphabet, so it carries the clearer glyph, the bookmark
+emoji `U+1F516`, at no cost.
+
+Only an administrator may send an unmarked message, and only by asking for it on
+that one message:
+
+```json
+{"recipient":"person@example.net","text":"Hello","sender_identifier":false}
+```
+
+Any key without `admin` that sends `sender_identifier` at all — `true` or
+`false` — is refused with `403` and `identifier-required`. The field is refused
+rather than ignored: a caller that believed it had suppressed the marker must
+not be told its message went out as requested when it went out marked. So for
+every other key the identifier is not a default to override; there is no request
+shape that removes it.
 
 ### Managing the allowlist
 
@@ -319,7 +424,11 @@ curl --fail-with-body \
 
 `GET /api/keys` returns metadata for active, expired, and revoked keys,
 newest-created first. Key storage and this response are both capped at 1000
-rows. It never returns a plaintext credential or hash.
+rows. It never returns a plaintext credential or hash. Each row carries the
+key's `sender_identifier` and a `sender_identifier_assigned` flag, which is
+`true` when the service chose the identifier and `false` when the administrator
+creating the key named it. That list is also how you find out which key wrote a
+message a recipient is asking about.
 
 ```bash
 curl --fail-with-body \
@@ -329,23 +438,32 @@ curl --fail-with-body \
 
 ### Create
 
-`POST /api/keys` accepts a display name, one or more unique scopes, and an expiry
-of `1-365` days. The default is 90 days. Leading and trailing whitespace is
-removed from the name; the normalized value must encode to `1-80` UTF-8 bytes
-and contain no Unicode control characters. Storage is capped at 1000 keys.
-Before enforcing that cap, creation deletes at most 100 expired or revoked keys
-that no idempotency record still references; if the store remains full, creation
-returns `409`. Historical audit rows retain the event while their deleted caller
-reference becomes null.
+`POST /api/keys` accepts a display name, one or more unique scopes, an expiry of
+`1-365` days, and an optional `sender_identifier`. The default expiry is 90 days.
+Leading and trailing whitespace is removed from the name; the normalized value
+must encode to `1-80` UTF-8 bytes and contain no Unicode control characters.
+Storage is capped at 1000 keys. Before enforcing that cap, creation deletes at
+most 100 expired or revoked keys that no idempotency record still references; if
+the store remains full, creation returns `409`. Historical audit rows retain the
+event while their deleted caller reference becomes null.
 
 ```bash
 curl --fail-with-body \
   --request POST \
   --header "Authorization: Bearer $IMESSAGE_PROXY_API_KEY" \
   --header 'Content-Type: application/json' \
-  --data '{"name":"automation-a","scopes":["messages:read","messages:send"],"expires_in_days":90}' \
+  --data '{"name":"automation-a","scopes":["messages:read","messages:send"],"expires_in_days":90,"sender_identifier":"aut"}' \
   "$IMESSAGE_PROXY_URL/api/keys"
 ```
+
+Name the [sender identifier](#the-sender-identifier) when the recipients of this
+key's messages should recognise it, and omit it to have the shortest unused one
+assigned. Either way the key has one, `sender_identifier_assigned` records which
+of the two happened, and it does not change for the life of the key. An
+identifier any key on record still holds is refused with `409`
+(`sender-identifier-taken`), revoked and expired keys included, because a marker
+that has meant two different senders is worse than no marker. Choose another, or
+omit the field and take the assigned one.
 
 The response returns the new `imp_…` credential once. Store it immediately; it
 cannot be recovered from the database later. Its `Location` header identifies
@@ -393,10 +511,10 @@ unified-log category:
 | --- | --- |
 | `400` | Invalid path/query/body/header contract |
 | `401` | Missing or unusable bearer key |
-| `403` | Missing scope, disallowed browser origin, or non-allowlisted target |
+| `403` | Missing scope, disallowed browser origin, non-allowlisted target, or a non-admin key asking to send unmarked |
 | `404` | Authenticated resource does not exist |
 | `408` | Client request transfer exceeded its deadline |
-| `409` | Idempotency/send-state conflict, key-capacity limit, or final-admin protection |
+| `409` | Idempotency/send-state conflict, chat/service mismatch, reading turned off, key-capacity limit, or final-admin protection |
 | `413` | Body exceeds 64 KiB |
 | `415` | JSON endpoint received another media type |
 | `429` | Per-source or per-key rate limit exceeded |
