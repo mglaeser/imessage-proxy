@@ -3310,8 +3310,8 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
                                                          : (status == 409 ? identifierName : @"key-store-unavailable"),
                                            status == 403     ? @"An active administrator is required."
                                            : identifierTaken ? @"That sender identifier already belongs to another "
-                                                                "API key. Choose another, or omit it and one will be "
-                                                                "assigned."
+                                                               @"API key. Choose another, or omit it and one will be "
+                                                               @"assigned."
                                                              : @"The API key could not be created.");
                     } else {
                         IMPAPIKeyRecord *record = created[IMPAPIKeyCreationRecordKey];
