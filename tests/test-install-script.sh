@@ -222,6 +222,7 @@ printf '%s\n' "$*" >> "$STUB_LOG"
 case "$1 ${2:-}" in
   'targets list') printf '%s\n' "${STUB_TARGETS:-}" ;;
   'send-test '*) exit "${STUB_SEND_STATUS:-0}" ;;
+  'server-status '*|'server-status') exit "${STUB_STATUS_STATUS:-0}" ;;
 esac
 exit 0
 STUB
@@ -527,5 +528,43 @@ grep -Fq 'docs/install.md' "$REPOSITORY/README.md" ||
   fail 'README does not link to the install guide'
 [[ "$(grep -c '' "$REPOSITORY/README.md")" -le 220 ]] ||
   fail "README has grown back to $(grep -c '' "$REPOSITORY/README.md") lines"
+
+# Re-running the installer over a live service refreshes the CLI in place and
+# returns early without rendering the LaunchAgent. When the refreshed CLI would
+# render a different one - this release adds an environment key to it - every
+# lifecycle command refuses until it is staged again, so the report must not
+# send the operator to a command that is about to fail on a healthy service.
+log="$(stub_log)"
+current="$(
+  STUB_LOG="$log" bash -c "
+    source '$INSTALLER'
+    report_existing_installation '$stub_cli'
+  " 2>&1
+)" || fail 'reporting an existing installation failed'
+assert_contains 'server-status' "$current"
+if [[ "$current" == *'no longer matches'* ]]; then
+  fail "a current installation was reported as needing a re-render: $current"
+fi
+
+log="$(stub_log)"
+stale="$(
+  STUB_LOG="$log" STUB_STATUS_STATUS=1 bash -c "
+    source '$INSTALLER'
+    report_existing_installation '$stub_cli'
+  " 2>&1
+)" || fail 'reporting a stale LaunchAgent failed the installation'
+assert_contains 'no longer matches' "$stale"
+for expected in \
+  "server-stop --confirm 'STOP IMESSAGE PROXY SERVER'" \
+  'imessage-proxy prepare' \
+  'imessage-proxy server-install'; do
+  assert_contains "$expected" "$stale"
+done
+# The command that cannot work must not also be recommended.
+if [[ "$stale" == *'Check it, or create more keys'* ]]; then
+  fail "a stale LaunchAgent was still reported with the server-status suggestion: $stale"
+fi
+[[ "$(< "$log")" == 'server-status' ]] ||
+  fail "the report must ask the CLI rather than guess: $(< "$log")"
 
 printf '%s\n' 'iMessage Proxy installer tests passed.'

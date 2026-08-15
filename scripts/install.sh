@@ -1154,18 +1154,37 @@ print_path_result() {
   note "  Until then use the full path: $install_prefix/bin/imessage-proxy"
 }
 
+# The refreshed CLI may render a LaunchAgent that this installation predates -
+# this release adds an environment key to it - and the staged plist is still the
+# one the previous CLI wrote. Every lifecycle command compares the two and
+# refuses while they differ, so suggesting server-status here would hand the
+# operator a command that fails on a service that is running perfectly well.
+# The CLI is asked, rather than the difference guessed at, because it is the
+# thing that will render the plist and the thing that will refuse.
 report_existing_installation() {
+  local cli="$1"
   note ''
   note "$SERVER_LABEL is already loaded, so the installer left it running."
   note 'The CLI and product assets were refreshed in place.'
   note ''
-  note 'Check it, or create more keys from the management console:'
-  note "  $install_prefix/bin/imessage-proxy server-status"
+  if "$cli" server-status > /dev/null 2>&1; then
+    note 'Check it, or create more keys from the management console:'
+    note "  $install_prefix/bin/imessage-proxy server-status"
+    ensure_path_entry
+    print_path_result
+    note ''
+    note 'To adopt a rebuilt server binary, stop the edge and server, then run'
+    note 'prepare, build-host, and server-install as described in the operations guide.'
+    return 0
+  fi
+  note 'The service is still running, but this release changes its LaunchAgent,'
+  note 'so the staged one no longer matches the refreshed CLI and the lifecycle'
+  note 'commands refuse until it is rendered again. Nothing is lost; adopt it:'
+  note "  imessage-proxy server-stop --confirm 'STOP IMESSAGE PROXY SERVER'"
+  note '  imessage-proxy prepare'
+  note '  imessage-proxy server-install'
   ensure_path_entry
   print_path_result
-  note ''
-  note 'To adopt a rebuilt server binary, stop the edge and server, then run'
-  note 'prepare, build-host, and server-install as described in the operations guide.'
 }
 
 self_test() {
@@ -1266,7 +1285,7 @@ main() {
   cli="$(build_and_install_product "$source_tree" "$source_is_temporary")"
 
   if service_is_installed; then
-    report_existing_installation
+    report_existing_installation "$cli"
     return 0
   fi
 
