@@ -137,3 +137,54 @@ test("the SMS marker stays inside GSM-7", () => {
   assert.equal(sms, "^", "the SMS marker must be a GSM-7 character");
   assert.match(imessage, /^\\U[0-9A-F]{8}$/, "the iMessage marker must be an escaped code point, not a raw byte");
 });
+
+test("a chosen sender identifier is refused before the insert, not by the constraint", () => {
+  // Left to the UNIQUE constraint, a duplicate reaches createKeyLockedNamed's
+  // retry loop, which reads any constraint failure as a key-material collision
+  // and regenerates the token four times - none of which changes the identifier.
+  // The caller then gets 503 "key-store-unavailable" for a permanent mistake,
+  // and a client obeying that status retries forever.
+  assert.match(store, /SELECT 1 FROM api_keys WHERE sender_identifier=\? LIMIT 1/,
+    "an explicitly chosen identifier must be checked against the table before the insert");
+  const check = store.match(/if \(ok && !identifierAssigned\) \{[\s\S]{0,200}?\}/)?.[0];
+  assert.ok(check, "the check must run only for a caller-supplied identifier");
+  assert.ok(check.includes("refuseTakenSenderIdentifier"), "the supplied identifier must be the one checked");
+  assert.match(store, /IMPAPIKeyStoreErrorSenderIdentifierTaken,\s*\n?\s*@"That sender identifier already belongs/,
+    "a taken identifier must have its own error code, not the capacity Conflict");
+  assert.match(header, /IMPAPIKeyStoreErrorSenderIdentifierTaken/, "the error code must be declared in the header");
+  // 409 with the capacity reason would tell an operator to delete a key.
+  assert.match(server, /@"sender-identifier-taken"/, "the refusal must reach the caller as its own problem code");
+  const mapping = server.match(/BOOL identifierTaken = storeError\.code == IMPAPIKeyStoreErrorSenderIdentifierTaken;[\s\S]{0,400}?;\n/);
+  assert.ok(mapping, "key creation must map the taken-identifier error");
+  assert.ok(/\? 409 : 503|409 : 503/.test(mapping[0]) || mapping[0].includes("409"),
+    "a taken identifier must be a 409, not a 503 that invites a retry");
+});
+
+test("a service that is present but not a string is refused, not defaulted", () => {
+  // "service":null or "service":2 is a caller who meant to choose. Reading it as
+  // absent picks iMessage, which is the guess this endpoint promises never to
+  // make - over the field that decides carrier cost and which marker is sent.
+  assert.match(server, /BOOL servicePresent = \[body\.allKeys containsObject:@"service"\]/,
+    "the send route must distinguish an absent service from an unusable one");
+  const parse = server.match(/NSString \*requestedService =[\s\S]{0,300}?;\n/)?.[0];
+  assert.ok(parse, "the service must be parsed from the body");
+  assert.ok(parse.includes("servicePresent"), "a present-but-non-string service must not fall back to the default");
+  assert.ok(/[?:]\s*nil/.test(parse), "an unusable service must resolve to nil so validService refuses it");
+  assert.ok(parse.indexOf("nil") < parse.indexOf('@"imessage"'),
+    "the default belongs on the absent branch, not the unusable one");
+});
+
+test("the previous schema is carried forward rather than refused", () => {
+  // Refusing it costs an operator every key they have issued, and the refusal
+  // arrives only after prepare has already replaced the server that was working.
+  const migratable = store.match(/static const int kIMPMigratableSchemaVersion = (\d+);/);
+  const current = store.match(/static const int kIMPSchemaVersion = (\d+);/);
+  assert.ok(migratable && current, "both schema versions must be declared");
+  assert.equal(Number(migratable[1]), Number(current[1]) - 1, "exactly the preceding schema is migrated");
+  assert.match(store, /BOOL migratable = applicationID == kIMPApplicationID && schemaVersion == kIMPMigratableSchemaVersion/,
+    "the open path must recognise the previous schema");
+  assert.match(store, /if \(!fresh && !current && !migratable\)/, "only an unrecognised schema may be refused");
+  // The refusal an operator does meet must say what to do about it.
+  const refusal = store.match(/if \(!fresh && !current && !migratable\) \{[\s\S]{0,600}?\}/)[0];
+  assert.ok(refusal.includes("uninstall.sh --purge"), "the refusal must name the recovery command");
+});

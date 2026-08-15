@@ -2865,8 +2865,16 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
                     // The transport is chosen, never guessed. A silent fallback
                     // would leave the caller unable to know which transport
                     // carried the message, and so which marker the recipient saw.
-                    NSString *requestedService =
-                        [body[@"service"] isKindOfClass:NSString.class] ? body[@"service"] : @"imessage";
+                    // Absent means iMessage. Present but not a string is refused,
+                    // not read as absent: "service":null or "service":2 is a
+                    // caller who meant to choose, and answering it by picking the
+                    // default would be the guess this endpoint promises never to
+                    // make - over the one field that decides what the recipient
+                    // is charged and which marker they see.
+                    BOOL servicePresent = [body.allKeys containsObject:@"service"];
+                    NSString *requestedService = [body[@"service"] isKindOfClass:NSString.class] ? body[@"service"]
+                                                 : servicePresent                                ? nil
+                                                                                                 : @"imessage";
                     BOOL sendAsSMS = [requestedService isEqualToString:@"sms"];
                     BOOL validService = sendAsSMS || [requestedService isEqualToString:@"imessage"];
                     // Only an administrator may send unmarked, and only by asking
@@ -3291,14 +3299,20 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
                                                                 actorUUID:actor.uuid
                                                                     error:&storeError];
                     if (created == nil) {
-                        NSInteger status = storeError.code == IMPAPIKeyStoreErrorAuthorizationFailed
-                                               ? 403
-                                               : (storeError.code == IMPAPIKeyStoreErrorConflict ? 409 : 503);
+                        BOOL identifierTaken = storeError.code == IMPAPIKeyStoreErrorSenderIdentifierTaken;
+                        NSInteger status =
+                            storeError.code == IMPAPIKeyStoreErrorAuthorizationFailed
+                                ? 403
+                                : ((storeError.code == IMPAPIKeyStoreErrorConflict || identifierTaken) ? 409 : 503);
+                        NSString *identifierName = identifierTaken ? @"sender-identifier-taken" : @"key-limit";
                         response = Problem(status,
                                            status == 403 ? @"administrator-inactive"
-                                                         : (status == 409 ? @"key-limit" : @"key-store-unavailable"),
-                                           status == 403 ? @"An active administrator is required."
-                                                         : @"The API key could not be created.");
+                                                         : (status == 409 ? identifierName : @"key-store-unavailable"),
+                                           status == 403     ? @"An active administrator is required."
+                                           : identifierTaken ? @"That sender identifier already belongs to another "
+                                                                "API key. Choose another, or omit it and one will be "
+                                                                "assigned."
+                                                             : @"The API key could not be created.");
                     } else {
                         IMPAPIKeyRecord *record = created[IMPAPIKeyCreationRecordKey];
                         NSMutableDictionary *dto = [KeyDTO(record) mutableCopy];

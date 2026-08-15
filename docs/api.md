@@ -286,6 +286,11 @@ message, and so which marker the recipient saw.
 {"recipient":"+15551234567","text":"Hello","service":"sms"}
 ```
 
+Omitting `service` means `imessage`. Sending it as anything other than one of the
+two strings — `null`, a number, a list — is `400` (`invalid-message`) rather than
+the default, because a caller who sent the field meant to choose, and the field
+decides both what the recipient is charged and which marker they see.
+
 A `chat_id` names an existing conversation, which already has a service. Asking
 for the other one returns `409` with `chat-service-mismatch` rather than
 switching transport behind your back. That code replaced `not-imessage-chat`,
@@ -455,9 +460,10 @@ Name the [sender identifier](#the-sender-identifier) when the recipients of this
 key's messages should recognise it, and omit it to have the shortest unused one
 assigned. Either way the key has one, `sender_identifier_assigned` records which
 of the two happened, and it does not change for the life of the key. An
-identifier any key on record still holds is refused, revoked and expired keys
-included, because a marker that has meant two different senders is worse than no
-marker.
+identifier any key on record still holds is refused with `409`
+(`sender-identifier-taken`), revoked and expired keys included, because a marker
+that has meant two different senders is worse than no marker. Choose another, or
+omit the field and take the assigned one.
 
 The response returns the new `imp_…` credential once. Store it immediately; it
 cannot be recovered from the database later. Its `Location` header identifies

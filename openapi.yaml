@@ -847,7 +847,9 @@ components:
         uses (chat-service-mismatch, which replaced not-imessage-chat when the
         transport became a request field), with an installation that does not
         read Messages (messages-read-disabled), with API-key capacity
-        (key-limit), or with final-administrator protection (last-admin).
+        (key-limit), with a sender identifier another key already holds
+        (sender-identifier-taken), or with final-administrator protection
+        (last-admin).
       content:
         application/problem+json:
           schema:

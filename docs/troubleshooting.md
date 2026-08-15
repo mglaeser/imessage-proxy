@@ -100,6 +100,29 @@ child of your terminal inherits the same refusal. If you want to tighten a
 permissive directory for your own reasons, grant your terminal Full Disk Access
 first — but the service does not require it.
 
+## `The API key database schema is unsupported by this release`
+
+The store opens a database it created (the current schema) and a database the
+immediately preceding release created, which it upgrades in place on the first
+start: every key keeps its token, its scopes and its expiry, and gains the
+[sender identifier](api.md#the-sender-identifier) it did not have before. The
+upgrade is one transaction. If it cannot finish, nothing is written and the
+database still opens on the release you came from.
+
+This message means the file is neither of those — a database from a much older
+release, from a newer one after a downgrade, or a file that is not this store at
+all. There is no upgrade path from an unrecognised schema, so recovery is a
+reinstall, and **it discards every key you have issued**:
+
+```bash
+scripts/uninstall.sh --purge --confirm 'DESTROY IMESSAGE PROXY STATE' && scripts/install.sh
+```
+
+Every caller holding one of the old keys stops working, so reissue them from the
+new administrator key the installer prints. If you did not expect this message,
+check you are not pointing a new binary at an old state directory before you
+purge anything — the database is not modified by a refusal.
+
 ## The native server does not start
 
 Read the native server's own log first. The LaunchAgent writes its standard

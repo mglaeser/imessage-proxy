@@ -18,6 +18,10 @@ typedef NS_ERROR_ENUM(IMPAPIKeyStoreErrorDomain, IMPAPIKeyStoreErrorCode){
     IMPAPIKeyStoreErrorNotFound,
     IMPAPIKeyStoreErrorConflict,
     IMPAPIKeyStoreErrorInvalidState,
+    /// A caller asked for a sender identifier another key already holds. Distinct
+    /// from Conflict because the two answer differently: the retention cap says
+    /// delete a key, this says pick another identifier.
+    IMPAPIKeyStoreErrorSenderIdentifierTaken,
 };
 
 typedef NSString *IMPAPIKeyScope NS_TYPED_EXTENSIBLE_ENUM;
