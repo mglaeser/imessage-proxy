@@ -14,6 +14,43 @@ and operational model described below.
   The run refuses at the outset if the path is not absolute, if its directory
   does not exist or is not writable, or if the file is already there — so an
   install that cannot deliver the key fails before it generates one.
+- `install.sh --bind ADDRESS` and `IMESSAGE_PROXY_BIND_ADDRESS` serve the API on
+  an address other than loopback, with a guided question that keeps loopback on
+  Enter. The default is unchanged and every path away from it is one an operator
+  asked for by name. `0.0.0.0` means every interface, including networks the Mac
+  joins later, so it needs `--expose-confirm` or the word `EXPOSE` at the prompt
+  rather than being one more address.
+
+  The bind address stopped being a compile-time constant, and the guarantee that
+  replaced it is narrower rather than weaker: the server still calls
+  `getsockname()` after `listen()` and refuses to serve unless the listener is on
+  exactly the configured address and port, and `server-status` asserts the same,
+  so a bind that widened without being asked to still fails closed. An exposed
+  listener is plain HTTP — unencrypted, with the bearer key the only control —
+  which `docs/security.md` now says where it used to promise loopback.
+
+  Exposing the port exposes the API, not the console. The browser origins the
+  server accepts are derived from what it bound: the loopback origin, the
+  `localhost` spelling, and a specific bound address. `0.0.0.0` adds none,
+  because enumerating interfaces to guess would accept anything that resolves to
+  the machine. Clients that send no `Origin` are unaffected.
+- API keys may expire up to four years out, `1-1461` days, rather than one year.
+  1461 rather than 1460 because four calendar years contain a leap day, so "four
+  years from today" always validates instead of falling one short in three years
+  out of four. The bound moved together everywhere it is enforced: the installer,
+  the CLI, the native validator, the console form and `openapi.yaml`.
+- `bootstrap --unattended` waives the controlling-terminal gate, and the
+  installer passes it when both questions were answered on the command line. The
+  gate exists so an automated context cannot change runtime state by accident;
+  an install that answered everything up front is the opposite of an accident,
+  and `ssh mac 'curl ... | bash'` has no controlling terminal, which is the shape
+  of an unattended install rather than a reason to refuse one.
+- The installer's progress is colour-coded, with the strongest colour reserved
+  for the two things an operator has to act on: the question about reading their
+  Messages, and the Full Disk Access steps behind it. Failures are red, completed
+  steps green, and prompts are the only lines in the question colour. Colour is
+  still suppressed without a terminal on stderr, under `NO_COLOR`, and under
+  `TERM=dumb`, so an unattended run's output is byte-identical to before.
 - The first administrator key is identified as `adm`, so the first messages an
   installation sends end with `🔖adm` rather than the sequential `🔖aa`. Not
   reserved: a bootstrap that finds `adm` held by a revoked administrator takes
@@ -57,6 +94,15 @@ and operational model described below.
 
 ### Fixed
 
+- `--key-file` cannot be redirected onto a symlink. `-e` is false for a symlink
+  whose target does not exist, so a dangling one passed the overwrite check and
+  was then followed by the redirection, putting the credential wherever it
+  pointed. Symlinks are refused by name, and the creation now runs under
+  `noclobber`, which makes it `O_EXCL` and so refuses a file or symlink that
+  appeared during the install rather than in the second before it started.
+- A failed `bootstrap-admin` no longer leaves an empty file where `--key-file`
+  said the key would be. It read as a key that had not arrived, and it blocked
+  the retry by existing.
 - The README and install guide describe the installer that ships. The README
   still said the installer "asks nothing" and that Full Disk Access was the only
   manual step, which stopped being true when the test send and the Messages-read

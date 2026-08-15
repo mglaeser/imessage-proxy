@@ -458,7 +458,7 @@ rm -f -- "${fake_imsg}.malformed"
 # boundary and never creates or reveals a credential.
 bootstrap_name="$(printf 'b%.0s' {1..80})"
 readonly bootstrap_name
-[[ "$(run_native check-bootstrap-admin "  $bootstrap_name  " 365)" == ok ]]
+[[ "$(run_native check-bootstrap-admin "  $bootstrap_name  " 1461)" == ok ]]
 [[ "$(sqlite3 "$database_path" 'SELECT count(*) FROM api_keys;')" == 0 ]]
 
 invalid_bootstrap_name="$(printf 'n%.0s' {1..81})"
@@ -483,9 +483,9 @@ fi
 [[ ! -s "$temporary/bootstrap-control.out" ]]
 grep -Fqi 'name is invalid' "$temporary/bootstrap-control.err"
 
-if run_native check-bootstrap-admin invalid-expiry 366 \
+if run_native check-bootstrap-admin invalid-expiry 1462 \
   > "$temporary/bootstrap-preflight-expiry.out" 2> "$temporary/bootstrap-preflight-expiry.err"; then
-  printf 'ERROR: bootstrap preflight accepted an expiry beyond 365 days\n' >&2
+  printf 'ERROR: bootstrap preflight accepted an expiry beyond four years\n' >&2
   exit 1
 fi
 [[ ! -s "$temporary/bootstrap-preflight-expiry.out" ]]
@@ -558,13 +558,13 @@ sqlite3 "$database_path" "DELETE FROM api_keys WHERE name='cleanup-sentinel';"
 [[ "$(run_native check-bootstrap-admin retry-admin 30)" == ok ]]
 
 # Bootstrap reveals one key on stdout and refuses a second active administrator.
-if run_native bootstrap-admin invalid-expiry 366 \
+if run_native bootstrap-admin invalid-expiry 1462 \
   > "$temporary/bootstrap-expiry.out" 2> "$temporary/bootstrap-expiry.err"; then
-  printf 'ERROR: bootstrap accepted an expiry beyond 365 days\n' >&2
+  printf 'ERROR: bootstrap accepted an expiry beyond four years\n' >&2
   exit 1
 fi
 [[ ! -s "$temporary/bootstrap-expiry.out" ]]
-admin_key="$(run_native bootstrap-admin "$bootstrap_name" 365 2> "$bootstrap_log")"
+admin_key="$(run_native bootstrap-admin "$bootstrap_name" 1461 2> "$bootstrap_log")"
 readonly admin_key
 [[ "$admin_key" =~ ^imp_[A-Za-z0-9_-]{43}$ ]]
 if grep -Fq "$admin_key" "$bootstrap_log"; then
@@ -786,7 +786,7 @@ assert_problem 400
 status="$(request /api/keys \
   --header "Authorization: Bearer $admin_key" \
   --header 'Content-Type: application/json' \
-  --data '{"name":"too-long","scopes":["messages:read"],"expires_in_days":366}')"
+  --data '{"name":"expiry-too-far","scopes":["messages:read"],"expires_in_days":1462}')"
 assert_status 400 "$status"
 assert_problem 400
 for invalid_expiry in '"90"' null '[]'; do

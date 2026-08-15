@@ -1584,7 +1584,7 @@ components:
         expires_in_days:
           type: integer
           minimum: 1
-          maximum: 365
+          maximum: 1461
           default: 90
         sender_identifier:
           allOf:
