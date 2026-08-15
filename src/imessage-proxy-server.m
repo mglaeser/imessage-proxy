@@ -418,6 +418,14 @@ static BOOL IsAllowedTargetLine(NSString *line) {
 @property (nonatomic, copy) NSString *imsgPath;
 @property (nonatomic, copy) NSString *imsgSHA256;
 @property (nonatomic, copy) NSString *localOrigin;
+// The address the listener binds, in network byte order, and the text it was
+// configured from. Loopback unless an operator asked for something else, and the
+// listener proves it bound this exact address before it serves anything.
+@property (nonatomic) in_addr_t bindAddress;
+@property (nonatomic, copy) NSString *bindAddressText;
+// Every Origin a browser may legitimately present. Derived from what was bound,
+// never configured separately, so the two cannot disagree.
+@property (nonatomic, copy) NSArray<NSString *> *allowedOrigins;
 @property (nonatomic) NSTimeInterval readTimeout;
 @property (nonatomic) NSTimeInterval sendTimeout;
 @property (nonatomic) NSTimeInterval socketTimeout;
@@ -1047,12 +1055,26 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
     // exposure gate, a pinned Caddy - is gone, so a plist still carrying any of
     // it is a stale plist and refused here rather than silently ignored.
     NSSet<NSString *> *recognized = [NSSet setWithArray:@[
-        @"IMESSAGE_PROXY_PORT", @"IMESSAGE_PROXY_DATABASE_PATH", @"IMESSAGE_PROXY_MESSAGES_DATABASE_PATH",
-        @"IMESSAGE_PROXY_ALLOWED_TARGETS_FILE", @"IMESSAGE_PROXY_IMSG_BIN", @"IMESSAGE_PROXY_EXPECTED_IMSG_VERSION",
-        @"IMESSAGE_PROXY_IMSG_SHA256", @"IMESSAGE_PROXY_MAX_CONCURRENCY", @"IMESSAGE_PROXY_READ_TIMEOUT_SECONDS",
-        @"IMESSAGE_PROXY_SEND_TIMEOUT_SECONDS", @"IMESSAGE_PROXY_SOCKET_TIMEOUT_SECONDS", @"IMESSAGE_PROXY_API_KEY",
-        @"IMESSAGE_PROXY_CONFIG", @"IMESSAGE_PROXY_HOME", @"IMESSAGE_PROXY_SOURCE_DIR", @"IMESSAGE_PROXY_UI_DIR",
-        @"IMESSAGE_PROXY_MESSAGES_READ", @"IMESSAGE_PROXY_URL", @"IMESSAGE_PROXY_VERSION"
+        @"IMESSAGE_PROXY_PORT",
+        @"IMESSAGE_PROXY_DATABASE_PATH",
+        @"IMESSAGE_PROXY_MESSAGES_DATABASE_PATH",
+        @"IMESSAGE_PROXY_ALLOWED_TARGETS_FILE",
+        @"IMESSAGE_PROXY_IMSG_BIN",
+        @"IMESSAGE_PROXY_EXPECTED_IMSG_VERSION",
+        @"IMESSAGE_PROXY_IMSG_SHA256",
+        @"IMESSAGE_PROXY_MAX_CONCURRENCY",
+        @"IMESSAGE_PROXY_READ_TIMEOUT_SECONDS",
+        @"IMESSAGE_PROXY_SEND_TIMEOUT_SECONDS",
+        @"IMESSAGE_PROXY_SOCKET_TIMEOUT_SECONDS",
+        @"IMESSAGE_PROXY_API_KEY",
+        @"IMESSAGE_PROXY_CONFIG",
+        @"IMESSAGE_PROXY_HOME",
+        @"IMESSAGE_PROXY_SOURCE_DIR",
+        @"IMESSAGE_PROXY_UI_DIR",
+        @"IMESSAGE_PROXY_MESSAGES_READ",
+        @"IMESSAGE_PROXY_URL",
+        @"IMESSAGE_PROXY_VERSION",
+        @"IMESSAGE_PROXY_BIND_ADDRESS"
     ]];
     for (NSString *name in environment) {
         if ([name hasPrefix:@"IMESSAGE_PROXY_"] && ![recognized containsObject:name]) {
@@ -1089,6 +1111,42 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
     }
     configuration.port = (uint16_t)parsedPort;
     configuration.localOrigin = [NSString stringWithFormat:@"http://127.0.0.1:%lu", (unsigned long)parsedPort];
+
+    // Loopback unless an operator names something else. inet_pton is what decides
+    // whether the text is an address, so "localhost", a hostname, an IPv6 literal
+    // and a partial quad are all refused here rather than resolved to something
+    // the operator did not write.
+    NSString *bindText = environment[@"IMESSAGE_PROXY_BIND_ADDRESS"] ?: @"127.0.0.1";
+    struct in_addr parsedBind = {0};
+    if (inet_pton(AF_INET, bindText.UTF8String, &parsedBind) != 1) {
+        if (error != NULL) {
+            *error = ServerError(IMPServerErrorInvalidConfiguration,
+                                 @"IMESSAGE_PROXY_BIND_ADDRESS must be a dotted-quad IPv4 address");
+        }
+        return nil;
+    }
+    configuration.bindAddress = parsedBind.s_addr;
+    configuration.bindAddressText = bindText;
+
+    // Which Origin a browser may present. The console is same-origin with
+    // whatever address it was reached on, so the bound address earns an entry;
+    // loopback and localhost keep theirs because they still reach the service
+    // when it is bound to all interfaces, and because a bookmarked
+    // http://localhost:PORT must keep working.
+    //
+    // 0.0.0.0 deliberately adds nothing. It is not an address a browser can be
+    // on, and enumerating the machine's interfaces to guess would turn this list
+    // into "anything that resolves here". Reaching the console over a specific
+    // interface therefore means binding that interface, while API clients - curl,
+    // scripts, anything that sends no Origin header - are unaffected either way.
+    // Exposing the port exposes the API, not the console.
+    NSMutableArray<NSString *> *origins = [NSMutableArray
+        arrayWithObjects:configuration.localOrigin,
+                         [NSString stringWithFormat:@"http://localhost:%lu", (unsigned long)parsedPort], nil];
+    if (parsedBind.s_addr != htonl(INADDR_LOOPBACK) && parsedBind.s_addr != htonl(INADDR_ANY)) {
+        [origins addObject:[NSString stringWithFormat:@"http://%@:%lu", bindText, (unsigned long)parsedPort]];
+    }
+    configuration.allowedOrigins = origins;
 
     NSString *expectedVersion = environment[@"IMESSAGE_PROXY_EXPECTED_IMSG_VERSION"] ?: RequiredIMSGVersion;
     if (![expectedVersion isEqualToString:RequiredIMSGVersion]) {
@@ -2247,12 +2305,11 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
     NSString *origin = request.headers[@"origin"];
     if (origin.length == 0)
         return YES;
-    // The console is served by this process from its own loopback origin, so the
-    // only Origin a browser may legitimately present is that one. Accepting the
-    // localhost spelling as well keeps a bookmarked http://localhost:PORT working
-    // without widening anything: both resolve to the interface we bound.
-    return [origin isEqualToString:self.configuration.localOrigin] ||
-           [origin isEqualToString:[NSString stringWithFormat:@"http://localhost:%u", self.configuration.port]];
+    // The console is served by this process, so the only Origin a browser may
+    // legitimately present is one this listener answers on. The list is derived
+    // from what was bound rather than configured beside it, so the two cannot
+    // disagree; see where it is built for why 0.0.0.0 adds nothing to it.
+    return [self.configuration.allowedOrigins containsObject:origin];
 }
 
 - (BOOL)recordAttemptForRequestID:(NSString *)requestID
@@ -3517,34 +3574,40 @@ static BOOL RunServer(IMPConfiguration *configuration, NSError **error) {
         close(server);
         return ServerStartupFailure(error, @"could not configure the socket", "socket_option_failed");
     }
-    // Loopback is a compile-time constant, never a setting. There is no
-    // environment variable that can widen it, and a second instance is refused by
-    // bind() returning EADDRINUSE rather than by a check that could race.
+    // Loopback unless the operator named an address. A second instance is refused
+    // by bind() returning EADDRINUSE rather than by a check that could race.
     struct sockaddr_in address = {0};
     address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_addr.s_addr = configuration.bindAddress;
     address.sin_port = htons(configuration.port);
     if (bind(server, (struct sockaddr *)&address, sizeof(address)) != 0) {
         int reason = errno;
         close(server);
         return ServerStartupFailure(error,
                                     reason == EADDRINUSE ? @"the configured port is already in use"
-                                                         : @"could not bind the loopback port",
+                                    : reason == EADDRNOTAVAIL
+                                        ? @"the configured bind address is not an address of this machine"
+                                        : @"could not bind the configured address",
                                     "socket_bind_failed");
     }
     if (listen(server, 32) != 0) {
         close(server);
-        return ServerStartupFailure(error, @"could not listen on the loopback port", "socket_listen_failed");
+        return ServerStartupFailure(error, @"could not listen on the configured address", "socket_listen_failed");
     }
-    // Prove what was actually bound rather than trusting the request. If this is
-    // ever anything but 127.0.0.1 on the configured port, refuse to serve.
+    // Prove what was actually bound rather than trusting the request. The check
+    // narrowed when the address became configurable, but it did not go away: it
+    // now asserts the listener is on the address that was asked for, so a setting
+    // that widened the bind without the operator's knowledge still refuses to
+    // serve. It is the difference between the bind address being verified and
+    // being merely hoped for.
     struct sockaddr_in bound = {0};
     socklen_t boundLength = sizeof(bound);
     if (getsockname(server, (struct sockaddr *)&bound, &boundLength) != 0 || boundLength != sizeof(bound) ||
-        bound.sin_family != AF_INET || bound.sin_addr.s_addr != htonl(INADDR_LOOPBACK) ||
+        bound.sin_family != AF_INET || bound.sin_addr.s_addr != configuration.bindAddress ||
         ntohs(bound.sin_port) != configuration.port) {
         close(server);
-        return ServerStartupFailure(error, @"the listener is not bound to loopback", "socket_not_loopback");
+        return ServerStartupFailure(error, @"the listener is not bound to the configured address",
+                                    "socket_not_configured_address");
     }
     IMPServer *handler = [[IMPServer alloc] initWithConfiguration:configuration error:error];
     if (handler == nil) {
@@ -3552,9 +3615,14 @@ static BOOL RunServer(IMPConfiguration *configuration, NSError **error) {
         LogOperationalFailure("server.start", "handler_initialization_failed", error == NULL ? nil : *error);
         return NO;
     }
+    // The bind address is in the start line because "which interfaces is this
+    // reachable on" is the first question asked of a service that was loopback
+    // for its whole life, and the log is where an operator looks for it.
     os_log_with_type(ServerOperationalLog(), OS_LOG_TYPE_INFO,
-                     "action=server.start version=%{public}s transport=loopback port=%u", ServerVersion.UTF8String,
-                     configuration.port);
+                     "action=server.start version=%{public}s transport=%{public}s bind=%{public}s port=%u",
+                     ServerVersion.UTF8String,
+                     configuration.bindAddress == htonl(INADDR_LOOPBACK) ? "loopback" : "exposed",
+                     configuration.bindAddressText.UTF8String, configuration.port);
     dispatch_queue_t clients =
         dispatch_queue_create("io.github.mglaeser.imessage-proxy.server.clients", DISPATCH_QUEUE_CONCURRENT);
     dispatch_group_t clientGroup = dispatch_group_create();

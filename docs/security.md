@@ -6,16 +6,17 @@ yourself.
 ## Shape
 
 One process. `imessage-proxy-server` runs as a LaunchAgent of the signed-in
-Messages user, binds `127.0.0.1` on one port, serves the console and `/api`, and
-spawns the pinned `imsg` for reads and sends. There is no second daemon, no
-certificate authority client, and no public listener.
+Messages user, binds one port on `127.0.0.1` unless an operator names another
+address, serves the console and `/api`, and spawns the pinned `imsg` for reads
+and sends. There is no second daemon, no certificate authority client, and no
+TLS in this process.
 
 ## What it protects
 
 | Boundary | Control |
 | --- | --- |
 | Any API request | Hash-based key lookup, expiry, immediate revocation, scopes, per-source and per-key rate limits |
-| Browser console | Same-origin policy pinned to the loopback origin the server itself serves; CSP, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store` |
+| Browser console | Same-origin policy pinned to the origins the server itself bound; CSP, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store` |
 | Sending | Explicit recipient allowlist, the named transport and no fallback to the other, a sender identifier on every message, per-send idempotency |
 | Reading | Bounded result sizes; no attachment paths, no arbitrary database access; declinable for the whole installation |
 | Dependency | `imsg` pinned by SHA-256 and re-verified before every spawn |
@@ -24,26 +25,42 @@ certificate authority client, and no public listener.
 Request and response caps are enforced natively: 16 KiB of headers, 64 KiB of
 body, and per-request read, send and socket timeouts.
 
-## Three claims you can verify
+## Claims you can verify
 
 These replace equivalents that earlier releases stated about a two-process
 design. Each is checkable on your own machine.
 
-**It listens only on loopback.** The bind address is a compile-time constant, no
-setting can widen it, and the server calls `getsockname()` after `listen()` and
-refuses to serve if the result is anything but `127.0.0.1` on the configured
-port. Check it:
+**It listens where you told it to, and proves it.** The bind address defaults to
+`127.0.0.1` and only changes if an operator names another one, with
+`install.sh --bind ADDRESS` or `IMESSAGE_PROXY_BIND_ADDRESS`. Whatever it is, the
+server calls `getsockname()` after `listen()` and refuses to serve unless the
+listener is on exactly that address and port — so a bind that widened without
+the operator asking still fails closed. Check it:
 
 ```bash
 lsof -nP -iTCP -sTCP:LISTEN | grep imessage-proxy
 ```
 
-Every line must read `127.0.0.1:PORT`. A `*:PORT` or `0.0.0.0:PORT` line means
+Every line must read the address you configured. If you never set one, every
+line must read `127.0.0.1:PORT`, and a `*:PORT` or `0.0.0.0:PORT` line means
 something is wrong; stop the service and report it.
 
-**The console cannot be driven from another origin.** The allowed browser origin
-is derived from the port the server bound, not configured separately, so the two
-cannot drift apart. A request carrying any other `Origin` is refused `403`.
+**Serving another address is plain HTTP.** There is no TLS in this process. An
+exposed listener carries messages and API keys unencrypted over whatever network
+it is on, and the only thing protecting it is the bearer key. Anything beyond a
+trusted network needs your own TLS proxy in front of it. `0.0.0.0` means every
+interface, including networks the Mac joins later, which is why it takes a
+second explicit confirmation rather than being one more address.
+
+**The console cannot be driven from another origin, and exposing the port
+exposes the API rather than the console.** The browser origins the server accepts
+are derived from what it bound, never configured beside it, so the two cannot
+drift apart: the loopback origin, the `localhost` spelling, and the bound address
+when it is a specific one. A request carrying any other `Origin` is refused
+`403`. `0.0.0.0` adds nothing to that list, because enumerating the machine's
+interfaces to guess would turn it into "anything that resolves here" — so a
+browser reaching the console over some other interface is refused, while API
+clients, which send no `Origin` header, are unaffected.
 
 **Console assets need no credential; the API always does.** The server answers
 exactly four request paths — `/`, `/index.html`, `/app.js`, `/styles.css` — from
@@ -59,17 +76,18 @@ curl -si http://127.0.0.1:8765/ | head -1             # HTTP/1.1 200
 
 ## What it does not protect
 
-**Any local process or user account on this Mac can reach the port.** A loopback
-TCP socket has no owner check. The bearer key is the access control, not the
-transport. Earlier releases used a `0600` Unix socket, where the kernel
+**Any local process or user account on this Mac can reach the port, and so can
+anything on the network it is bound to.** A TCP socket has no owner check. The
+bearer key is the access control, not the transport. Earlier releases used a `0600` Unix socket, where the kernel
 restricted connections to your own processes; that boundary is gone, and it is
 the direct cost of the service being reachable from a browser. On a Mac with
 untrusted local users, treat the key as the only thing standing between them and
 your messages.
 
-**Transport is plain HTTP.** Nothing is encrypted on the loopback interface. If
-you put a TLS terminator in front, HSTS, certificate lifecycle and any public
-access control are its responsibility. The server deliberately does not send
+**Transport is plain HTTP.** Nothing is encrypted, on loopback or on any address
+you bind — a listener on a LAN address carries messages and keys in the clear to
+anyone on that network. If you put a TLS terminator in front, HSTS, certificate
+lifecycle and any public access control are its responsibility. The server deliberately does not send
 `Strict-Transport-Security`: user agents ignore it over plain HTTP, and
 asserting it for a loopback origin would poison your real hostname later.
 

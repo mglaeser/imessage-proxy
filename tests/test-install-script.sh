@@ -161,9 +161,39 @@ if [[ "$(uname -s)" != Darwin ]]; then
     run_installer --send-test +15551234567 --messages-read
 fi
 
-# The installer never enables public HTTPS on its own.
+# The installer never enables public HTTPS on its own. --bind serves plain HTTP
+# on an address the operator names; it is not the removed public-HTTPS gate, and
+# nothing here may bring that back.
 if grep -Eq -- '--public|ENABLE_PUBLIC_HTTPS=yes|EXPOSE IMESSAGE PROXY PUBLICLY' "$INSTALLER"; then
   fail 'installer must never enable or confirm public exposure'
+fi
+
+# Loopback is what an unanswered run gets. Every path to another address is one
+# the operator asked for by name.
+if ! grep -Eq "^bind_address='127\.0\.0\.1'$" "$INSTALLER"; then
+  fail 'the installer must default to loopback'
+fi
+expect_failure '--bind requires an IPv4 address' run_installer --bind
+for invalid_bind in localhost 256.1.1.1 1.2.3 01.2.3.4 '::1' 1.2.3.4.5; do
+  expect_failure '--bind must be a dotted-quad IPv4 address' run_installer --bind "$invalid_bind"
+done
+# 0.0.0.0 is a different decision from naming one address, so it takes a second
+# flag rather than being a wider value of the first.
+expect_failure 'serves every interface' \
+  run_installer --bind 0.0.0.0 --no-send-test --no-messages-read
+# Both of these get past validation and stop only at the macOS host check, which
+# is how a run that named an address proves it was accepted.
+if [[ "$(uname -s)" != Darwin ]]; then
+  expect_failure 'iMessage Proxy runs only on macOS' \
+    run_installer --bind 0.0.0.0 --expose-confirm --no-send-test --no-messages-read
+  expect_failure 'iMessage Proxy runs only on macOS' \
+    run_installer --bind 192.168.1.50 --no-send-test --no-messages-read
+fi
+# The address must reach the service configuration, or the LaunchAgent renders
+# a loopback listener while the summary claims otherwise.
+# shellcheck disable=SC2016  # the pattern intentionally matches literal shell syntax
+if ! grep -Fq 'IMESSAGE_PROXY_BIND_ADDRESS=$bind_address' "$INSTALLER"; then
+  fail 'the installer must write the chosen bind address into the service configuration'
 fi
 
 # The generated configuration must define exactly the keys the CLI allowlists,
