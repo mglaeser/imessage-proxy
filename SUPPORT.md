@@ -17,10 +17,10 @@ Provide:
 
 - iMessage Proxy version or commit;
 - macOS architecture and version;
-- Caddy and `imsg` versions;
+- `imsg` version;
 - the exact iMessage Proxy command and sanitized error;
 - expected and observed behavior;
-- whether the native server, Unix socket, LaunchAgent, Caddy edge, or client boundary is failing;
+- whether the native server, LaunchAgent, or client boundary is failing;
 - minimal reproduction steps.
 
 Redact API keys, hashes, Messages content, recipients, user names, device names, hostnames, IP addresses, request IDs tied to private logs, and filesystem paths that reveal identity. Prefer a minimal synthetic reproduction.

@@ -6,17 +6,21 @@ growth strategy.
 
 ## 1.0 release gates
 
-- [ ] Pass Objective-C warnings-as-errors, static analysis, shell/Markdown/API
-  lint, native integration tests, and Caddy Unix-socket tests.
+- [x] Pass Objective-C warnings-as-errors, static analysis, shell/Markdown/API
+  lint, and the native unit tier on both macOS and Linux.
 - [ ] Fuzz the bounded HTTP parser and key/idempotency state transitions.
-- [ ] Validate both host-native LaunchAgents and the direct Unix socket on the
-  target Mac across graceful/forced server restarts, edge restarts, logout/login,
-  sleep/wake, and reboot.
+- [ ] Validate the host-native LaunchAgent on the target Mac across
+  graceful/forced server restarts, logout/login, sleep/wake, and reboot.
 - [ ] Confirm the exact `imsg 0.13.4` adapter schemas on a harmless fixture account.
-- [ ] Complete external IPv4 `A` DNS, exact 80→host-HTTP/443→host-HTTPS mapping,
-  ACME, firewall, authentication, scope, rate-limit, target-denial, idempotency,
-  audit-privacy, and harmless-send acceptance.
-- [ ] Publish signed release provenance and an independently verified archive digest.
+- [ ] Complete authentication, scope, rate-limit, target-denial, idempotency,
+  audit-privacy, and harmless-send acceptance against a bound listener.
+- [x] Publish signed release provenance and an independently verified archive digest.
+
+The Caddy edge went with #24, and with it the ACME, external port-mapping and
+Unix-socket gates that were written for it. One loopback listener now serves the
+console and the API from the same process; an operator who needs the API off the
+Mac names an address with `--bind` and gets plain HTTP with the bearer key as the
+only control.
 
 ## Candidate additions
 

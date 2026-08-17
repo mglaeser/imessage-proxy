@@ -45,6 +45,12 @@ curl -fsSL https://raw.githubusercontent.com/mglaeser/imessage-proxy/main/script
 Full Disk Access still has to be granted by hand afterwards: macOS has no way to
 grant it from a script.
 
+Every release also attaches a universal macOS binary next to the source archive,
+for operators who would rather not build. It is checksummed and attested, but it
+is neither Developer ID signed nor notarized — see
+[the prebuilt binary](docs/install.md#the-prebuilt-binary) for what that costs
+you before you reach for it.
+
 ## Send your first message
 
 Allow one recipient, then send to them:
@@ -187,6 +193,7 @@ prompt or enumerate your address book.
 ├── src/imessage-proxy-server.m                # loopback REST server and console
 ├── scripts/install.sh                         # one-command install and first run
 ├── scripts/uninstall.sh                       # guarded removal, state opt-in
+├── scripts/linux-toolchain.sh                 # rootless GNUstep toolchain, for CI
 ├── web/                                       # dependency-free management console
 ├── openapi.yaml                               # public API contract
 └── tests/                                     # native, portable, and lifecycle tests

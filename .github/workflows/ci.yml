@@ -93,8 +93,8 @@ jobs:
       # on a Linux runner, which needs an Objective-C runtime and a Foundation
       # that Debian and Ubuntu do not package; scripts/linux-toolchain.sh builds
       # both from source under $HOME, without sudo. A cold build costs about
-      # twenty-five minutes, so the result is cached on the hash of the
-      # provisioner itself: change that script and the next run rebuilds, leave
+      # ninety seconds, and it is cached on the hash of the provisioner
+      # itself: change that script and the next run rebuilds, leave
       # it alone and the next run restores in seconds. Only $HOME/.local/opt is
       # cached. The compiler-driver wrappers in $HOME/.local/bin are the one
       # artefact that encodes the script's own text, so they are regenerated on
@@ -186,6 +186,16 @@ jobs:
           expected="$(< VERSION)"
           test "$(build/imessage-proxy-server version)" = "$expected"
           test "$(bin/imessage-proxy version)" = "$expected"
+      # The release attaches a universal binary, and the release workflow only
+      # runs on a tag. Building it here too means a break in that path is a
+      # failed pull request rather than a failed release - which is the same
+      # lesson the stuck v1.0.0 draft taught, where nothing exercised the release
+      # path until a tag existed. It builds into its own directory so the
+      # single-architecture binary the steps above verified is left alone.
+      # The runner is arm64, so this proves the arm64 slice runs. The x86_64 slice
+      # is verified by lipo and codesign alone; no Intel runner is in this matrix.
+      - name: Build the universal binary the release attaches
+        run: make release-binary STRICT=1
       - name: Upload unsigned CI server
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
