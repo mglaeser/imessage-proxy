@@ -35,7 +35,8 @@ CONFIG_FILES := \
 	config/io.github.mglaeser.imessage-proxy.plist.in \
 	config/imessage-proxy.env.example
 WEB_FILES := web/index.html web/app.js web/styles.css
-JAVASCRIPT_SOURCES := web/app.js tests/test-web-ui.mjs tests/test-schema-fingerprint.mjs tests/test-native-invariants.mjs
+JAVASCRIPT_SOURCES := web/app.js tests/test-web-ui.mjs tests/test-schema-fingerprint.mjs tests/test-native-invariants.mjs \
+	tests/test-workflow-contract.mjs
 
 CLANG ?= $(shell xcrun --find clang 2>/dev/null)
 MACOS_SDK_PATH ?= $(shell xcrun --sdk macosx --show-sdk-path 2>/dev/null)
@@ -57,7 +58,7 @@ SDKFLAGS := $(if $(MACOS_SDK_PATH),-isysroot "$(MACOS_SDK_PATH)",)
 FRAMEWORKS := -framework Foundation -framework Security
 LIBRARIES := -lsqlite3
 
-.PHONY: all analyze build check clean debug format help install lint test test-bash-compat test-installer test-schema test-uninstaller test-ui uninstall version
+.PHONY: all analyze build check clean debug format help install lint test test-bash-compat test-installer test-schema test-uninstaller test-ui test-workflows uninstall version
 
 all: build
 
@@ -84,7 +85,7 @@ analyze: ## Run Clang's static analyzer.
 			-Xanalyzer -analyzer-output=text -Xanalyzer -analyzer-werror "$$source"; \
 	done
 
-test: test-ui test-schema test-installer test-uninstaller test-bash-compat ## Run UI, schema, script, native-server, and lifecycle tests (macOS only).
+test: test-ui test-schema test-workflows test-installer test-uninstaller test-bash-compat ## Run UI, schema, workflow, script, native-server, and lifecycle tests (macOS only).
 	@$(MAKE) --no-print-directory _require-macos
 	bash tests/test-imessage-proxy-server.sh
 	bash tests/test-imessage-proxy-cli.sh
@@ -103,6 +104,12 @@ test-schema: _require-node ## Verify the key-store schema fingerprint and the na
 
 test-ui: _require-node ## Run dependency-free management-console behavior tests.
 	node --test tests/test-web-ui.mjs
+
+# actionlint validates each workflow on its own, which cannot see that one
+# workflow waits for a check another workflow stopped producing. This target
+# reads across all of them.
+test-workflows: _require-node ## Verify the release gate waits only on checks some workflow produces.
+	node --test tests/test-workflow-contract.mjs
 
 .PHONY: _require-node
 _require-node:

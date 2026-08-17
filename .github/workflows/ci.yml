@@ -60,6 +60,10 @@ jobs:
           chmod 0755 "$RUNNER_TEMP/actionlint"
       - name: Validate workflows
         run: '"$RUNNER_TEMP/actionlint"'
+      # actionlint reads one workflow at a time, so it cannot see a release gate
+      # waiting on a check whose job was deleted from another file.
+      - name: Verify the release gate against the jobs that exist
+        run: make test-workflows
       - name: Validate OpenAPI contract
         run: npm run lint:openapi
       - name: Test the management console

@@ -86,7 +86,6 @@ jobs:
             "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100")"
           for required_check in \
             'Workflows and API contract' \
-            'Caddy Unix-socket edge (ARM64)' \
             'Build, lint, analyze, and test' \
             'Install layout' \
             'Analyze GitHub Actions' \
