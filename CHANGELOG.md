@@ -3,7 +3,7 @@
 All notable changes are documented here. Version 1.0 establishes the contract
 and operational model described below.
 
-## Unreleased
+## 1.0.0 - 2026-08-17
 
 ### Added
 
@@ -85,14 +85,65 @@ and operational model described below.
   fails or `--verbose` is given, so the Full Disk Access checkpoint and the
   administrator key are no longer scrolled away by build output.
 - The installer finishes with a summary: where the CLI, configuration,
-  allowlist and logs are, how to reach the service over its Unix socket, what to
+  allowlist and logs are, which loopback address the console answers on, what to
   do next, and the uninstall one-liner. It adds its own prefix to the shell
   startup file rather than printing instructions, idempotently, and says what it
   changed. The administrator key is still written only to standard output and is
   never captured or echoed.
+- `make test-native` runs a native unit tier that compiles the shipping
+  Objective-C sources with ARC and exercises their leaf functions directly,
+  rather than only through the shell tests that drive the built server. It runs
+  on macOS against Apple's frameworks and on Linux against the rootless GNUstep
+  toolchain `scripts/linux-toolchain.sh` provisions, so CI — which has no Mac in
+  the fast job — can run it on every push instead of skipping it.
+
+  A Foundation parity probe gates the run and refuses the host if the Foundation
+  it found answers differently from the one the product ships against, because a
+  unit test that passes against a divergent Foundation reports a property the
+  product does not have. Where the two genuinely differ — `NSISO8601DateFormatter`,
+  JSON number provenance, `NSJSONWritingSortedKeys` — the probe names the
+  divergence and the code paths fenced off from the tier, so the gap is recorded
+  rather than silently untested.
+- Unversioned, resource-oriented REST endpoints for readiness, chats, scrubbed
+  chat-background state, bounded history, scheduled messages, statistics, text
+  sends, privacy-safe audit events, and API-key management.
+- Scoped bearer API keys with 256-bit generation, SHA-256-only SQLite storage,
+  expiry, immediate revocation, final-administrator protection, and local bootstrap.
+- Durable send idempotency with explicit accepted, failed, and ambiguous outcomes.
+- Privacy-preserving audit metadata and bounded source/key-aware rate limiting.
+- A dependency-free same-origin console with service overview, a typed API
+  playground, intentional-send confirmation/idempotency, and API-key lifecycle.
+- A one-command bootstrap that validates and starts the reviewed native topology,
+  keeps public exposure behind two explicit gates, rolls back newly started
+  services on failure, proves the Messages read path both directly and from the
+  LaunchAgent, and emits only the first administrator key on stdout.
+- Exact `imsg 0.13.4` enforcement and fixed, shell-free command adapters.
+- A single-command installer, `scripts/install.sh`, that verifies the Mac,
+  obtains a checksum-verified release, builds and installs the CLI, records the
+  native dependency digest, writes one private `0600` configuration with the
+  public-exposure gate closed, and hands off to the guarded product bootstrap.
+  It never enables public exposure and keeps the first administrator key on
+  standard output only.
+
+### Changed
+
+- Runtime state now uses `~/Library/Application Support/iMessage Proxy`.
+- The native service is `imessage-proxy-server`, loaded as
+  `io.github.mglaeser.imessage-proxy`.
+- Stop actions durably disable their exact GUI launchd label across login/reboot;
+  install, start, and restart explicitly re-enable it.
+- Installation defaults to the current user's `$HOME/.local` prefix.
 
 ### Removed
 
+- The Caddy public edge and the private Unix socket behind it. One loopback
+  listener now serves the console and the API from the same process, so there is
+  no second executable to pin, no second LaunchAgent to keep alive, and no socket
+  whose ownership has to be proved before the service counts as ready. Public
+  HTTPS was the only thing the edge provided and it left with it: an operator who
+  needs the API off the Mac now names an address with `--bind`, and gets plain
+  HTTP with the bearer key as the only control, which `docs/security.md` says
+  rather than promises against.
 - Two unused LaunchAgent rendering helpers, `write_plist_from_template` and
   `require_no_unrendered_placeholders`. They shipped without callers, their
   comment described a mechanism the product does not use, and one of them
@@ -103,6 +154,23 @@ and operational model described below.
 
 ### Fixed
 
+- The release job no longer waits on `Caddy Unix-socket edge (ARM64)`, a check
+  whose job left with the Caddy edge itself. Nothing connected the two, so the
+  gate could never be satisfied and the release sat as a draft with no assets
+  while every other signal stayed green. `make test-workflows` now reads the
+  gate against the jobs the workflows declare and fails when a required check is
+  one nothing produces — the cross-file rule actionlint cannot see, since it
+  validates each workflow on its own. It also asserts the inverse: the three
+  checks that compile, test and scan the artifact cannot be dropped from the
+  gate to force a release through.
+- A strict RFC 3339 timestamp with a trailing newline is refused again. The
+  pattern was anchored with `$`, which in ICU matches at the end of the input
+  and also before a final line terminator, so `2024-01-01T00:00:00Z\n` cleared
+  it; `NSISO8601DateFormatter` parses that string rather than rejecting it, so
+  nothing downstream caught the newline either. Every endpoint taking a
+  timestamp — scheduled sends, history bounds, the nullable timestamps in the
+  projected DTOs — accepted one. The pattern now anchors with `\z`, which is end
+  of input and admits no line terminator.
 - `--key-file` cannot be redirected onto a symlink. `-e` is false for a symlink
   whose target does not exist, so a dangling one passed the overwrite check and
   was then followed by the redirection, putting the credential wherever it
@@ -180,42 +248,3 @@ and operational model described below.
 - The uninstaller no longer instructs removal of a Messages Automation entry
   that does not exist. Automation is requested at the first intentional send,
   never during installation.
-
-## 1.0.0 - 2026-08-09
-
-### Added
-
-- Unversioned, resource-oriented REST endpoints for readiness, chats, scrubbed
-  chat-background state, bounded history, scheduled messages, statistics, text
-  sends, privacy-safe audit events, and API-key management.
-- Scoped bearer API keys with 256-bit generation, SHA-256-only SQLite storage,
-  expiry, immediate revocation, final-administrator protection, and local bootstrap.
-- Durable send idempotency with explicit accepted, failed, and ambiguous outcomes.
-- Privacy-preserving audit metadata and bounded source/key-aware rate limiting.
-- A dependency-free same-origin console with service overview, a typed API
-  playground, intentional-send confirmation/idempotency, and API-key lifecycle.
-- A one-command bootstrap that validates and starts the reviewed native topology,
-  keeps public exposure behind two explicit gates, rolls back newly started
-  services on failure, proves the Messages read path both directly and from the
-  LaunchAgent, and emits only the first administrator key on stdout.
-- Public ACME HTTPS through a pinned host-native Caddy 2.11.4 executable.
-- Direct Caddy-to-server forwarding through one private host Unix socket.
-- Exact `imsg 0.13.4` enforcement and fixed, shell-free command adapters.
-- A single-command installer, `scripts/install.sh`, that verifies the Mac,
-  obtains a checksum-verified release, builds and installs the CLI, pins Caddy
-  2.11.4 by SHA-512, records both native dependency digests, writes one private
-  `0600` configuration with the public-exposure gate closed, and hands off to the
-  guarded product bootstrap. It never enables public exposure and keeps the first
-  administrator key on standard output only.
-
-### Changed
-
-- Runtime state now uses `~/Library/Application Support/iMessage Proxy`.
-- The native service is `imessage-proxy-server`, loaded as
-  `io.github.mglaeser.imessage-proxy`.
-- Caddy runs as a non-root GUI-user LaunchAgent on configurable unprivileged IPv4
-  host ports. The public edge requires exact external TCP 80/443 mappings and an
-  explicit exposure gate and confirmation.
-- Stop actions durably disable their exact GUI launchd label across login/reboot;
-  install, start, and restart explicitly re-enable it.
-- Installation defaults to the current user's `$HOME/.local` prefix.
