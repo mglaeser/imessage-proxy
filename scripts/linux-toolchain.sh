@@ -251,17 +251,32 @@ EOF
 }
 
 fetch_and_unpack_packages() {
-  local wanted="$1" log="$2" uris line url filename digest count=0
+  local wanted="$1" log="$2" uris empty_status line url filename digest count=0
   uris="${CACHE_ROOT}/uris.txt"
+  empty_status="${CACHE_ROOT}/empty-dpkg-status"
 
   # apt-get install --print-uris resolves the whole dependency closure without
   # root and without touching the system. ForceHash makes apt report the sha256
   # it read from the Release file it already verified against the archive
   # signing key, which is the only checksum for a Debian package that is
   # obtainable without hand-maintaining ninety hashes in this file.
+  #
+  # The resolution is pointed at an empty dpkg status file because apt otherwise
+  # answers a question this script is not asking: what would it take to make
+  # *this host* satisfy the request. A package the host already has is omitted,
+  # since from apt's point of view there is nothing to fetch. The private
+  # sysroot is not the host, so every such omission is a file that never arrives
+  # and a build that fails later with a missing header. An empty status file
+  # makes apt resolve the closure as if nothing were installed, which is the
+  # question worth asking, and it makes the sysroot identical on a bare
+  # container and on a CI runner that ships half the list preinstalled. The
+  # difference is not academic: GitHub's Ubuntu runners preinstall cmake, ninja
+  # and llvm, and the first CI run of this script failed on exactly that.
+  : > "$empty_status"
   # shellcheck disable=SC2086
   apt-get install --print-uris -y --no-install-recommends \
-    -o Acquire::ForceHash=SHA256 $wanted 2>>"$log" |
+    -o Acquire::ForceHash=SHA256 -o Dir::State::status="$empty_status" \
+    $wanted 2>>"$log" |
     grep "^'" > "$uris"
 
   while read -r line; do

@@ -74,10 +74,20 @@ IMP_TEST(iso8601_parses_an_internet_date_time) {
     IMP_ASSERT_EQ_INT((long long)offset.timeIntervalSince1970, 1704067200LL,
                       @"NSISO8601DateFormatter must apply the UTC offset rather than ignore it");
 
-    // The formatter is the layer that rejects a trailing newline, which the
-    // anchored regex on its own does not - see the anchoring test below.
-    IMP_ASSERT_NIL([formatter dateFromString:@"2024-01-01T00:00:00Z\n"],
-                   @"NSISO8601DateFormatter must refuse a timestamp with a trailing newline");
+    // A trailing newline is the case where this file was written on a guess and
+    // the guess was wrong. The formatter was assumed to reject one, which mattered
+    // because the anchored regex in ParseStrictRFC3339 does not: ICU's $ matches
+    // before a final line terminator, so "...Z\n" clears the pattern. Apple's
+    // formatter then accepts it too, which leaves nothing rejecting it.
+    //
+    // Only a Mac can observe that. On GNUstep -dateFromString: returns nil for
+    // every input, so the parser rejects the string for an unrelated reason and
+    // the Linux tier reports a pass it has not earned.
+#if defined(__APPLE__)
+    IMP_ASSERT_NOT_NIL([formatter dateFromString:@"2024-01-01T00:00:00Z\n"],
+                       @"NSISO8601DateFormatter accepts a trailing newline, so the pattern in "
+                       @"ParseStrictRFC3339 has to be the layer that refuses one");
+#endif
 }
 
 IMP_TEST(iso8601_whole_second_formatter_refuses_fractional_seconds) {
@@ -331,8 +341,26 @@ IMP_TEST(url_components_query_parsing) {
     IMP_ASSERT_EQ_STR(items[3].value, @"", @"a name with an empty value must have an empty string, not nil");
     IMP_ASSERT_EQ_STR(items[4].value, @"\U0001F600", @"NSURLComponents must decode a multi-byte percent escape");
 
+    // A stray percent is where the two parsers part company. Apple accepts the
+    // string and re-encodes the percent as %25, so the query survives as the
+    // literal text "%zz"; GNUstep refuses the whole string.
+#if defined(__APPLE__)
+    NSURLComponents *malformed = [NSURLComponents componentsWithString:@"/api/messages?a=%zz"];
+    IMP_ASSERT_NOT_NIL(malformed, @"NSURLComponents must accept a stray percent rather than refuse the string");
+    IMP_ASSERT_EQ_STR(malformed.queryItems[0].value, @"%zz",
+                      @"a stray percent must survive as literal text rather than decode");
+#else
     IMP_ASSERT_NIL([NSURLComponents componentsWithString:@"/api/messages?a=%zz"],
-                   @"NSURLComponents must refuse a malformed percent escape rather than pass it through");
+                   @"GNUstep refuses a malformed percent escape outright");
+    RecordDivergence(@"+[NSURLComponents componentsWithString:] with a malformed percent escape",
+                     @"the string is refused and the initialiser returns nil, where Apple accepts "
+                     @"it and re-encodes the stray percent as %25",
+                     @"the malformed-escape path of ParseQueryAllowingRepeatedNames "
+                     @"(imessage-proxy-server.m:1555): on Darwin such a request reaches the handler "
+                     @"with a literal \"%zz\" value, on GNUstep it is rejected before that. Every "
+                     @"well-formed query asserted above parses identically, and the parameter "
+                     @"validators downstream reject \"%zz\" on its own terms either way");
+#endif
 }
 
 IMP_TEST(range_of_character_from_set_over_astral_characters) {
@@ -345,10 +373,28 @@ IMP_TEST(range_of_character_from_set_over_astral_characters) {
     IMP_ASSERT_EQ_INT([value rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location, NSNotFound,
                       @"neither half of a surrogate pair may be a control character");
 
+    // The two platforms disagree about what a "character" is here. Apple composes
+    // the surrogate pair back into U+1F600 before testing membership, so a set of
+    // lead surrogates matches nothing; GNUstep tests each UTF-16 code unit, so it
+    // matches the lead half at index 1.
     NSCharacterSet *leadSurrogates = [NSCharacterSet characterSetWithRange:NSMakeRange(0xD800, 0x400)];
     NSRange found = [value rangeOfCharacterFromSet:leadSurrogates];
-    IMP_ASSERT_EQ_INT(found.location, 1, @"rangeOfCharacterFromSet: must find the lead surrogate as its own unit");
-    IMP_ASSERT_EQ_INT(found.length, 1, @"rangeOfCharacterFromSet: must report one code unit, not the whole pair");
+#if defined(__APPLE__)
+    IMP_ASSERT_EQ_INT(found.location, NSNotFound,
+                      @"rangeOfCharacterFromSet: must compose the surrogate pair and so match no "
+                      @"lead surrogate");
+    IMP_ASSERT_EQ_INT(found.length, 0, @"a search that matches nothing must report an empty range");
+#else
+    IMP_ASSERT_EQ_INT(found.location, 1, @"GNUstep matches the lead surrogate as its own code unit");
+    IMP_ASSERT_EQ_INT(found.length, 1, @"GNUstep reports one code unit rather than the pair");
+    RecordDivergence(@"-[NSString rangeOfCharacterFromSet:] over an astral character",
+                     @"a set of lead surrogates matches the lead half at index 1, where Apple "
+                     @"composes the pair into one character and matches nothing",
+                     @"nothing in src/: no character set the product builds contains a surrogate. "
+                     @"The control-character and ASCII sets asserted above answer identically on "
+                     @"both platforms, and UnicodeCodePointLength (imessage-proxy-server.m:75) "
+                     @"counts pairs by hand rather than going through a character set at all");
+#endif
 
     NSCharacterSet *letters = [NSCharacterSet characterSetWithCharactersInString:@"ab"];
     IMP_ASSERT_EQ_INT([value rangeOfCharacterFromSet:letters].location, 0,
@@ -389,7 +435,26 @@ IMP_TEST(known_time_zone_names_contain_the_names_statistics_uses) {
     NSSet<NSString *> *known = [NSSet setWithArray:names];
     IMP_ASSERT_TRUE([known containsObject:@"America/New_York"],
                     @"knownTimeZoneNames must contain a named region IsKnownTimeZoneName accepts");
-    IMP_ASSERT_TRUE([known containsObject:@"UTC"], @"knownTimeZoneNames must contain UTC");
+    // "UTC" is an abbreviation rather than a zone name, and Apple's list holds
+    // names. IsKnownTimeZoneName (imessage-proxy-server.m:216) therefore accepts
+    // it by an explicit equality test before consulting the set, and openapi.yaml
+    // documents the parameter as "UTC or an exact name". That special case is not
+    // belt and braces: on Darwin it is the only thing that makes UTC work.
+#if defined(__APPLE__)
+    IMP_ASSERT_FALSE([known containsObject:@"UTC"],
+                     @"knownTimeZoneNames must not contain the UTC abbreviation, which is why "
+                     @"IsKnownTimeZoneName tests for it separately");
+#else
+    IMP_ASSERT_TRUE([known containsObject:@"UTC"],
+                    @"GNUstep lists UTC among its zone names; if that stops being true the "
+                    @"divergence below is stale");
+    RecordDivergence(@"NSTimeZone.knownTimeZoneNames",
+                     @"the list contains \"UTC\", which Apple's does not, because Apple lists zone "
+                     @"names and UTC is an abbreviation",
+                     @"nothing: IsKnownTimeZoneName (imessage-proxy-server.m:216) accepts \"UTC\" by "
+                     @"an explicit equality test before it consults the set, so both platforms "
+                     @"answer the same for every input the API documents");
+#endif
     IMP_ASSERT_FALSE([known containsObject:@"Mars/Olympus_Mons"],
                      @"knownTimeZoneNames must not contain an invented region");
     IMP_ASSERT_NOT_NIL([NSTimeZone timeZoneWithName:@"UTC"], @"UTC must resolve to a time zone");
