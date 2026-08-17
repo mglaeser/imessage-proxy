@@ -117,6 +117,14 @@ and operational model described below.
 
 ### Fixed
 
+- A strict RFC 3339 timestamp with a trailing newline is refused again. The
+  pattern was anchored with `$`, which in ICU matches at the end of the input
+  and also before a final line terminator, so `2024-01-01T00:00:00Z\n` cleared
+  it; `NSISO8601DateFormatter` parses that string rather than rejecting it, so
+  nothing downstream caught the newline either. Every endpoint taking a
+  timestamp — scheduled sends, history bounds, the nullable timestamps in the
+  projected DTOs — accepted one. The pattern now anchors with `\z`, which is end
+  of input and admits no line terminator.
 - `--key-file` cannot be redirected onto a symlink. `-e` is false for a symlink
   whose target does not exist, so a dangling one passed the overwrite check and
   was then followed by the redirection, putting the credential wherever it

@@ -263,3 +263,22 @@ test("a wildcard bind does not widen the console's origins", () => {
   assert.ok(!/127\.0\.0\.1|localhost/.test(check),
     "the origin check must not hardcode an origin beside the derived list");
 });
+
+test("the RFC 3339 pattern is anchored at end of input, not end of line", () => {
+  // ICU's $ matches at the end of the input and also before a final line
+  // terminator, so "2024-01-01T00:00:00Z\n" satisfies a pattern anchored with $.
+  // The formatter behind it does not reject the newline either - Apple's
+  // NSISO8601DateFormatter parses that string and returns a date - so with $ the
+  // strict parser accepted a timestamp with trailing whitespace. \z is end of
+  // input and admits no line terminator.
+  //
+  // This is checkable only by reading the source: on Linux the formatter returns
+  // nil for every input, so the parser rejects the string for an unrelated
+  // reason and a behavioural test passes either way.
+  const parser = server.match(/static BOOL ParseStrictRFC3339\([\s\S]*?\n}/)?.[0];
+  assert.ok(parser, "ParseStrictRFC3339 must exist");
+  const pattern = parser.match(/regularExpressionWithPattern:([\s\S]*?)options:/)?.[1];
+  assert.ok(pattern, "ParseStrictRFC3339 must build its pattern inline");
+  assert.ok(pattern.includes("\\\\z"), "the timestamp pattern must end at \\z");
+  assert.ok(!/\$"/.test(pattern), "the timestamp pattern must not anchor with $");
+});

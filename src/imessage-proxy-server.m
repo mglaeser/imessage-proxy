@@ -172,10 +172,15 @@ static BOOL ParseStrictRFC3339(NSString *value, NSDate **dateOut) {
     static NSISO8601DateFormatter *fractionalFormatter;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        // \z rather than $. ICU's $ matches at the end of the input *and* before
+        // a final line terminator, so "2024-01-01T00:00:00Z\n" clears an anchored
+        // pattern. NSISO8601DateFormatter then accepts the same string, so with $
+        // nothing here refused a trailing newline. \z is end of input and nothing
+        // else.
         expression = [NSRegularExpression
             regularExpressionWithPattern:@"^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T"
                                          @"(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,9})?"
-                                         @"(?:Z|[+-](?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00))$"
+                                         @"(?:Z|[+-](?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00))\\z"
                                  options:0
                                    error:nil];
         wholeSecondsFormatter = [NSISO8601DateFormatter new];
