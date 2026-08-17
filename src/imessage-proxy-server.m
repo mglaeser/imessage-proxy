@@ -661,7 +661,18 @@ static NSData *NullTerminatedUTF8(NSString *value) {
     return terminated;
 }
 
+// st_gen and st_flags are BSD fields; Linux has neither, and it spells the
+// sub-second timestamps st_mtim and st_ctim rather than st_mtimespec and
+// st_ctimespec. The split is here so that tests/native can compile this file on
+// a Linux runner: the shipping product is macOS-only, and the Linux build
+// exists to run the unit tier against these leaf functions and never to serve a
+// request. Say it plainly - the pin is weaker on Linux by exactly two terms,
+// the generation counter and the file flags - and it is acceptable only because
+// nothing on that platform is ever pinning a real imsg binary. Do not let the
+// Linux branch become the one people read: the Darwin branch below is the
+// product's actual TOCTOU defence and it must keep every term it has.
 static BOOL ExecutableMetadataMatches(const struct stat *expected, const struct stat *actual) {
+#if defined(__APPLE__)
     return S_ISREG(expected->st_mode) && S_ISREG(actual->st_mode) && expected->st_dev == actual->st_dev &&
            expected->st_ino == actual->st_ino && expected->st_gen == actual->st_gen &&
            expected->st_mode == actual->st_mode && expected->st_uid == actual->st_uid &&
@@ -671,6 +682,14 @@ static BOOL ExecutableMetadataMatches(const struct stat *expected, const struct 
            expected->st_mtimespec.tv_nsec == actual->st_mtimespec.tv_nsec &&
            expected->st_ctimespec.tv_sec == actual->st_ctimespec.tv_sec &&
            expected->st_ctimespec.tv_nsec == actual->st_ctimespec.tv_nsec;
+#else
+    return S_ISREG(expected->st_mode) && S_ISREG(actual->st_mode) && expected->st_dev == actual->st_dev &&
+           expected->st_ino == actual->st_ino && expected->st_mode == actual->st_mode &&
+           expected->st_uid == actual->st_uid && expected->st_gid == actual->st_gid &&
+           expected->st_nlink == actual->st_nlink && expected->st_size == actual->st_size &&
+           expected->st_mtim.tv_sec == actual->st_mtim.tv_sec && expected->st_mtim.tv_nsec == actual->st_mtim.tv_nsec &&
+           expected->st_ctim.tv_sec == actual->st_ctim.tv_sec && expected->st_ctim.tv_nsec == actual->st_ctim.tv_nsec;
+#endif
 }
 
 static int OpenPinnedExecutable(NSString *path, NSString *expectedDigest, struct stat *metadataOut, NSError **error);

@@ -18,13 +18,35 @@ INSTALL_DATADIR := $(abspath $(DESTDIR)$(DATADIR))
 
 SOURCES := src/imessage-proxy-server.m src/api-key-store.m
 HEADERS := src/api-key-store.h
-TEST_C_SOURCES := tests/fixtures/fake-imsg-launcher.c
+# The native unit tier is built by tests/native/run.sh rather than by a rule
+# here, but its sources are still ours and are listed so that lint and format
+# reach them. A file absent from these lists is silently unlinted.
+TEST_OBJC_SOURCES := \
+	tests/native/runner.m \
+	tests/native/test-api-key-store.m \
+	tests/native/test-differential.m \
+	tests/native/test-imessage-proxy-server.m \
+	tests/native/linux/foundation-parity.m
+TEST_OBJC_HEADERS := \
+	tests/native/imp-test.h \
+	tests/native/linux/CommonCrypto/CommonDigest.h \
+	tests/native/linux/CoreFoundation/CoreFoundation.h \
+	tests/native/linux/Security/Security.h \
+	tests/native/linux/compat/darwin-compat.h \
+	tests/native/linux/dispatch/dispatch.h \
+	tests/native/linux/objc/blocks_runtime.h \
+	tests/native/linux/os/log.h
+TEST_C_SOURCES := \
+	tests/fixtures/fake-imsg-launcher.c \
+	tests/native/linux/darwin-shim.c
 RELEASE_BINARY := $(BUILD_DIR)/imessage-proxy-server
 DEBUG_BINARY := $(BUILD_DIR)/imessage-proxy-server-debug
 SHELL_SOURCES := \
 	bin/imessage-proxy \
 	scripts/install.sh \
+	scripts/linux-toolchain.sh \
 	scripts/uninstall.sh \
+	tests/native/run.sh \
 	tests/test-imessage-proxy-server.sh \
 	tests/test-imessage-proxy-cli.sh \
 	tests/test-install-script.sh \
@@ -57,7 +79,7 @@ SDKFLAGS := $(if $(MACOS_SDK_PATH),-isysroot "$(MACOS_SDK_PATH)",)
 FRAMEWORKS := -framework Foundation -framework Security
 LIBRARIES := -lsqlite3
 
-.PHONY: all analyze build check clean debug format help install lint test test-bash-compat test-installer test-schema test-uninstaller test-ui uninstall version
+.PHONY: all analyze build check clean debug format help install lint test test-bash-compat test-installer test-native test-schema test-uninstaller test-ui uninstall version
 
 all: build
 
@@ -84,7 +106,7 @@ analyze: ## Run Clang's static analyzer.
 			-Xanalyzer -analyzer-output=text -Xanalyzer -analyzer-werror "$$source"; \
 	done
 
-test: test-ui test-schema test-installer test-uninstaller test-bash-compat ## Run UI, schema, script, native-server, and lifecycle tests (macOS only).
+test: test-ui test-schema test-installer test-uninstaller test-bash-compat test-native ## Run UI, schema, script, native-server, and lifecycle tests (macOS only).
 	@$(MAKE) --no-print-directory _require-macos
 	bash tests/test-imessage-proxy-server.sh
 	bash tests/test-imessage-proxy-cli.sh
@@ -97,6 +119,14 @@ test-uninstaller: ## Run portable uninstaller behavior tests.
 
 test-bash-compat: ## Run portable interpreter-compatibility tests across bash 3.2-5.2 semantics.
 	bash tests/test-bash-compatibility.sh
+
+# Deliberately not guarded by _require-macos. The point of this tier is that the
+# leaf functions of a macOS-only product can be exercised on a Linux runner, and
+# a target that refused to run anywhere but a Mac would hand back the coverage
+# it was written to win. On Linux, provision the toolchain first with
+# scripts/linux-toolchain.sh; run.sh names that remedy when it is missing.
+test-native: ## Run the native unit tests (Linux or macOS).
+	bash tests/native/run.sh
 
 test-schema: _require-node ## Verify the key-store schema fingerprint and the native invariants.
 	node --test tests/test-schema-fingerprint.mjs tests/test-native-invariants.mjs
@@ -115,7 +145,7 @@ lint: _require-node ## Check Objective-C, shell, Markdown, JavaScript, and confi
 	@command -v npm >/dev/null 2>&1 || { printf 'error: npm is required\n' >&2; exit 127; }
 	@test -x node_modules/.bin/markdownlint-cli2 && test -x node_modules/.bin/redocly || { \
 		printf 'error: run npm ci --ignore-scripts --no-audit --no-fund to install locked validation tools\n' >&2; exit 127; }
-	clang-format --dry-run --Werror $(SOURCES) $(HEADERS) $(TEST_C_SOURCES)
+	clang-format --dry-run --Werror $(SOURCES) $(HEADERS) $(TEST_C_SOURCES) $(TEST_OBJC_SOURCES) $(TEST_OBJC_HEADERS)
 	shellcheck $(SHELL_SOURCES)
 	npm run --silent lint:markdown
 	npm run --silent lint:openapi
@@ -124,7 +154,7 @@ lint: _require-node ## Check Objective-C, shell, Markdown, JavaScript, and confi
 
 format: ## Rewrite Objective-C sources in the project's clang-format style.
 	@command -v clang-format >/dev/null 2>&1 || { printf 'error: clang-format is required\n' >&2; exit 127; }
-	clang-format -i $(SOURCES) $(HEADERS) $(TEST_C_SOURCES)
+	clang-format -i $(SOURCES) $(HEADERS) $(TEST_C_SOURCES) $(TEST_OBJC_SOURCES) $(TEST_OBJC_HEADERS)
 
 check: lint build analyze test ## Run every local check used by CI.
 
@@ -162,6 +192,7 @@ uninstall: ## Remove only files installed by this Makefile; preserve all runtime
 clean: ## Remove repository-local build outputs.
 	@case "$(abspath $(BUILD_DIR))" in "$(CURDIR)"/*) ;; *) printf 'error: BUILD_DIR must be inside the repository\n' >&2; exit 2;; esac
 	rm -f -- "$(RELEASE_BINARY)" "$(DEBUG_BINARY)"
+	rm -rf -- "$(BUILD_DIR)/native"
 	-rmdir "$(BUILD_DIR)" 2>/dev/null
 
 version: ## Print the project version.

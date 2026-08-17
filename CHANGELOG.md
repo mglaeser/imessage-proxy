@@ -90,6 +90,20 @@ and operational model described below.
   startup file rather than printing instructions, idempotently, and says what it
   changed. The administrator key is still written only to standard output and is
   never captured or echoed.
+- `make test-native` runs a native unit tier that compiles the shipping
+  Objective-C sources with ARC and exercises their leaf functions directly,
+  rather than only through the shell tests that drive the built server. It runs
+  on macOS against Apple's frameworks and on Linux against the rootless GNUstep
+  toolchain `scripts/linux-toolchain.sh` provisions, so CI — which has no Mac in
+  the fast job — can run it on every push instead of skipping it.
+
+  A Foundation parity probe gates the run and refuses the host if the Foundation
+  it found answers differently from the one the product ships against, because a
+  unit test that passes against a divergent Foundation reports a property the
+  product does not have. Where the two genuinely differ — `NSISO8601DateFormatter`,
+  JSON number provenance, `NSJSONWritingSortedKeys` — the probe names the
+  divergence and the code paths fenced off from the tier, so the gap is recorded
+  rather than silently untested.
 
 ### Removed
 
