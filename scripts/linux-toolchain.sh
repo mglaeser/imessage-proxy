@@ -67,23 +67,41 @@ readonly GNUSTEP_BASE_SONAME='libgnustep-base.so.1.29.0'
 # disagrees with the locally available 14 about real things - it added
 # InsertBraces and RemoveSemicolon and changed Objective-C block and attribute
 # breaking - so clean-at-14 would not have implied clean-at-18. apt.llvm.org is
-# the only source of an 18.1.8 arm64 build. These are snapshot packages that
-# upstream prunes from the pool over time; if the download starts 404ing, the
-# fix is to bump LLVM18_VERSION to a surviving 18.1.8 snapshot and re-pin the
-# three checksums, not to fall back to clang-format 14.
+# the only source of an 18.1.8 build. These are snapshot packages that upstream
+# prunes from the pool over time; if the download starts 404ing, the fix is to
+# bump LLVM18_VERSION to a surviving 18.1.8 snapshot and re-pin the checksums
+# for both architectures, not to fall back to clang-format 14.
+#
+# The checksums are per architecture because the pool path embeds one: the same
+# version string names a different file for arm64 and amd64, so a single pin can
+# only ever be right on the machine it was taken on. It was taken on arm64, and
+# the first CI run on an amd64 runner reported it as a checksum mismatch - which
+# reads exactly like tampering or a repacked snapshot, and is neither. They are
+# set beside the architecture mapping below so the two cannot drift apart.
 readonly LLVM18_VERSION='18.1.8~++20240731024826+3b5b5c1ec4a3-1~exp1~20240731144843.145'
 readonly LLVM18_POOL='https://apt.llvm.org/bookworm/pool/main/l/llvm-toolchain-18'
-readonly CLANG_FORMAT_18_SHA256='826b6085763f9db1c9e1a2b23b650c79973eed48fc38502133d650894c2d4349'
-readonly LIBLLVM18_SHA256='e805599a4b56a46413044e3e561c98c9da2acbfac06e43f4fe56179e7e6d4589'
-readonly LIBCLANG_CPP18_SHA256='8b03fa76988a8a68fb0107e09ba2b330e4f3cf05054107633e4f34a18bf631ec'
 
-# Only aarch64 has been exercised end to end. The x86_64 mapping is here so an
-# unsupported host fails with a build error naming a real path rather than
-# silently assembling a sysroot out of the wrong multiarch directory.
+# Both architectures are exercised: arm64 by development, amd64 by the CI
+# runner. Everything that differs between them is decided here, so a third
+# architecture is one branch rather than a hunt through the file.
 host_machine="$(uname -m)"
 case "$host_machine" in
-  aarch64) host_triple='aarch64-linux-gnu'; deb_arch='arm64'; loader='ld-linux-aarch64.so.1' ;;
-  x86_64) host_triple='x86_64-linux-gnu'; deb_arch='amd64'; loader='ld-linux-x86-64.so.2' ;;
+  aarch64)
+    host_triple='aarch64-linux-gnu'
+    deb_arch='arm64'
+    loader='ld-linux-aarch64.so.1'
+    clang_format_18_sha256='826b6085763f9db1c9e1a2b23b650c79973eed48fc38502133d650894c2d4349'
+    libllvm18_sha256='e805599a4b56a46413044e3e561c98c9da2acbfac06e43f4fe56179e7e6d4589'
+    libclang_cpp18_sha256='8b03fa76988a8a68fb0107e09ba2b330e4f3cf05054107633e4f34a18bf631ec'
+    ;;
+  x86_64)
+    host_triple='x86_64-linux-gnu'
+    deb_arch='amd64'
+    loader='ld-linux-x86-64.so.2'
+    clang_format_18_sha256='f23c9b5286505b07cfa61baa5df1d09ebdb00c116d540311b298ab3c33eb4058'
+    libllvm18_sha256='11d913210f42ba98c0da0293c237d463f2e0aabd2baf22539bcd89b1a46fb6fc'
+    libclang_cpp18_sha256='3781f1b1790d1f69040b4fa19e321b8af2d2687586cd2b65b4a2a6cebfad4a91'
+    ;;
   *)
     printf 'ERROR: unsupported machine %s; this provisioner knows aarch64 and x86_64 only\n' \
       "$host_machine" >&2
@@ -93,6 +111,9 @@ esac
 readonly HOST_TRIPLE="$host_triple"
 readonly DEB_ARCH="$deb_arch"
 readonly LOADER="$loader"
+readonly CLANG_FORMAT_18_SHA256="$clang_format_18_sha256"
+readonly LIBLLVM18_SHA256="$libllvm18_sha256"
+readonly LIBCLANG_CPP18_SHA256="$libclang_cpp18_sha256"
 
 # gnustep-base is the memory-hungry build. Capping the job count keeps a small
 # CI runner from being pushed into the OOM killer part way through a ten-minute
@@ -556,7 +577,7 @@ install_if_changed() {
 stage_wrappers() {
   local log="${CACHE_ROOT}/llvm18.log" written=0 package url
   begin_stage 'wrappers' "$log" \
-    "Check network access to apt.llvm.org. If the 18.1.8 snapshot has been pruned from the pool, bump LLVM18_VERSION and re-pin its three checksums."
+    "Check network access to apt.llvm.org. A 404 means the 18.1.8 snapshot was pruned from the pool: bump LLVM18_VERSION and re-pin the checksums for both architectures. A checksum mismatch on a machine this script has not run on before means the pins for ${DEB_ARCH} are wrong or missing, not that the file was tampered with."
 
   mkdir -p "$BIN_DIR"
 

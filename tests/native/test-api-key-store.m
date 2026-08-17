@@ -26,7 +26,15 @@
 
 #import "imp-test.h"
 
+// See the note in tests/native/test-imessage-proxy-server.m: compiling a
+// production source into a suite that carries nullability annotations of its own
+// turns on -Wnullability-completeness for code the release build accepts, since
+// the release build never merges the two. Scoped to the include so the suite
+// below is still held to the release warning set.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wnullability-completeness"
 #include "../../src/api-key-store.m"
+#pragma clang diagnostic pop
 
 // imp-test.h stops at the shapes every suite needs. These two are only
 // meaningful for a store function, and both are macros rather than functions so
