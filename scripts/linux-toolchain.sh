@@ -189,12 +189,61 @@ verify_sha256() {
   fi
 }
 
+# apt's mirror method takes a list of mirrors and picks one at fetch time, so
+# the URI it reports is not a URL any HTTP client can resolve: it looks like
+# mirror+file:/etc/apt/mirrors/ubuntu.list/pool/main/g/glibc/libc6_...deb, where
+# the leading path is a local file listing real mirrors and the rest is the
+# archive path under whichever one is chosen. curl answers `Protocol
+# "mirror+file" not supported`, which is what the first CI run of this script
+# hit: GitHub's Ubuntu images configure apt this way, and a plain container does
+# not, so nothing local reproduces it.
+#
+# The list file is found by walking the path back until a real file appears,
+# which avoids hardcoding /etc/apt/mirrors. Its first non-comment line is the
+# mirror, and the remainder of the URI is the path under it.
+resolve_package_uri() {
+  local url="$1" remainder list base
+  case "$url" in
+    mirror+file:*) ;;
+    mirror*:*)
+      printf 'ERROR: unsupported apt mirror scheme in %s\n' "$url" >&2
+      printf 'ERROR: this script can resolve mirror+file: only; report the scheme above.\n' >&2
+      return 1
+      ;;
+    *)
+      printf '%s\n' "$url"
+      return 0
+      ;;
+  esac
+  remainder="${url#mirror+file:}"
+  remainder="${remainder#//}"
+  list="$remainder"
+  while [ -n "$list" ] && [ ! -f "/${list#/}" ]; do
+    case "$list" in
+      */*) list="${list%/*}" ;;
+      *) list='' ;;
+    esac
+  done
+  if [ -z "$list" ]; then
+    printf 'ERROR: no apt mirror list file found in %s\n' "$url" >&2
+    return 1
+  fi
+  base="$(grep -v '^[[:space:]]*#' "/${list#/}" | grep -m 1 '://')" || base=''
+  base="${base%%[[:space:]]*}"
+  if [ -z "$base" ]; then
+    printf 'ERROR: apt mirror list %s names no mirror\n' "/${list#/}" >&2
+    return 1
+  fi
+  printf '%s/%s\n' "${base%/}" "${remainder#"$list"/}"
+}
+
 download_pinned() {
-  local url="$1" path="$2" expected="$3"
+  local url="$1" path="$2" expected="$3" resolved
   if [ -f "$path" ] && verify_sha256 "$path" "$expected" 2>/dev/null; then
     return 0
   fi
-  curl -fsSL --retry 3 --retry-delay 2 -o "$path" "$url"
+  resolved="$(resolve_package_uri "$url")" || return 1
+  curl -fsSL --retry 3 --retry-delay 2 -o "$path" "$resolved"
   verify_sha256 "$path" "$expected"
 }
 

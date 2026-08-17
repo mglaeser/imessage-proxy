@@ -50,6 +50,20 @@
 // and all that survives is the block of exposure shims at the bottom. Without
 // the split the differential binary would hold two of every store class and
 // three entry points.
+// The release build compiles each production source as its own translation
+// unit. This suite compiles two of them into one, and that arrangement is what
+// turns on -Wnullability-completeness: src/api-key-store.h is nullability
+// audited, src/imessage-proxy-server.m is not, and merged into a single unit
+// clang asks the second to finish what the first started. The diagnostic
+// therefore describes how this file includes the product, not the product, and
+// acting on it would mean annotating shipping code to satisfy a test.
+//
+// The exemption is scoped to the includes rather than passed on the command
+// line, so the suite's own code below is still held to the warning set the
+// release build uses.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wnullability-completeness"
+
 #if defined(IMP_TEST_EXPOSE_ONLY)
 #include "../../src/api-key-store.h"
 #else
@@ -62,6 +76,8 @@
 #define main imp_test_imessage_proxy_server_m_main_under_test
 #include "../../src/imessage-proxy-server.m"
 #undef main
+
+#pragma clang diagnostic pop
 
 #include <stdio.h>
 #include <string.h>
