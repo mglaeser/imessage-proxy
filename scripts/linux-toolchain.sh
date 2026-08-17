@@ -115,6 +115,33 @@ readonly CLANG_FORMAT_18_SHA256="$clang_format_18_sha256"
 readonly LIBLLVM18_SHA256="$libllvm18_sha256"
 readonly LIBCLANG_CPP18_SHA256="$libclang_cpp18_sha256"
 
+# Where the dynamic loader actually sits is not something to assume by name. The
+# wrapper writes this path into every binary it links as the ELF interpreter, so
+# a path that does not exist produces something that links cleanly and cannot
+# run: configure reports "the C compiler works... yes" and then "cannot run C
+# compiled programs", which reads like a cross-compilation problem and is not
+# one. Debian arm64 keeps a /lib/ld-linux-aarch64.so.1 symlink; Ubuntu amd64 has
+# no /lib/ld-linux-x86-64.so.2 at all and puts it under /lib64. Probing beats
+# tabulating, and a host with none of them says so here rather than five stages
+# later.
+loader_path=''
+for loader_candidate in \
+  "/lib/${HOST_TRIPLE}/${LOADER}" \
+  "/lib64/${LOADER}" \
+  "/lib/${LOADER}"; do
+  if [ -e "$loader_candidate" ]; then
+    loader_path="$loader_candidate"
+    break
+  fi
+done
+if [ -z "$loader_path" ]; then
+  printf 'ERROR: no dynamic loader named %s found in /lib/%s, /lib64 or /lib\n' \
+    "$LOADER" "$HOST_TRIPLE" >&2
+  printf 'ERROR: this host cannot be the base for a sysroot the wrappers can link against.\n' >&2
+  exit 1
+fi
+readonly LOADER_PATH="$loader_path"
+
 # gnustep-base is the memory-hungry build. Capping the job count keeps a small
 # CI runner from being pushed into the OOM killer part way through a ten-minute
 # compile, which presents as an unexplained "make: *** [all] Error 2".
@@ -435,7 +462,7 @@ stage_sysroot() {
   local runtime_dir="${TOOLCHAIN_ROOT}/lib/${HOST_TRIPLE}"
   local file base link pass repaired dangling
   begin_stage 'sysroot' '' \
-    "Confirm the host still has /lib/${HOST_TRIPLE} and /lib/${LOADER}, then re-run."
+    "Confirm the host still has /lib/${HOST_TRIPLE} and ${LOADER_PATH}, then re-run."
 
   dangling="$(dangling_symlinks "$dev_dir" | wc -l | tr -d ' ')"
   if [ -e "${TOOLCHAIN_ROOT}/lib/${LOADER}" ] && [ -e "${runtime_dir}/libc.so.6" ] &&
@@ -456,7 +483,7 @@ stage_sysroot() {
     base="$(basename -- "$file")"
     [ -e "${runtime_dir}/${base}" ] || ln -s "$file" "${runtime_dir}/${base}"
   done
-  ln -sfn "/lib/${LOADER}" "${TOOLCHAIN_ROOT}/lib/${LOADER}"
+  ln -sfn "$LOADER_PATH" "${TOOLCHAIN_ROOT}/lib/${LOADER}"
 
   # Second trap, and the one that costs an afternoon. Every -dev package ships
   # its libfoo.so as a relative symlink to a versioned object that lives in the
@@ -508,7 +535,7 @@ wrapper_prologue() {
     'set -Eeuo pipefail' \
     "toolchain='${TOOLCHAIN_ROOT}'" \
     "triple='${HOST_TRIPLE}'" \
-    "loader='${LOADER}'" \
+    "loader_path='${LOADER_PATH}'" \
     "llvm='llvm-${CLANG_VERSION}'" \
     "gcc_version='${GCC_VERSION}'" \
     "compiler='$1'"
@@ -531,7 +558,7 @@ exec "${toolchain}/usr/lib/${llvm}/bin/${compiler}" \
   -L "/usr/lib/${triple}" \
   -Wl,-rpath,"${toolchain}/usr/lib/${triple}" \
   -Wl,-rpath,"${toolchain}/usr/lib" \
-  -Wl,-dynamic-linker,"/lib/${loader}" \
+  -Wl,-dynamic-linker,"${loader_path}" \
   -Qunused-arguments \
   "$@"
 BODY

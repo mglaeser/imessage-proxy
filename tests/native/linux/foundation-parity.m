@@ -344,17 +344,24 @@ IMP_TEST(url_components_query_parsing) {
     // A stray percent is where the two parsers part company. Apple accepts the
     // string and re-encodes the percent as %25, so the query survives as the
     // literal text "%zz"; GNUstep refuses the whole string.
+    // A raw space is the same disagreement reached by a different route, so it
+    // is measured beside the stray percent rather than in a test of its own.
 #if defined(__APPLE__)
     NSURLComponents *malformed = [NSURLComponents componentsWithString:@"/api/messages?a=%zz"];
     IMP_ASSERT_NOT_NIL(malformed, @"NSURLComponents must accept a stray percent rather than refuse the string");
     IMP_ASSERT_EQ_STR(malformed.queryItems[0].value, @"%zz",
                       @"a stray percent must survive as literal text rather than decode");
+    NSURLComponents *spaced = [NSURLComponents componentsWithString:@"/api/messages?a= b"];
+    IMP_ASSERT_NOT_NIL(spaced, @"NSURLComponents must accept a raw space rather than refuse the string");
+    IMP_ASSERT_EQ_STR(spaced.queryItems[0].value, @" b", @"a raw space must survive in the query value");
 #else
     IMP_ASSERT_NIL([NSURLComponents componentsWithString:@"/api/messages?a=%zz"],
                    @"GNUstep refuses a malformed percent escape outright");
-    RecordDivergence(@"+[NSURLComponents componentsWithString:] with a malformed percent escape",
+    IMP_ASSERT_NIL([NSURLComponents componentsWithString:@"/api/messages?a= b"],
+                   @"GNUstep refuses a raw space outright");
+    RecordDivergence(@"+[NSURLComponents componentsWithString:] with a malformed percent escape or a raw space",
                      @"the string is refused and the initialiser returns nil, where Apple accepts "
-                     @"it and re-encodes the stray percent as %25",
+                     @"it, re-encodes the stray percent as %25, and keeps the space",
                      @"the malformed-escape path of ParseQueryAllowingRepeatedNames "
                      @"(imessage-proxy-server.m:1555): on Darwin such a request reaches the handler "
                      @"with a literal \"%zz\" value, on GNUstep it is rejected before that. Every "
