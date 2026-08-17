@@ -90,6 +90,20 @@ and operational model described below.
   startup file rather than printing instructions, idempotently, and says what it
   changed. The administrator key is still written only to standard output and is
   never captured or echoed.
+- `make test-native` runs a native unit tier that compiles the shipping
+  Objective-C sources with ARC and exercises their leaf functions directly,
+  rather than only through the shell tests that drive the built server. It runs
+  on macOS against Apple's frameworks and on Linux against the rootless GNUstep
+  toolchain `scripts/linux-toolchain.sh` provisions, so CI — which has no Mac in
+  the fast job — can run it on every push instead of skipping it.
+
+  A Foundation parity probe gates the run and refuses the host if the Foundation
+  it found answers differently from the one the product ships against, because a
+  unit test that passes against a divergent Foundation reports a property the
+  product does not have. Where the two genuinely differ — `NSISO8601DateFormatter`,
+  JSON number provenance, `NSJSONWritingSortedKeys` — the probe names the
+  divergence and the code paths fenced off from the tier, so the gap is recorded
+  rather than silently untested.
 - Unversioned, resource-oriented REST endpoints for readiness, chats, scrubbed
   chat-background state, bounded history, scheduled messages, statistics, text
   sends, privacy-safe audit events, and API-key management.
@@ -149,6 +163,14 @@ and operational model described below.
   validates each workflow on its own. It also asserts the inverse: the three
   checks that compile, test and scan the artifact cannot be dropped from the
   gate to force a release through.
+- A strict RFC 3339 timestamp with a trailing newline is refused again. The
+  pattern was anchored with `$`, which in ICU matches at the end of the input
+  and also before a final line terminator, so `2024-01-01T00:00:00Z\n` cleared
+  it; `NSISO8601DateFormatter` parses that string rather than rejecting it, so
+  nothing downstream caught the newline either. Every endpoint taking a
+  timestamp — scheduled sends, history bounds, the nullable timestamps in the
+  projected DTOs — accepted one. The pattern now anchors with `\z`, which is end
+  of input and admits no line terminator.
 - `--key-file` cannot be redirected onto a symlink. `-e` is false for a symlink
   whose target does not exist, so a dangling one passed the overwrite check and
   was then followed by the redirection, putting the credential wherever it

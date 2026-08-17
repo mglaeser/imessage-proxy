@@ -20,7 +20,11 @@ jobs:
   contracts:
     name: Workflows and API contract
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Raised from 10 for the native unit tier. Everything else in this job
+    # finishes in about two minutes, and a warm toolchain cache keeps it there;
+    # the headroom exists only for the cold build after scripts/linux-toolchain.sh
+    # changes, which takes about twenty-five minutes.
+    timeout-minutes: 45
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
@@ -79,6 +83,25 @@ jobs:
       # than on an operator's Mac.
       - name: Test bash compatibility across supported interpreters
         run: make test-bash-compat
+      # The native unit tier compiles the shipping Objective-C sources with ARC
+      # on a Linux runner, which needs an Objective-C runtime and a Foundation
+      # that Debian and Ubuntu do not package; scripts/linux-toolchain.sh builds
+      # both from source under $HOME, without sudo. A cold build costs about
+      # twenty-five minutes, so the result is cached on the hash of the
+      # provisioner itself: change that script and the next run rebuilds, leave
+      # it alone and the next run restores in seconds. Only $HOME/.local/opt is
+      # cached. The compiler-driver wrappers in $HOME/.local/bin are the one
+      # artefact that encodes the script's own text, so they are regenerated on
+      # every run, which the provisioner does in under a second.
+      - name: Restore the Linux Objective-C toolchain
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.local/opt
+          key: linux-objc-toolchain-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/linux-toolchain.sh') }}
+      - name: Provision the Linux Objective-C toolchain
+        run: bash scripts/linux-toolchain.sh
+      - name: Test the native leaf functions
+        run: make test-native
 
   check:
     name: Build, lint, analyze, and test
