@@ -671,7 +671,7 @@ stage_libobjc2() {
     return 0
   fi
 
-  announce 4 'libobjc2' "building ${LIBOBJC2_TAG} (about 2 minutes)"
+  announce 4 'libobjc2' "building ${LIBOBJC2_TAG}"
   : > "$log"
   unpack_pinned_source 'libobjc2' "$LIBOBJC2_TAG" "$LIBOBJC2_SHA256" "$LIBOBJC2_DIR" "$LIBOBJC2_COMMIT"
 
@@ -708,7 +708,7 @@ stage_tools_make() {
     return 0
   fi
 
-  announce 5 'gnustep-make' "building ${TOOLS_MAKE_TAG} (about 1 minute)"
+  announce 5 'gnustep-make' "building ${TOOLS_MAKE_TAG}"
   : > "$log"
   unpack_pinned_source 'tools-make' "$TOOLS_MAKE_TAG" "$TOOLS_MAKE_SHA256" "$TOOLS_MAKE_DIR" \
     "$TOOLS_MAKE_COMMIT"
@@ -749,7 +749,7 @@ stage_gnustep_base() {
     return 0
   fi
 
-  announce 6 'gnustep-base' "building ${LIBS_BASE_TAG} (about 10 minutes)"
+  announce 6 'gnustep-base' "building ${LIBS_BASE_TAG}"
   : > "$log"
   unpack_pinned_source 'libs-base' "$LIBS_BASE_TAG" "$LIBS_BASE_SHA256" "$LIBS_BASE_DIR" \
     "$LIBS_BASE_COMMIT"

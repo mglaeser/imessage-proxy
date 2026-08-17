@@ -20,11 +20,17 @@ jobs:
   contracts:
     name: Workflows and API contract
     runs-on: ubuntu-latest
-    # Raised from 10 for the native unit tier. Everything else in this job
-    # finishes in about two minutes, and a warm toolchain cache keeps it there;
-    # the headroom exists only for the cold build after scripts/linux-toolchain.sh
-    # changes, which takes about twenty-five minutes.
-    timeout-minutes: 45
+    # Raised from 10 for the native unit tier, which adds a toolchain build when
+    # scripts/linux-toolchain.sh changes and its cache key with it. Measured, not
+    # estimated: that cold build takes about ninety seconds on this runner and
+    # about forty-five on a five-core arm64 host, against a job that is otherwise
+    # two minutes. The first version of this comment claimed twenty-five minutes,
+    # which was wrong on both platforms and is the reason the number is now one
+    # somebody measured. Twenty is roughly ten times the observed cold path -
+    # enough that a slower runner or a heavier dependency has room, and low enough
+    # that a genuinely hung build is not left burning a runner for three quarters
+    # of an hour.
+    timeout-minutes: 20
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
