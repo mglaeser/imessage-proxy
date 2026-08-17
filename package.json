@@ -14,7 +14,7 @@
     "lint:openapi": "redocly lint openapi.yaml"
   },
   "devDependencies": {
-    "@redocly/cli": "2.46.0",
+    "@redocly/cli": "2.46.1",
     "markdownlint-cli2": "0.23.2"
   }
 }
