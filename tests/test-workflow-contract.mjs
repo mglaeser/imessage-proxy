@@ -40,6 +40,45 @@ function jobNames(text) {
   return Array.from(text.matchAll(/^ {4}name: (.+)$/gm), (match) => match[1].trim().replace(/^['"]|['"]$/g, ""));
 }
 
+// The trigger block runs from `on:` to the next key at column zero. Read as text
+// for the same reason job names are: one convention, checked, beats a dependency.
+function triggerBlock(text) {
+  const match = text.match(/^on:\n([\s\S]*?)(?=^\S)/m);
+  return match === null ? "" : match[1];
+}
+
+// Whether a workflow runs when a commit lands on main. A gate waits on a check
+// attached to one specific commit, so a workflow that runs only on a schedule or
+// only on pull requests produces that check somewhere other than where the gate
+// looks.
+function runsOnPushToMain(text) {
+  // Read line by line rather than by regex. The obvious pattern for "up to the
+  // next key or the end" spells the end as `$`, which under /m is the end of a
+  // line, so the push block gets cut to its first line and every workflow reads
+  // as not running on main.
+  const body = [];
+  let inPush = false;
+  let hasPush = false;
+  for (const line of triggerBlock(text).split("\n")) {
+    if (/^ {2}\S/.test(line)) {
+      inPush = line.trimEnd() === "  push:";
+      hasPush = hasPush || inPush;
+    } else if (inPush && line.trim() !== "") {
+      body.push(line);
+    }
+  }
+  if (!hasPush) {
+    return false;
+  }
+  // A push filtered by branch has to name main. A push filtered by tag - which
+  // is what release.yml itself does - fires on no branch at all. Only a bare
+  // push, filtered by neither, fires on every branch and so on main.
+  if (body.some((line) => /^ {4}branches:/.test(line))) {
+    return body.some((line) => /^ {6}- main$/.test(line));
+  }
+  return !body.some((line) => /^ {4}tags:/.test(line));
+}
+
 const releaseWorkflow = workflows.find((workflow) => workflow.name === "release.yml");
 
 test("every workflow declares at least one named job", () => {
@@ -80,5 +119,32 @@ test("the release gate still requires the checks that carry the build", () => {
   const required = new Set(Array.from(loop[1].matchAll(/'([^']+)'/g), (match) => match[1]));
   for (const name of ["Build, lint, analyze, and test", "Workflows and API contract", "Gitleaks"]) {
     assert.ok(required.has(name), `release.yml no longer requires ${name}`);
+  }
+});
+
+test("every check the release gate requires runs on a push to main", () => {
+  // Producing the check somewhere is not enough. The gate reads the check runs
+  // attached to the tagged commit, and a tag points at a commit on main, so a
+  // required check has to be one that a push to main produces. A workflow moved
+  // to schedule-only, or narrowed to pull_request, would still declare the job
+  // and would still satisfy the test above, while deadlocking the release
+  // exactly as the deleted Caddy job did - the gate would wait for a check that
+  // never appears on that commit.
+  const loop = releaseWorkflow.text.match(/for required_check in \\\n([\s\S]*?); do\n/);
+  const required = Array.from(loop[1].matchAll(/'([^']+)'/g), (match) => match[1]);
+
+  // Guard the reader itself: if the trigger convention changes shape, fail here
+  // rather than silently deciding that nothing runs on main.
+  const onMain = workflows.filter((workflow) => runsOnPushToMain(workflow.text));
+  assert.ok(onMain.length > 0, "no workflow was read as running on a push to main; the `on:` convention has changed");
+
+  for (const name of required) {
+    const producers = workflows.filter((workflow) => jobNames(workflow.text).includes(name));
+    assert.ok(producers.length > 0, `no workflow declares a job named ${name}`);
+    assert.ok(
+      producers.some((workflow) => runsOnPushToMain(workflow.text)),
+      `${name} is declared by ${producers.map((w) => w.name).join(", ")}, none of which runs on a push to ` +
+        `main, so the check will never appear on a tagged commit and the release gate cannot pass`,
+    );
   }
 });
