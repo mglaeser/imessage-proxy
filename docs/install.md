@@ -64,7 +64,9 @@ Reaching the **console** in a browser means binding the address you browse to.
 The accepted origins are derived from what was bound — loopback, `localhost`, and
 a specific bound address — and `0.0.0.0` adds none, because guessing them would
 accept anything that resolves to this machine. API clients send no `Origin` and
-are unaffected.
+are unaffected. Behind a TLS terminator the browser presents a name this process
+never sees, which is what `IMESSAGE_PROXY_PUBLIC_ORIGIN` is for; see
+[Publishing it](#publishing-it).
 
 A console reached at anything other than `127.0.0.1` or `localhost` is not a
 [secure context](https://developer.mozilla.org/docs/Web/Security/Secure_Contexts),
@@ -124,18 +126,28 @@ reporting `messages-unavailable`.
 
 ## Configuration
 
-`~/.config/imessage-proxy/service.env`, mode `0600`, three keys:
+`~/.config/imessage-proxy/service.env`, mode `0600`. Two keys must be present and
+four have defaults:
 
 ```bash
-IMESSAGE_PROXY_PORT=8765
 IMESSAGE_PROXY_IMSG_BIN=/Users/you/.local/libexec/imessage-proxy/imsg-0.13.4/imsg
 IMESSAGE_PROXY_IMSG_SHA256=<digest>
+#IMESSAGE_PROXY_PORT=8765
+#IMESSAGE_PROXY_BIND_ADDRESS=127.0.0.1
+#IMESSAGE_PROXY_PUBLIC_ORIGIN=https://messages.example.com
+#IMESSAGE_PROXY_MESSAGES_READ=enabled
 ```
 
-Only the port is meant to be edited. Change it, then
-`server-restart --confirm 'RESTART IMESSAGE PROXY SERVER'`. Every action except
-`bootstrap` reads this file; anything already exported wins, and
-`IMESSAGE_PROXY_CONFIG` points at a different one.
+The two `imsg` keys are written for you and are not meant to be edited. The rest
+are yours: change one, then `server-restart --confirm 'RESTART IMESSAGE PROXY
+SERVER'`. `config/imessage-proxy.env.example` carries the same list with each key
+explained.
+
+The CLI refuses a configuration containing any key it does not recognise, so a
+setting copied from an older release fails at once with the line number rather
+than being read as something else. Every action except `bootstrap` reads this
+file; anything already exported wins, and `IMESSAGE_PROXY_CONFIG` points at a
+different one.
 
 The allowlist decides who this Mac may message. Manage it with the CLI:
 
@@ -203,9 +215,10 @@ and see [API](api.md#the-sender-identifier) for the request fields.
 
 ## Publishing it
 
-The server binds loopback and refuses to bind anything else, so publishing means
-running your own terminator in front of `127.0.0.1:8765`. That component owns
-TLS certificates, HSTS, and any access control you want beyond the bearer key.
+The server binds loopback unless you name another address, and it holds itself to
+whatever you named. Publishing still means running your own terminator in front
+of it rather than widening the bind: that component owns TLS certificates, HSTS,
+and any access control you want beyond the bearer key.
 
 A container is a reasonable way to run it — that is the one part of this system
 that can be containerised, since the server itself needs Full Disk Access, Apple
@@ -218,6 +231,44 @@ Whatever you choose, it must:
 - strip any `X-API-*` header a client sends, because the server no longer trusts
   them and neither should you; and
 - be the only thing with a public port.
+
+### Let the console work through it
+
+The origins the server accepts are derived from what it bound, which is always
+`http://` and always an address or `localhost`. A console loaded at
+`https://messages.example.com` therefore presents an `Origin` no derived entry can
+match. Same-origin `GET` carries no `Origin` at all, so the page loads and looks
+healthy; every `POST` it makes is refused `403 origin-forbidden`. Send a message
+from the playground and that is what you get.
+
+Name the origin and the console works:
+
+```bash
+imessage-proxy server-stop
+printf 'IMESSAGE_PROXY_PUBLIC_ORIGIN=%s\n' 'https://messages.example.com' \
+  >> ~/.config/imessage-proxy/service.env
+imessage-proxy server-install
+imessage-proxy server-start
+```
+
+Exactly the origin, with no trailing slash and no path. A value that is not an
+origin refuses to start rather than being ignored, because a console that keeps
+answering `403` to every send is the failure this setting exists to end.
+
+The terminator must also leave the header alone. In Nginx Proxy Manager, the API
+locations need only the authentication exemption:
+
+```nginx
+location ^~ /api/ {
+    auth_basic off;
+    include conf.d/include/proxy.conf;
+}
+```
+
+Stripping the header instead — `proxy_set_header Origin "";` — also works, because
+a request with no `Origin` is allowed, and it is a reasonable stopgap on a version
+that has no `IMESSAGE_PROXY_PUBLIC_ORIGIN`. Naming the origin is better: it keeps
+the check doing its job for every other origin.
 
 Read [Security model](security.md) before exposing anything.
 

@@ -90,6 +90,31 @@ and operational model described below.
   startup file rather than printing instructions, idempotently, and says what it
   changed. The administrator key is still written only to standard output and is
   never captured or echoed.
+- `IMESSAGE_PROXY_PUBLIC_ORIGIN` names one extra browser origin the console may
+  be loaded from, which is what an installation published behind a TLS terminator
+  needs. The origins the server accepts are otherwise derived from what it bound,
+  and every one of them is `http://` at an address or `localhost`, so a console
+  served at a name over `https` presented an `Origin` no derived entry could
+  match. Same-origin `GET` carries no `Origin`, so the console loaded and looked
+  healthy while every send, every recipient change and every key action it made
+  was refused `403`. Publishing behind a proxy was documented and did not work.
+
+  It appends, never replaces, and it takes a scheme, a host and an optional port
+  and nothing else — no path, no trailing slash, no credentials, no `*`. A value
+  that is not an origin refuses to start rather than being ignored, because a
+  console that keeps answering `403` to every send is the failure the setting
+  exists to end. Absent or empty leaves the derived list exactly as it was, so an
+  installation without a terminator is unchanged.
+
+- `config/imessage-proxy.env.example` describes settings that exist. It still
+  named the Caddy executable, its digest, the ACME address and the two public
+  ports, all of which left with the Caddy edge, and the CLI refuses a
+  configuration containing a key it does not recognise — so an operator who
+  followed the instruction at the top of that file and copied it got a hard
+  failure on its second line. A new invariant checks every key the example names
+  against the keys the CLI accepts, and the required keys in the other direction,
+  so it cannot rot again silently.
+
 - `make test-native` runs a native unit tier that compiles the shipping
   Objective-C sources with ARC and exercises their leaf functions directly,
   rather than only through the shell tests that drive the built server. It runs

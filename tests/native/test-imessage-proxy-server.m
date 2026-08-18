@@ -376,6 +376,130 @@ static void TestPositiveIntegers(void) {
                      @"an embedded NUL must be refused rather than truncate the value to 1");
 }
 
+static void TestPublicOrigins(void) {
+    // Whatever this accepts becomes an entry in the list -[IMPHTTPServer
+    // originAllowed:] compares a browser's Origin header against, so it is the
+    // one place an operator can widen who may drive the console. The grammar is
+    // an origin and nothing else: everything a URL may carry beyond a scheme, a
+    // host and a port is refused rather than trimmed, because a value a browser
+    // would never send is a mistake that must be reported at startup rather
+    // than accepted into a list it can never match.
+    NSString *normalized = nil;
+    IMP_ASSERT_TRUE(IsValidPublicOrigin(@"https://message.klee.me", &normalized),
+                    @"the documented shape - https and a name - is the whole point of the setting");
+    IMP_ASSERT_EQ_STR(normalized, @"https://message.klee.me", @"an already lowercase origin is returned unchanged");
+    IMP_ASSERT_TRUE(IsValidPublicOrigin(@"http://console.example.com:8443", NULL),
+                    @"http with a port is accepted, with a NULL out-pointer");
+    IMP_ASSERT_TRUE(IsValidPublicOrigin(@"https://proxy", NULL), @"a single-label host is a host");
+    IMP_ASSERT_TRUE(IsValidPublicOrigin(@"https://x-1.example-site.co.uk", NULL),
+                    @"hyphens and digits inside a label are ordinary");
+    IMP_ASSERT_TRUE(IsValidPublicOrigin(@"https://xn--sterreich-z7a.example", NULL),
+                    @"a punycode label is the only spelling of an international name a browser sends");
+    IMP_ASSERT_TRUE(IsValidPublicOrigin(@"http://192.168.1.10:8765", NULL), @"a dotted quad with a port is accepted");
+    IMP_ASSERT_TRUE(IsValidPublicOrigin(@"http://10.0.0.5:1", NULL), @"port one is the lowest port");
+    IMP_ASSERT_TRUE(IsValidPublicOrigin(@"http://10.0.0.5:65535", NULL), @"port 65535 is the highest port");
+
+    // A browser lowercases the host in the Origin header it sends, so a value
+    // spelled with capitals has to be folded here or the setting is accepted at
+    // startup and then matches nothing an operator can produce.
+    IMP_ASSERT_TRUE(IsValidPublicOrigin(@"https://Message.Klee.Me", &normalized), @"a capitalised name is accepted");
+    IMP_ASSERT_EQ_STR(normalized, @"https://message.klee.me", @"the compared value is the folded one");
+
+    // The scheme is exactly two words, in exactly one case. A browser sends the
+    // scheme lowercase, and nothing else is a transport this console is served
+    // over.
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"HTTPS://message.klee.me", NULL), @"an uppercase scheme must be refused");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"Http://message.klee.me", NULL), @"a capitalised scheme must be refused");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"ftp://message.klee.me", NULL), @"another scheme must be refused");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"//message.klee.me", NULL), @"a scheme-relative value has no scheme");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"message.klee.me", NULL), @"a bare host is not an origin");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"http:/message.klee.me", NULL), @"one slash is not the separator");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://", NULL), @"a scheme with no host is not an origin");
+
+    // The two values a browser sends for cases this list must never widen to.
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"*", NULL), @"a wildcard must be refused");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"null", NULL),
+                     @"the origin a sandboxed document sends must never be nameable");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"", NULL), @"an empty value is the feature being off, not an origin");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(NilString(), NULL), @"nil must be refused rather than crash on -hasPrefix:");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin((NSString *)@42, NULL), @"a number must be refused");
+
+    // Everything beyond scheme, host and port. A browser sends none of it, so
+    // each of these would validate and then match nothing.
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://message.klee.me/", NULL), @"a trailing slash must be refused");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://message.klee.me/console", NULL), @"a path must be refused");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://message.klee.me?a=1", NULL), @"a query must be refused");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://message.klee.me#top", NULL), @"a fragment must be refused");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://ops@message.klee.me", NULL), @"userinfo must be refused");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://ops:secret@message.klee.me", NULL),
+                     @"a password in an origin must be refused rather than stored in a plist");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://message.klee.me:8443/", NULL),
+                     @"a trailing slash after a port must be refused too");
+
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@" https://message.klee.me", NULL), @"a leading space must be refused");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://message.klee.me ", NULL), @"a trailing space must be refused");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://message klee.me", NULL), @"an interior space must be refused");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://message.klee.me\n", NULL),
+                     @"a trailing newline must be refused, or one setting spans two lines");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://message.klee.me\t", NULL), @"a tab must be refused");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://message.klee.me\0", NULL),
+                     @"an embedded NUL must be refused rather than truncate the origin");
+    // Written with %C for the reason StringAroundCodeUnit gives: C refuses a \u
+    // escape that names a control character, and a literal one would be
+    // invisible in exactly the way this input is meant to be.
+    IMP_ASSERT_FALSE(IsValidPublicOrigin([NSString stringWithFormat:@"https://klee%Cme", (unichar)0x0085], NULL),
+                     @"a next-line control inside the host must be refused");
+
+    // The ASCII round trip. A full-width letter renders as the name an operator
+    // reads and is a different host to every browser.
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://\uFF4Dessage.klee.me", NULL),
+                     @"a full-width letter must not pass for the ASCII one");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://m\u00E9ssage.klee.me", NULL),
+                     @"an accented letter must be refused; the punycode spelling is what a browser sends");
+
+    // Ports, in the one spelling a browser uses. ParsePositiveInteger accepts a
+    // leading zero, so the first digit is checked before it.
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"http://10.0.0.5:0", NULL), @"port zero is not a port");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"http://10.0.0.5:08443", NULL), @"a leading zero is not the canonical port");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"http://10.0.0.5:65536", NULL), @"one over the highest port must be refused");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"http://10.0.0.5:", NULL), @"a colon with no port must be refused");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"http://10.0.0.5:80:80", NULL), @"two ports must be refused");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"http://10.0.0.5:8a", NULL), @"a letter in the port must be refused");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"http://[::1]:8765", NULL),
+                     @"an IPv6 literal must be refused; the listener is IPv4 and the brackets are not label characters");
+
+    // A host of digits and dots is meant to be an address and is held to
+    // inet_pton, because the label rules alone would read every one of these as
+    // a perfectly good sequence of labels.
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://999.1.1.1", NULL), @"an octet over 255 is not an address");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://1.2.3", NULL), @"three octets is not an address");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://1.2.3.4.5", NULL), @"five octets is not an address");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://010.1.1.1", NULL),
+                     @"a leading zero is 8 to some resolvers and 10 to others");
+
+    // Labels, which is what the rest of the hosts are.
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://.klee.me", NULL), @"a leading dot leaves an empty label");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://klee.me.", NULL), @"a trailing dot leaves an empty label");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://klee..me", NULL), @"two dots leave an empty label between them");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://-klee.me", NULL), @"a label may not begin with a hyphen");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://klee-.me", NULL), @"a label may not end with a hyphen");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"https://klee_me.example", NULL), @"an underscore is not a label character");
+    IMP_ASSERT_TRUE(IsValidPublicOrigin([@"https://" stringByAppendingFormat:@"%@.me", Repeated(@"a", 63)], NULL),
+                    @"a sixty-three character label is exactly at the bound");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin([@"https://" stringByAppendingFormat:@"%@.me", Repeated(@"a", 64)], NULL),
+                     @"a sixty-four character label is one over the bound");
+
+    // The whole value is bounded in bytes, so a name assembled from legal labels
+    // cannot grow without limit.
+    NSString *longestHost = [NSString stringWithFormat:@"%@.%@.%@.%@", Repeated(@"a", 60), Repeated(@"a", 60),
+                                                       Repeated(@"a", 60), Repeated(@"a", 62)];
+    NSString *longest = [@"https://" stringByAppendingString:longestHost];
+    IMP_ASSERT_EQ_INT(longest.length, 253, @"the fixture is exactly at the bound");
+    IMP_ASSERT_TRUE(IsValidPublicOrigin(longest, NULL), @"two hundred and fifty-three bytes is exactly at the bound");
+    IMP_ASSERT_FALSE(IsValidPublicOrigin([longest stringByAppendingString:@"a"], NULL),
+                     @"one byte over the bound must be refused");
+}
+
 static void TestDirectMessageRecipients(void) {
     // Anything this accepts becomes a permitted send target and then an argv
     // value handed to the pinned binary.
@@ -1519,6 +1643,7 @@ int main(void) {
         RunTest("strict_rfc3339_rejections", TestStrictRFC3339Rejections);
         RunTest("strict_rfc3339_acceptances", TestStrictRFC3339Acceptances);
         RunTest("positive_integers", TestPositiveIntegers);
+        RunTest("public_origins", TestPublicOrigins);
         RunTest("direct_message_recipients", TestDirectMessageRecipients);
         RunTest("allowed_target_files", TestAllowedTargetFiles);
         RunTest("allowed_target_lines", TestAllowedTargetLines);
