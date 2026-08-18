@@ -335,6 +335,101 @@ static BOOL ParsePositiveInteger(NSString *value, NSUInteger maximum, NSUInteger
     return YES;
 }
 
+// The one browser origin an operator may add to the derived list. Every entry
+// that list holds comes from what the listener bound, which is always http://
+// and always an address or localhost, so a console published the documented way
+// - a TLS terminator in front - presents an Origin no derived entry can ever
+// match, and every state-changing request from it is refused 403.
+//
+// The grammar is an origin and nothing more: scheme, host, optional port. A
+// path, a query, a fragment, userinfo, a trailing slash or any whitespace is a
+// mistake rather than a stricter spelling of the same thing, because a browser
+// sends none of them in an Origin header, so a value carrying one would
+// validate here and then match nothing. "*" and "null" go the same way; neither
+// is a name this list may ever hold.
+//
+// The normalised value is what gets compared, because a browser lowercases the
+// host it sends. An operator who wrote their name with capitals would otherwise
+// configure an origin that is accepted at startup and silently never matches.
+static BOOL IsValidPublicOrigin(NSString *value, NSString **normalizedOut) {
+    if (![value isKindOfClass:NSString.class] || value.length == 0)
+        return NO;
+    // ASCII, one byte per character, so everything below can read characters
+    // and mean bytes. It also disposes of every look-alike host in one line: a
+    // fullwidth letter is not a label character here.
+    NSData *ascii = [value dataUsingEncoding:NSASCIIStringEncoding];
+    if (ascii == nil || ascii.length != value.length || ascii.length > 253)
+        return NO;
+    NSString *authority = nil;
+    if ([value hasPrefix:@"http://"])
+        authority = [value substringFromIndex:7];
+    else if ([value hasPrefix:@"https://"])
+        authority = [value substringFromIndex:8];
+    else
+        return NO;
+    NSString *host = authority;
+    NSRange separator = [authority rangeOfString:@":"];
+    if (separator.location != NSNotFound) {
+        host = [authority substringToIndex:separator.location];
+        NSString *portText = [authority substringFromIndex:separator.location + 1];
+        // ParsePositiveInteger reads "0080" as eighty, and a browser spells the
+        // port exactly one way, so the leading zero is refused here rather than
+        // producing an origin that never matches.
+        if (portText.length == 0 || [portText characterAtIndex:0] == '0' ||
+            !ParsePositiveInteger(portText, 65535, NULL))
+            return NO;
+    }
+    static NSCharacterSet *notHostCharacters;
+    static NSCharacterSet *notAddressCharacters;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        notHostCharacters = [[NSCharacterSet
+            characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-."]
+            invertedSet];
+        notAddressCharacters = [[NSCharacterSet characterSetWithCharactersInString:@"0123456789."] invertedSet];
+    });
+    if (host.length == 0 || [host rangeOfCharacterFromSet:notHostCharacters].location != NSNotFound)
+        return NO;
+    if ([host rangeOfCharacterFromSet:notAddressCharacters].location == NSNotFound) {
+        // Nothing but digits and dots is meant to be an address. The rule is
+        // spelled out here rather than delegated to inet_pton, because the two
+        // platforms do not agree on it: glibc refuses a leading zero and Apple's
+        // accepts it, so a host of 010.1.1.1 was refused on Linux and allowed on
+        // the Mac the product actually ships to. It has to be refused on both.
+        // A leading zero is read as octal by some resolvers and as decimal by
+        // others, so 010.1.1.1 is 8.1.1.1 to one and 10.1.1.1 to another, and an
+        // origin that means two addresses is not one this list may hold.
+        //
+        // These are the same four rules bind_address_valid applies in
+        // bin/imessage-proxy, so the CLI and the server refuse the same strings.
+        NSArray<NSString *> *octets = [host componentsSeparatedByString:@"."];
+        if (octets.count != 4)
+            return NO;
+        for (NSString *octet in octets) {
+            if (octet.length == 0 || octet.length > 3)
+                return NO;
+            if (octet.length > 1 && [octet hasPrefix:@"0"])
+                return NO;
+            NSUInteger parsedOctet = 0;
+            if (![octet isEqualToString:@"0"] && !ParsePositiveInteger(octet, 255, &parsedOctet))
+                return NO;
+        }
+        // Belt and braces, and the thing that actually builds the address the
+        // listener would compare against.
+        struct in_addr parsedHost = {0};
+        if (inet_pton(AF_INET, host.UTF8String, &parsedHost) != 1)
+            return NO;
+    } else {
+        for (NSString *label in [host componentsSeparatedByString:@"."]) {
+            if (label.length == 0 || label.length > 63 || [label hasPrefix:@"-"] || [label hasSuffix:@"-"])
+                return NO;
+        }
+    }
+    if (normalizedOut != NULL)
+        *normalizedOut = value.lowercaseString;
+    return YES;
+}
+
 static BOOL IsDirectMessageRecipient(NSString *value) {
     NSUInteger length = UnicodeCodePointLength(value);
     if (length == 0 || length > 256 || [value hasPrefix:@"-"] ||
@@ -1098,7 +1193,8 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
         @"IMESSAGE_PROXY_MESSAGES_READ",
         @"IMESSAGE_PROXY_URL",
         @"IMESSAGE_PROXY_VERSION",
-        @"IMESSAGE_PROXY_BIND_ADDRESS"
+        @"IMESSAGE_PROXY_BIND_ADDRESS",
+        @"IMESSAGE_PROXY_PUBLIC_ORIGIN"
     ]];
     for (NSString *name in environment) {
         if ([name hasPrefix:@"IMESSAGE_PROXY_"] && ![recognized containsObject:name]) {
@@ -1121,9 +1217,10 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
     configuration.messagesDatabasePath =
         environment[@"IMESSAGE_PROXY_MESSAGES_DATABASE_PATH"]
             ?: [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Messages/chat.db"];
-    // The listener is loopback-only and its port is the single network setting,
-    // so the browser origin the console is served from is derived rather than
-    // configured. Nothing an operator can set makes these disagree.
+    // The port is the one network setting the console's own origin depends on,
+    // so that origin follows the listener rather than being spelled out beside
+    // it and the two cannot disagree. IMESSAGE_PROXY_PUBLIC_ORIGIN adds one
+    // entry to the list further down; it never replaces what is derived here.
     NSString *portText = environment[@"IMESSAGE_PROXY_PORT"] ?: @"8765";
     NSUInteger parsedPort = 0;
     if (!ParsePositiveInteger(portText, 65535, &parsedPort) || parsedPort < 1024) {
@@ -1169,6 +1266,29 @@ static IMPConfiguration *LoadConfiguration(NSError **error) {
                          [NSString stringWithFormat:@"http://localhost:%lu", (unsigned long)parsedPort], nil];
     if (parsedBind.s_addr != htonl(INADDR_LOOPBACK) && parsedBind.s_addr != htonl(INADDR_ANY)) {
         [origins addObject:[NSString stringWithFormat:@"http://%@:%lu", bindText, (unsigned long)parsedPort]];
+    }
+
+    // The one entry an operator names. A console published behind a TLS
+    // terminator is loaded over https at a name this process never sees, so it
+    // is the single case the derivation above cannot reach: the terminator's
+    // origin has to be written down. Absent or empty is the default and leaves
+    // the list exactly as it was derived; a value that is not an origin refuses
+    // to start, because a console that silently keeps answering 403 to every
+    // send is the failure this setting exists to end.
+    NSString *publicOrigin = environment[@"IMESSAGE_PROXY_PUBLIC_ORIGIN"] ?: @"";
+    if (publicOrigin.length > 0) {
+        NSString *normalizedOrigin = nil;
+        if (!IsValidPublicOrigin(publicOrigin, &normalizedOrigin)) {
+            if (error != NULL) {
+                *error = ServerError(IMPServerErrorInvalidConfiguration,
+                                     @"IMESSAGE_PROXY_PUBLIC_ORIGIN must be http:// or https:// followed by a host "
+                                     @"and an optional port, with no path, credentials or trailing slash");
+            }
+            return nil;
+        }
+        if (![origins containsObject:normalizedOrigin]) {
+            [origins addObject:normalizedOrigin];
+        }
     }
     configuration.allowedOrigins = origins;
 
@@ -2330,9 +2450,10 @@ static NSDictionary *AuditEventDTO(IMPAuditRecord *record) {
     if (origin.length == 0)
         return YES;
     // The console is served by this process, so the only Origin a browser may
-    // legitimately present is one this listener answers on. The list is derived
-    // from what was bound rather than configured beside it, so the two cannot
-    // disagree; see where it is built for why 0.0.0.0 adds nothing to it.
+    // legitimately present is one this listener answers on, or the single
+    // public origin an operator named for a terminator standing in front of it.
+    // The list is built once, at startup, from those two things and nothing a
+    // request carries; see where it is built for why 0.0.0.0 adds nothing.
     return [self.configuration.allowedOrigins containsObject:origin];
 }
 

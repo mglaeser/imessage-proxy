@@ -19,6 +19,8 @@ import test from "node:test";
 const store = await readFile(new URL("../src/api-key-store.m", import.meta.url), "utf8");
 const server = await readFile(new URL("../src/imessage-proxy-server.m", import.meta.url), "utf8");
 const header = await readFile(new URL("../src/api-key-store.h", import.meta.url), "utf8");
+const cli = await readFile(new URL("../bin/imessage-proxy", import.meta.url), "utf8");
+const example = await readFile(new URL("../config/imessage-proxy.env.example", import.meta.url), "utf8");
 
 // Objective-C selectors are the parameter labels in order. Two call sites kept
 // initWithUUID:...:createdAt: after it gained senderIdentifier:, which the
@@ -264,6 +266,63 @@ test("a wildcard bind does not widen the console's origins", () => {
     "the origin check must not hardcode an origin beside the derived list");
 });
 
+test("the settings the CLI writes and the settings the server recognises are the same settings", () => {
+  // The server refuses to start on any IMESSAGE_PROXY_* name it does not
+  // recognise, so a setting threaded through the CLI and forgotten in that set
+  // is not a setting that is quietly ignored: it is a LaunchAgent that boots,
+  // exits, and is relaunched every ThrottleInterval until an operator reads the
+  // log. The mistake is one line in either file and is invisible in both.
+  const declaration = server.match(/NSSet<NSString \*> \*recognized =[\s\S]*?\]\];/)?.[0];
+  assert.ok(declaration, "the recognised settings must be declared in one place");
+  const recognized = new Set(Array.from(declaration.matchAll(/@"(IMESSAGE_PROXY_[A-Z0-9_]+)"/g), (m) => m[1]));
+  assert.ok(recognized.size > 10, "the recognised set must list the settings");
+  for (const name of new Set(cli.match(/IMESSAGE_PROXY_[A-Z0-9_]+/g) ?? [])) {
+    assert.ok(recognized.has(name), `the CLI names ${name} and the server would refuse to start on it`);
+  }
+  // The other direction, minus the two a caller sets for the CLI's own HTTP
+  // client rather than for the service, so a setting added to the server and
+  // never rendered into the LaunchAgent fails here too.
+  for (const name of recognized) {
+    if (name === "IMESSAGE_PROXY_API_KEY" || name === "IMESSAGE_PROXY_URL") {
+      continue;
+    }
+    assert.ok(cli.includes(name), `the server recognises ${name} and the CLI never sets it`);
+  }
+  // And the setting is only useful if it reaches the running service by both
+  // routes: the rendered LaunchAgent, and the environment `serve` is run with.
+  const rendered = cli.match(/render_server_agent_to\(\) \{[\s\S]*?\n\}/)?.[0];
+  const runner = cli.match(/run_server\(\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(rendered && runner, "both paths that hand the server its environment must be present");
+  for (const name of ["IMESSAGE_PROXY_BIND_ADDRESS", "IMESSAGE_PROXY_PORT", "IMESSAGE_PROXY_PUBLIC_ORIGIN"]) {
+    assert.ok(rendered.includes(name), `the LaunchAgent render omits ${name}`);
+    assert.ok(runner.includes(name), `the serve environment omits ${name}`);
+  }
+});
+
+test("the extra console origin is validated on both sides of the plist", () => {
+  // The CLI writes the value launchd hands the server, so a value the server
+  // will not start on has to be refused before it is written; the server
+  // validates it again because a plist can be edited by hand.
+  assert.match(cli, /^public_origin_valid\(\) \{$/m, "the CLI must have a rule of its own");
+  const guard = cli.match(/require_api_settings\(\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(guard?.includes("public_origin_valid"), "the CLI must refuse a bad origin before launchd sees it");
+  const validator = server.match(/static BOOL IsValidPublicOrigin\([\s\S]*?\n}/)?.[0];
+  assert.ok(validator, "IsValidPublicOrigin must exist");
+  assert.ok(validator.includes('[value hasPrefix:@"http://"]') && validator.includes('[value hasPrefix:@"https://"]'),
+    "only the two schemes a console is served over may be accepted");
+  assert.ok(validator.includes("inet_pton"), "a host of digits and dots must be held to the address rule");
+  // Fail closed, like every other unusable setting: a console that answers 403
+  // to every send is the failure this setting exists to end, and starting with
+  // the value ignored reproduces it exactly.
+  const use = server.match(/NSString \*publicOrigin =[\s\S]*?configuration\.allowedOrigins = origins;/)?.[0];
+  assert.ok(use, "the setting must be read where the origins are built");
+  assert.ok(use.includes("IMPServerErrorInvalidConfiguration") && use.includes("IMESSAGE_PROXY_PUBLIC_ORIGIN"),
+    "an invalid value must refuse to start and name the setting");
+  assert.ok(use.includes("publicOrigin.length > 0"), "an absent or empty value must leave the derived list alone");
+  assert.ok(use.includes("![origins containsObject:normalizedOrigin]"),
+    "the entry must not be added twice when it repeats one the server derived");
+});
+
 test("the RFC 3339 pattern is anchored at end of input, not end of line", () => {
   // ICU's $ matches at the end of the input and also before a final line
   // terminator, so "2024-01-01T00:00:00Z\n" satisfies a pattern anchored with $.
@@ -281,4 +340,31 @@ test("the RFC 3339 pattern is anchored at end of input, not end of line", () => 
   assert.ok(pattern, "ParseStrictRFC3339 must build its pattern inline");
   assert.ok(pattern.includes("\\\\z"), "the timestamp pattern must end at \\z");
   assert.ok(!/\$"/.test(pattern), "the timestamp pattern must not anchor with $");
+});
+
+test("every key the example configuration names is a key the CLI accepts", () => {
+  // config/imessage-proxy.env.example is installed alongside the CLI and tells
+  // the reader to copy it and replace the placeholders. The CLI dies on the
+  // first key it does not recognise, so a stale example is not a stale comment:
+  // it is a configuration that cannot start. This file kept naming the Caddy
+  // edge, its ACME address and its two ports for every release after that edge
+  // was deleted, and nothing failed until somebody followed the instruction.
+  const allowed = cli.match(/service_config_key_allowed\(\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(allowed, "the CLI must decide the accepted keys in one place");
+  for (const name of example.match(/^#?(IMESSAGE_PROXY_[A-Z0-9_]+)=/gm) ?? []) {
+    const key = name.replace(/^#?/, "").replace(/=$/, "");
+    assert.ok(
+      allowed.includes(key),
+      `config/imessage-proxy.env.example names ${key}, which the CLI refuses; a copy of that file cannot start`,
+    );
+  }
+  // And the other way for the two the CLI insists on, so an example that stops
+  // showing a required key fails here rather than in somebody's install.
+  for (const required of ["IMESSAGE_PROXY_IMSG_BIN", "IMESSAGE_PROXY_IMSG_SHA256"]) {
+    assert.match(
+      example,
+      new RegExp(`^${required}=`, "m"),
+      `the example must show ${required}, which the CLI requires to be present`,
+    );
+  }
 });
