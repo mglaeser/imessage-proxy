@@ -391,9 +391,31 @@ static BOOL IsValidPublicOrigin(NSString *value, NSString **normalizedOut) {
     if (host.length == 0 || [host rangeOfCharacterFromSet:notHostCharacters].location != NSNotFound)
         return NO;
     if ([host rangeOfCharacterFromSet:notAddressCharacters].location == NSNotFound) {
-        // Nothing but digits and dots is meant to be an address, so it is held
-        // to inet_pton exactly as the bind address is. The name rules below
-        // would read 999.1.1.1 as a perfectly good sequence of labels.
+        // Nothing but digits and dots is meant to be an address. The rule is
+        // spelled out here rather than delegated to inet_pton, because the two
+        // platforms do not agree on it: glibc refuses a leading zero and Apple's
+        // accepts it, so a host of 010.1.1.1 was refused on Linux and allowed on
+        // the Mac the product actually ships to. It has to be refused on both.
+        // A leading zero is read as octal by some resolvers and as decimal by
+        // others, so 010.1.1.1 is 8.1.1.1 to one and 10.1.1.1 to another, and an
+        // origin that means two addresses is not one this list may hold.
+        //
+        // These are the same four rules bind_address_valid applies in
+        // bin/imessage-proxy, so the CLI and the server refuse the same strings.
+        NSArray<NSString *> *octets = [host componentsSeparatedByString:@"."];
+        if (octets.count != 4)
+            return NO;
+        for (NSString *octet in octets) {
+            if (octet.length == 0 || octet.length > 3)
+                return NO;
+            if (octet.length > 1 && [octet hasPrefix:@"0"])
+                return NO;
+            NSUInteger parsedOctet = 0;
+            if (![octet isEqualToString:@"0"] && !ParsePositiveInteger(octet, 255, &parsedOctet))
+                return NO;
+        }
+        // Belt and braces, and the thing that actually builds the address the
+        // listener would compare against.
         struct in_addr parsedHost = {0};
         if (inet_pton(AF_INET, host.UTF8String, &parsedHost) != 1)
             return NO;
