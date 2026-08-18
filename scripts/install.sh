@@ -56,6 +56,7 @@ imsg_path=''
 install_prefix="${HOME:-}/.local"
 bind_address='127.0.0.1'
 bind_confirmed='no'
+public_origin=''
 key_file=''
 release_tag=''
 run_tests='auto'
@@ -162,6 +163,12 @@ Options:
                          interface over plain HTTP; 0.0.0.0 is every interface
                          and additionally needs --expose-confirm
   --expose-confirm       Acknowledge that --bind 0.0.0.0 serves every interface
+  --public-origin ORIGIN
+                         Browser origin a TLS proxy already publishes this
+                         console at, such as https://messages.example.com. The
+                         console's sends are accepted from it in addition to the
+                         origins derived from the bound address. This binds
+                         nothing, exposes nothing and terminates nothing
   --key-file PATH        Write the administrator key to this absolute path,
                          created private to you, instead of printing it
   --verbose              Show the full output of each build and install step
@@ -181,7 +188,10 @@ grant it from a script, and --messages-read prints the steps rather than pausing
 on them when the questions were answered here.
 
 The service listens on 127.0.0.1 unless --bind names another address, and speaks
-plain HTTP either way. Put your own TLS proxy in front of it to publish it.
+plain HTTP either way. Put your own TLS proxy in front of it to publish it, and
+name the origin that proxy serves with --public-origin so the console reached
+there may send. Without --public-origin the installer asks for it, and Enter
+declines.
 USAGE
 }
 
@@ -286,6 +296,44 @@ bind_address_valid() {
   done
 }
 
+# The same grammar bin/imessage-proxy's public_origin_valid and the server's
+# IsValidPublicOrigin enforce, applied here so a value either of them would
+# refuse is caught while the operator is still looking at the prompt rather than
+# three phases later when launchd hands it to a server that will not start. An
+# origin is a scheme, a host and an optional port and nothing else: a path, a
+# query, a fragment, credentials or a trailing slash are refused because a
+# browser sends none of them in an Origin header, so a value carrying one would
+# be written down here and then match nothing. A host that is only digits and
+# dots is an address and goes to the same dotted-quad rule as the bind address;
+# anything else is a DNS name and is checked label by label.
+public_origin_valid() {
+  local LC_ALL=C label port rest value="$1"
+  local -a labels
+  [[ "$value" == http://* || "$value" == https://* ]] || return 1
+  ((${#value} <= 253)) || return 1
+  rest="${value#http://}"
+  rest="${rest#https://}"
+  if [[ "$rest" == *:* ]]; then
+    port="${rest#*:}"
+    rest="${rest%%:*}"
+    [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && ((10#$port <= 65535)) || return 1
+  fi
+  [[ -n "$rest" && "$rest" != *[!A-Za-z0-9.-]* ]] || return 1
+  if [[ "$rest" != *[!0-9.]* ]]; then
+    bind_address_valid "$rest"
+    return
+  fi
+  # read drops a trailing empty field, so "message.example." would otherwise
+  # split into the same labels as "message.example" and pass a rule the server
+  # refuses. The three dot placements are therefore refused before the split.
+  [[ "$rest" != .* && "$rest" != *. && "$rest" != *..* ]] || return 1
+  IFS='.' read -r -a labels <<< "$rest"
+  for label in "${labels[@]}"; do
+    ((${#label} <= 63)) || return 1
+    [[ "$label" != -* && "$label" != *- ]] || return 1
+  done
+}
+
 node_version_supported() {
   local version="$1"
   [[ "$version" =~ ^v22\.([0-9]+)\.([0-9]+)$ ]] || return 1
@@ -379,6 +427,11 @@ parse_arguments() {
         bind_confirmed='yes'
         shift
         ;;
+      --public-origin)
+        [[ $# -ge 2 ]] || die '--public-origin requires an http:// or https:// origin'
+        public_origin="$2"
+        shift 2
+        ;;
       --key-file)
         [[ $# -ge 2 ]] || die '--key-file requires a path'
         key_file="$2"
@@ -437,6 +490,14 @@ validate_arguments() {
   if [[ "$bind_address" == '0.0.0.0' && "$bind_confirmed" != yes ]]; then
     die '--bind 0.0.0.0 serves every interface, including networks this Mac joins later; add --expose-confirm to accept that, or name one address'
   fi
+  # Checked here, before anything is built, for the same reason the bind address
+  # is: the server refuses to start on an origin it cannot parse, so a value it
+  # would reject must fail in the first second rather than after the install.
+  # Naming an origin binds nothing and exposes nothing - it only widens the set
+  # of browser origins the console's own sends are accepted from - so it needs no
+  # counterpart to --expose-confirm.
+  [[ -z "$public_origin" ]] || public_origin_valid "$public_origin" ||
+    die "--public-origin must be http:// or https:// with a host, an optional port and nothing else, not: $public_origin"
   # Absolute, because the published shape of this installer is `curl ... | bash`
   # and a relative path would land wherever that shell happened to be. The
   # directory is checked here, before anything is built, so a run that cannot
@@ -922,13 +983,20 @@ write_service_config() {
   imsg_digest="$(file_sha256 "$imsg_binary")"
   sha256_valid "$imsg_digest" || die 'could not compute the imsg SHA-256 digest'
   config_value_valid "$imsg_binary" || die 'the imsg path cannot be stored as configuration'
+  [[ -z "$public_origin" ]] || config_value_valid "$public_origin" ||
+    die 'the public origin cannot be stored as configuration'
 
   install -d -m 700 "$config_directory"
   temporary="$(mktemp "$config_directory/service.env.XXXXXX")"
-  # Four keys: the two an operator might change, and the two that pin imsg.
+  # Four keys always: the two an operator might change, and the two that pin
+  # imsg. A fifth only when a proxy origin was named, because an absent key and
+  # an empty value mean the same thing to the server, and only the absent one
+  # reads as a setting nobody chose rather than one somebody cleared.
   {
     printf '%s\n' "IMESSAGE_PROXY_PORT=$service_port"
     printf '%s\n' "IMESSAGE_PROXY_BIND_ADDRESS=$bind_address"
+    [[ -z "$public_origin" ]] ||
+      printf '%s\n' "IMESSAGE_PROXY_PUBLIC_ORIGIN=$public_origin"
     printf '%s\n' "IMESSAGE_PROXY_IMSG_BIN=$imsg_binary"
     printf '%s\n' "IMESSAGE_PROXY_IMSG_SHA256=$imsg_digest"
   } > "$temporary"
@@ -1098,7 +1166,9 @@ offer_network_exposure() {
   note "  Serving another address puts the API on that network in ${bold}${yellow}plain HTTP${reset}:"
   note "  ${yellow}unencrypted, with the API key the only thing protecting it.${reset}"
   note "  ${dim}Anyone who can reach the port and guess a key can read and send${reset}"
-  note "  ${dim}your messages. Put your own TLS proxy in front if you need this.${reset}"
+  note "  ${dim}your messages. If you want to reach it from outside, leaving it${reset}"
+  note "  ${dim}here and putting your own TLS proxy in front is the safer way,${reset}"
+  note "  ${dim}and that is the next question.${reset}"
   note ''
   answer="$(ask_line 'Address to serve on, or Enter to keep it to this Mac: ')"
   [[ -n "$answer" ]] || {
@@ -1124,6 +1194,90 @@ offer_network_exposure() {
   fi
   note ''
   note "  ${yellow}Serving on ${bold}${bind_address}${reset}${yellow} - reachable from your network.${reset}"
+}
+
+# The second way to be reachable, and the only one that does not put plain HTTP
+# on a network: leave the listener where it is and let a TLS proxy publish it.
+# Asked straight after the bind question because it is the follow-up to whatever
+# that one settled - a run that kept loopback is the proxy-on-this-Mac case, and
+# a run that named an address is the proxy-elsewhere case - and because the
+# answer goes into the same configuration, written a few lines later.
+#
+# It is worth asking rather than leaving to the documentation because the
+# failure it prevents is silent and looks like a bug in the product. The origins
+# the server accepts are derived from what it bound: loopback, the `localhost`
+# spelling, and a specific bound address. A browser at https://messages.example
+# presents an origin this process never sees and matches none of them, so the
+# console loads, looks entirely healthy, and answers 403 to every send. An
+# operator who has just finished putting a proxy in front has no reason to read
+# that as a missing setting.
+#
+# Asked only when --public-origin was not given, and only of somebody who can
+# see it, which is the rule --bind already follows. Enter declines, and declining
+# is what an unanswered run gets: naming no origin is the default, and it is
+# correct for everyone not running a proxy.
+offer_public_origin() {
+  local answer
+  [[ -z "$public_origin" ]] || return 0
+  terminal_available || return 0
+  note ''
+  note "  ${bold}${magenta}REACHING IT AT YOUR OWN DOMAIN${reset}"
+  note ''
+  note "  Will you open the console at a domain of your own - something like"
+  note "  ${cyan}https://messages.example.com${reset}? Name it here and it works from"
+  note "  the first start. Enter skips this, and nothing else changes."
+  note ''
+  note "  This assumes a ${cyan}reverse proxy you already run${reset} terminates TLS and"
+  note "  forwards to this service - Caddy, nginx, a Cloudflare Tunnel. It"
+  note "  does not set one up, and it does not change what this service binds."
+  note ''
+  note "  ${dim}Skip it and that console still loads, then refuses every send:${reset}"
+  note "  ${dim}the name is one this Mac never sees. Naming it now is all it${reset}"
+  note "  ${dim}takes, and saves editing the configuration by hand afterwards.${reset}"
+  note ''
+  note "  ${dim}Scheme, host and an optional port. No path, no trailing slash.${reset}"
+  note ''
+  # Re-asked rather than fatal, which is where this differs from the address
+  # above. By the time this is asked the source is built and the dependency is
+  # installed, and the overwhelmingly likely mistake here - typing the bare name
+  # without a scheme - is one an operator makes precisely because they know their
+  # own domain. Ending a five-minute install on it, and ending it after the
+  # expensive part, would be a poor trade for a keystroke. Enter still declines,
+  # so the loop always has an exit that is not a correct answer, and a terminal
+  # that cannot be read returns empty from ask_line and takes it.
+  local attempts=0
+  while :; do
+    answer="$(ask_line 'Domain you will open the console at (https://...), or Enter for none: ')"
+    [[ -n "$answer" ]] || {
+      note ''
+      note "  ${green}No domain named - reach the console on this Mac.${reset}"
+      return 0
+    }
+    if public_origin_valid "$answer"; then
+      break
+    fi
+    attempts=$((attempts + 1))
+    note ''
+    # The bare name gets its own message rather than being folded into the
+    # general complaint, because it is the one mistake worth naming the fix for.
+    # The suggestion is made only when it would itself be accepted, so that
+    # "messages.example.com/" is not answered with a slash it would also refuse.
+    if [[ "$answer" != http://* && "$answer" != https://* ]] &&
+      public_origin_valid "https://$answer"; then
+      note "  ${yellow}That needs a scheme in front - try ${bold}https://${answer}${reset}"
+    else
+      note "  ${yellow}That is not an origin: a scheme, a host and an optional port,${reset}"
+      note "  ${yellow}with no path, no query and no trailing slash.${reset}"
+    fi
+    # Bounded so a pasted value that can never pass cannot hold the install open
+    # indefinitely in a context nobody is watching.
+    ((attempts < 3)) ||
+      die "that is not an http:// or https:// origin, with a host, an optional port and nothing else: $answer"
+    note ''
+  done
+  public_origin="$answer"
+  note ''
+  note "  ${green}The console will work at ${bold}${public_origin}${reset}${green}.${reset}"
 }
 
 offer_messages_read() {
@@ -1183,6 +1337,12 @@ print_next_steps() {
 
   heading 'OPEN THE CONSOLE'
   note "     ${cyan}http://127.0.0.1:${port}${reset}"
+  # Printed second, and only when one was named. The loopback URL is the one that
+  # works whether or not the proxy in front is up, so it stays the first thing an
+  # operator sees even on an installation that publishes another.
+  if [[ -n "$public_origin" ]]; then
+    note "     ${cyan}${public_origin}${reset} ${dim}- through your TLS proxy${reset}"
+  fi
   note ''
 
   heading 'OR CALL THE API'
@@ -1428,6 +1588,24 @@ self_test() {
     ! bind_address_valid "$candidate" ||
       die "self-test accepted an invalid bind address: ${candidate:-<empty>}"
   done
+  for candidate in https://messages.example.com http://messages.example.com \
+    https://messages.example.com:8443 http://127.0.0.1:8765 https://example.com \
+    http://a.b https://mac-mini.local:443; do
+    public_origin_valid "$candidate" || die "self-test rejected a valid public origin: $candidate"
+  done
+  # A path, a query, a fragment, credentials or a trailing slash are all things a
+  # browser never puts in an Origin header, so accepting one would write down a
+  # value that matches nothing and looks correct while doing it.
+  for candidate in '' messages.example.com ftp://messages.example.com 'https://' \
+    'https://messages.example.com/' 'https://messages.example.com/console' \
+    'https://messages.example.com?a=1' 'https://messages.example.com#top' \
+    'https://user:secret@messages.example.com' 'https://messages.example.com:0' \
+    'https://messages.example.com:70000' 'https://-messages.example.com' \
+    'https://messages.example.com.' 'https://messages..example.com' \
+    'HTTPS://messages.example.com' https://256.1.1.1 https://01.2.3.4; do
+    ! public_origin_valid "$candidate" ||
+      die "self-test accepted an invalid public origin: ${candidate:-<empty>}"
+  done
   config_value_valid /opt/homebrew/bin/caddy || die 'self-test rejected a valid config value'
   for candidate in '' "$(printf 'value\nsecond=1')" "$(printf 'value\r')" 'value # comment'; do
     ! config_value_valid "$candidate" ||
@@ -1484,10 +1662,14 @@ main() {
   imsg_binary="$(resolve_imsg)"
   link_imsg "$imsg_binary"
 
-  # Asked before the configuration is written, because the answer goes into it
-  # and the LaunchAgent rendered from it. Asking later would mean rewriting both.
+  # Asked before the configuration is written, because both answers go into it
+  # and into the LaunchAgent rendered from it. Asking later would mean rewriting
+  # both. They are one decision in two parts - which address to serve on, and
+  # which origin a proxy in front of it publishes - so they are asked together
+  # under one heading rather than leaving the second to the documentation.
   step 'Choosing who can reach it'
   offer_network_exposure
+  offer_public_origin
 
   config_path="$(write_service_config "$imsg_binary")"
   # Every action but bootstrap reads the reviewed configuration from
