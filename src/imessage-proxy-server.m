@@ -383,8 +383,8 @@ static BOOL IsValidPublicOrigin(NSString *value, NSString **normalizedOut) {
     static NSCharacterSet *notAddressCharacters;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        notHostCharacters = [[NSCharacterSet characterSetWithCharactersInString:
-                                                 @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-."]
+        notHostCharacters = [[NSCharacterSet
+            characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-."]
             invertedSet];
         notAddressCharacters = [[NSCharacterSet characterSetWithCharactersInString:@"0123456789."] invertedSet];
     });

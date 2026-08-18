@@ -465,8 +465,9 @@ static void TestPublicOrigins(void) {
     IMP_ASSERT_FALSE(IsValidPublicOrigin(@"http://10.0.0.5:", NULL), @"a colon with no port must be refused");
     IMP_ASSERT_FALSE(IsValidPublicOrigin(@"http://10.0.0.5:80:80", NULL), @"two ports must be refused");
     IMP_ASSERT_FALSE(IsValidPublicOrigin(@"http://10.0.0.5:8a", NULL), @"a letter in the port must be refused");
-    IMP_ASSERT_FALSE(IsValidPublicOrigin(@"http://[::1]:8765", NULL),
-                     @"an IPv6 literal must be refused; the listener is IPv4 and the brackets are not label characters");
+    IMP_ASSERT_FALSE(
+        IsValidPublicOrigin(@"http://[::1]:8765", NULL),
+        @"an IPv6 literal must be refused; the listener is IPv4 and the brackets are not label characters");
 
     // A host of digits and dots is meant to be an address and is held to
     // inet_pton, because the label rules alone would read every one of these as
