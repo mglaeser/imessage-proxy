@@ -124,6 +124,25 @@ and operational model described below.
   exists to end. Absent or empty leaves the derived list exactly as it was, so an
   installation without a terminator is unchanged.
 
+  The installer asks for it. Naming an address to serve on and naming the origin
+  a proxy publishes are two halves of one question — who can reach this — so the
+  guided install asks them together under one heading, and
+  `install.sh --public-origin ORIGIN` answers the second without being asked.
+  Enter declines, which is what an unanswered run gets and what everyone not
+  running a proxy wants. A rejected answer is re-asked rather than fatal, and a
+  name typed without a scheme is answered with the spelling that would work,
+  because the question comes after the build and the dependency install and the
+  likely mistake is one an operator makes precisely because they know their own
+  domain. Three rejected answers still fail closed. The answer is written into
+  the reviewed configuration
+  beside the bind address, so a published installation is configured in one pass
+  instead of being finished afterwards by stopping the service and appending to
+  the file. The question is worth asking because the failure it prevents does not
+  look like a missing setting: the console loads, looks entirely healthy, and
+  answers `403` to every send. Naming an origin binds nothing and exposes
+  nothing, so it is refused as an answer to `--bind 0.0.0.0`, which still needs
+  `--expose-confirm`.
+
 - `config/imessage-proxy.env.example` describes settings that exist. It still
   named the Caddy executable, its digest, the ACME address and the two public
   ports, all of which left with the Caddy edge, and the CLI refuses a

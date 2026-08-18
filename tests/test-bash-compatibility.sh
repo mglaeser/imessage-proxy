@@ -150,6 +150,16 @@ report expiry_ok     expires_days_valid 30
 report expiry_pad    expires_days_valid 007
 report tag_ok        release_tag_valid v1.0.0
 report tag_bad       release_tag_valid 1.0.0
+report origin_ok     public_origin_valid https://messages.example.com
+report origin_port   public_origin_valid https://messages.example.com:8443
+report origin_ipv4   public_origin_valid http://127.0.0.1:8765
+report origin_plain  public_origin_valid messages.example.com
+report origin_slash  public_origin_valid https://messages.example.com/
+report origin_creds  public_origin_valid https://user:secret@messages.example.com
+report origin_upper  public_origin_valid HTTPS://messages.example.com
+report origin_dots   public_origin_valid https://messages..example.com
+report origin_trail  public_origin_valid https://messages.example.com.
+report origin_zero   public_origin_valid https://01.2.3.4
 PROBE
 }
 

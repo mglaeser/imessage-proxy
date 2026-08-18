@@ -65,8 +65,19 @@ The accepted origins are derived from what was bound — loopback, `localhost`, 
 a specific bound address — and `0.0.0.0` adds none, because guessing them would
 accept anything that resolves to this machine. API clients send no `Origin` and
 are unaffected. Behind a TLS terminator the browser presents a name this process
-never sees, which is what `IMESSAGE_PROXY_PUBLIC_ORIGIN` is for; see
-[Publishing it](#publishing-it).
+never sees, which is what `IMESSAGE_PROXY_PUBLIC_ORIGIN` is for. The guided
+install asks for it as the second half of this question, and `--public-origin`
+answers it without being asked:
+
+```bash
+curl -fsSL .../install.sh | bash -s -- \
+  --public-origin 'https://messages.example.com' --no-send-test --no-messages-read
+```
+
+Naming an origin binds nothing and exposes nothing — it only widens the set of
+browser origins the console's own requests are accepted from — so it needs no
+counterpart to `--expose-confirm`, and it does not answer for one. See
+[Publishing it](#publishing-it) for the proxy itself.
 
 A console reached at anything other than `127.0.0.1` or `localhost` is not a
 [secure context](https://developer.mozilla.org/docs/Web/Security/Secure_Contexts),
@@ -274,7 +285,16 @@ match. Same-origin `GET` carries no `Origin` at all, so the page loads and looks
 healthy; every `POST` it makes is refused `403 origin-forbidden`. Send a message
 from the playground and that is what you get.
 
-Name the origin and the console works:
+Name the origin and the console works. On a new installation the installer asks
+for it, and answering it there is the whole of the work:
+
+```bash
+curl -fsSL .../install.sh | bash -s -- \
+  --public-origin 'https://messages.example.com' --no-send-test --no-messages-read
+```
+
+On an installation that already exists, put it in the reviewed configuration and
+re-render the LaunchAgent:
 
 ```bash
 imessage-proxy server-stop

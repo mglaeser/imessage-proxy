@@ -60,6 +60,7 @@ for expected in \
   '--messages-read' \
   '--no-messages-read' \
   '--key-file PATH' \
+  '--public-origin ORIGIN' \
   '--self-test'; do
   assert_contains "$expected" "$help_text"
 done
@@ -162,9 +163,12 @@ if [[ "$(uname -s)" != Darwin ]]; then
 fi
 
 # The installer never enables public HTTPS on its own. --bind serves plain HTTP
-# on an address the operator names; it is not the removed public-HTTPS gate, and
-# nothing here may bring that back.
-if grep -Eq -- '--public|ENABLE_PUBLIC_HTTPS=yes|EXPOSE IMESSAGE PROXY PUBLICLY' "$INSTALLER"; then
+# on an address the operator names, and --public-origin only writes down the
+# origin a proxy somebody else already runs serves at; neither is the removed
+# public-HTTPS gate, and nothing here may bring that back. The flag name is
+# matched precisely rather than by prefix, so --public-origin is allowed while a
+# bare --public, a --publicly, or a revived --public-https still fails.
+if grep -Eq -- '--public($|[^-])|--public-https|ENABLE_PUBLIC_HTTPS=yes|EXPOSE IMESSAGE PROXY PUBLICLY' "$INSTALLER"; then
   fail 'installer must never enable or confirm public exposure'
 fi
 
@@ -194,6 +198,85 @@ fi
 # shellcheck disable=SC2016  # the pattern intentionally matches literal shell syntax
 if ! grep -Fq 'IMESSAGE_PROXY_BIND_ADDRESS=$bind_address' "$INSTALLER"; then
   fail 'the installer must write the chosen bind address into the service configuration'
+fi
+
+# The proxy origin is the second half of the same question. It declares where a
+# TLS terminator somebody else runs publishes this console, so that the console
+# reached there may send; it must never move the listener or stand in for the
+# exposure confirmation.
+if ! grep -Eq "^public_origin=''$" "$INSTALLER"; then
+  fail 'the installer must default to naming no proxy origin'
+fi
+expect_failure '--public-origin requires an http:// or https:// origin' \
+  run_installer --public-origin
+# A path, a query, credentials or a trailing slash are things a browser never
+# sends in an Origin header, so accepting one would write down a value that
+# matches nothing and looks right while doing it.
+for invalid_origin in messages.example.com ftp://messages.example.com 'https://' \
+  'https://messages.example.com/' 'https://messages.example.com/console' \
+  'https://user:secret@messages.example.com' 'https://messages.example.com:70000' \
+  'https://messages..example.com' 'HTTPS://messages.example.com'; do
+  expect_failure '--public-origin must be http:// or https://' \
+    run_installer --public-origin "$invalid_origin"
+done
+# Naming an origin is not naming an address: it must not satisfy the 0.0.0.0
+# confirmation that --bind demands.
+expect_failure 'serves every interface' \
+  run_installer --bind 0.0.0.0 --public-origin https://messages.example.com \
+  --no-send-test --no-messages-read
+# A valid origin gets past validation and stops only at the macOS host check,
+# which is how a run that named one proves it was accepted.
+if [[ "$(uname -s)" != Darwin ]]; then
+  for valid_origin in https://messages.example.com http://127.0.0.1:8765 \
+    https://messages.example.com:8443; do
+    expect_failure 'iMessage Proxy runs only on macOS' \
+      run_installer --public-origin "$valid_origin" --no-send-test --no-messages-read
+  done
+fi
+# The guided question re-asks rather than ending the run. It is asked after the
+# source is built and the dependency installed, and the likely mistake - the bare
+# name without a scheme - is not worth losing that to. Enter still declines, and
+# a value that can never pass still fails closed. Answers are queued in a file
+# because ask_line is called from a command substitution, which is a subshell.
+origin_prompt_probe() {
+  local queue="$temporary/origin-answers"
+  printf '%s\n' "$@" > "$queue"
+  QUEUE="$queue" bash -s -- "$INSTALLER" <<'PROBE'
+source "$1" >/dev/null 2>&1
+terminal_available() { return 0; }
+note() { :; }
+# tail -n +2 rather than sed -i, which needs a different spelling on macOS.
+# Running the queue dry yields the empty answer, so the loop always terminates.
+ask_line() {
+  local answer rest
+  answer="$(head -1 "$QUEUE")"
+  rest="$(tail -n +2 "$QUEUE")"
+  printf '%s\n' "$rest" > "$QUEUE"
+  printf '%s\n' "$answer"
+}
+public_origin=''
+offer_public_origin
+printf 'public_origin=%s\n' "${public_origin:-none}"
+PROBE
+}
+origin_result="$(origin_prompt_probe 'messages.example.com' 'https://messages.example.com')" ||
+  fail 'the domain question ended the install instead of re-asking after a missing scheme'
+assert_contains 'public_origin=https://messages.example.com' "$origin_result"
+origin_result="$(origin_prompt_probe 'messages.example.com' '')" ||
+  fail 'Enter must decline the domain question after a rejected answer'
+assert_contains 'public_origin=none' "$origin_result"
+origin_result="$(origin_prompt_probe '')" ||
+  fail 'Enter must decline the domain question'
+assert_contains 'public_origin=none' "$origin_result"
+if origin_prompt_probe 'a b' 'a b' 'a b' >/dev/null 2>&1; then
+  fail 'a domain that can never pass must still fail closed'
+fi
+
+# The origin must reach the service configuration, or the console keeps refusing
+# every send while the installer reported that it would not.
+# shellcheck disable=SC2016  # the pattern intentionally matches literal shell syntax
+if ! grep -Fq 'IMESSAGE_PROXY_PUBLIC_ORIGIN=$public_origin' "$INSTALLER"; then
+  fail 'the installer must write the chosen public origin into the service configuration'
 fi
 
 # The generated configuration must define exactly the keys the CLI allowlists,
