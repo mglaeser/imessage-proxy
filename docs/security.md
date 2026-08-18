@@ -54,13 +54,26 @@ second explicit confirmation rather than being one more address.
 
 **The console cannot be driven from another origin, and exposing the port
 exposes the API rather than the console.** The browser origins the server accepts
-are derived from what it bound, never configured beside it, so the two cannot
-drift apart: the loopback origin, the `localhost` spelling, and the bound address
-when it is a specific one. A request carrying any other `Origin` is refused
-`403`. `0.0.0.0` adds nothing to that list, because enumerating the machine's
-interfaces to guess would turn it into "anything that resolves here" — so a
-browser reaching the console over some other interface is refused, while API
-clients, which send no `Origin` header, are unaffected.
+are derived from what it bound: the loopback origin, the `localhost` spelling, and
+the bound address when it is a specific one. A request carrying any other
+`Origin` is refused `403`. `0.0.0.0` adds nothing to that list, because
+enumerating the machine's interfaces to guess would turn it into "anything that
+resolves here" — so a browser reaching the console over some other interface is
+refused, while API clients, which send no `Origin` header, are unaffected.
+
+An installation published behind a TLS terminator is the one case that derivation
+cannot reach: the console is loaded at a name over `https`, and this process
+never learns either. `IMESSAGE_PROXY_PUBLIC_ORIGIN` names that one origin and
+appends it; it never replaces what was derived, it accepts a scheme, a host and an
+optional port and nothing else, and a value that is not an origin refuses to
+start rather than being ignored. Set it to exactly the origin you serve the
+console at and nothing wider — there is no wildcard, and `*` is refused.
+
+What that widens is narrow, because the origin check is defence in depth here
+rather than the access control. The console holds its key in `sessionStorage`,
+sends it as `Authorization: Bearer`, and fetches with `credentials: "omit"`, so no
+cookie is attached to a cross-site request and no other origin can read the key
+or set that header. The bearer key remains the thing that decides.
 
 **Console assets need no credential; the API always does.** The server answers
 exactly four request paths — `/`, `/index.html`, `/app.js`, `/styles.css` — from
