@@ -90,6 +90,24 @@ and operational model described below.
   startup file rather than printing instructions, idempotently, and says what it
   changed. The administrator key is still written only to standard output and is
   never captured or echoed.
+- Releases attach `imessage-proxy-server-VERSION-macos-universal` next to the
+  source archive: one file carrying both arm64 and x86_64, built on the release
+  runner from the same commit the archive contains, listed in the same
+  `SHA256SUMS`, and covered by the same build-provenance attestation. It is
+  ad-hoc signed — which is what Apple silicon requires to run at all — and
+  neither Developer ID signed nor notarized, because this repository holds no
+  signing identity. `docs/install.md` says what that costs an operator, including
+  the quarantine attribute a browser download adds and a `curl` download does
+  not.
+
+  The installer is unchanged and still builds from source. The binary is for
+  operators who would rather not, and it is the same code either way.
+
+  CI builds the universal binary on every pull request and checks with `lipo`
+  that both architectures are present, so a break in the release path is a failed
+  pull request rather than a failed release. That is the same lesson the stuck
+  1.0.0 draft taught: nothing exercised the release path until a tag existed.
+
 - `IMESSAGE_PROXY_PUBLIC_ORIGIN` names one extra browser origin the console may
   be loaded from, which is what an installation published behind a TLS terminator
   needs. The origins the server accepts are otherwise derived from what it bound,
@@ -114,7 +132,6 @@ and operational model described below.
   failure on its second line. A new invariant checks every key the example names
   against the keys the CLI accepts, and the required keys in the other direction,
   so it cannot rot again silently.
-
 - `make test-native` runs a native unit tier that compiles the shipping
   Objective-C sources with ARC and exercises their leaf functions directly,
   rather than only through the shell tests that drive the built server. It runs

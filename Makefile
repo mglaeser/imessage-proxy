@@ -41,6 +41,11 @@ TEST_C_SOURCES := \
 	tests/native/linux/darwin-shim.c
 RELEASE_BINARY := $(BUILD_DIR)/imessage-proxy-server
 DEBUG_BINARY := $(BUILD_DIR)/imessage-proxy-server-debug
+# Built into its own directory so it never shadows the single-architecture
+# binary the rest of the targets build, install and test.
+UNIVERSAL_ARCHS := arm64 x86_64
+UNIVERSAL_DIR := $(BUILD_DIR)/universal
+UNIVERSAL_BINARY := $(UNIVERSAL_DIR)/imessage-proxy-server
 SHELL_SOURCES := \
 	bin/imessage-proxy \
 	scripts/install.sh \
@@ -80,7 +85,7 @@ SDKFLAGS := $(if $(MACOS_SDK_PATH),-isysroot "$(MACOS_SDK_PATH)",)
 FRAMEWORKS := -framework Foundation -framework Security
 LIBRARIES := -lsqlite3
 
-.PHONY: all analyze build check clean debug format help install lint test test-bash-compat test-installer test-native test-schema test-uninstaller test-ui test-workflows uninstall version
+.PHONY: all analyze build check clean debug format help install lint release-binary test test-bash-compat test-installer test-native test-schema test-uninstaller test-ui test-workflows uninstall version
 
 all: build
 
@@ -91,6 +96,36 @@ $(RELEASE_BINARY): $(SOURCES) $(HEADERS) $(VERSION_FILE) Makefile
 	@mkdir -p "$(BUILD_DIR)"
 	"$(CLANG)" $(SDKFLAGS) $(CPPFLAGS) $(CFLAGS) $(OBJCFLAGS) -O2 $(LDFLAGS) \
 		$(FRAMEWORKS) $(LIBRARIES) -o "$@" $(SOURCES)
+
+# The artifact a release attaches, defined once so that CI and .github/workflows
+# /release.yml build the same thing. Two copies of this recipe in two workflows
+# would drift, and the copy nothing runs until a tag exists is the one that
+# breaks - which is how the 1.0.0 draft came to sit empty for a week.
+#
+# Ad-hoc signed explicitly rather than relying on the linker: the linker signs
+# only the slice it must, and `codesign --verify --strict` on a fat binary with
+# one unsigned slice fails. It is also what bin/imessage-proxy does after it
+# builds, and what its check-host verification expects, so the released binary
+# and a locally built one carry the same kind of signature.
+release-binary: ## Build, ad-hoc sign, and verify the universal macOS binary a release attaches.
+	@$(MAKE) --no-print-directory _require-macos
+	@mkdir -p "$(UNIVERSAL_DIR)"
+	"$(CLANG)" $(SDKFLAGS) $(CPPFLAGS) $(CFLAGS) $(OBJCFLAGS) -O2 \
+		$(foreach arch,$(UNIVERSAL_ARCHS),-arch $(arch)) \
+		$(LDFLAGS) $(FRAMEWORKS) $(LIBRARIES) -o "$(UNIVERSAL_BINARY)" $(SOURCES)
+	codesign --force --sign - "$(UNIVERSAL_BINARY)"
+	codesign --verify --strict "$(UNIVERSAL_BINARY)"
+	@architectures="$$(lipo -archs "$(UNIVERSAL_BINARY)")"; \
+	for required in $(UNIVERSAL_ARCHS); do \
+		case " $$architectures " in \
+			*" $$required "*) ;; \
+			*) printf 'error: universal binary is missing %s; lipo reports: %s\n' \
+				"$$required" "$$architectures" >&2; exit 1 ;; \
+		esac; \
+	done; \
+	printf 'universal binary: %s (%s)\n' "$(UNIVERSAL_BINARY)" "$$architectures"
+	@test "$$("$(UNIVERSAL_BINARY)" version)" = "$(VERSION)" || { \
+		printf 'error: universal binary reports an unexpected version\n' >&2; exit 1; }
 
 debug: $(DEBUG_BINARY) ## Build the native server with debug symbols and assertions.
 

@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   source-release:
-    name: Source archive and provenance
+    name: Source archive, binary, and provenance
     if: github.ref_type == 'tag'
     runs-on: macos-15
     timeout-minutes: 30
@@ -129,12 +129,41 @@ jobs:
             gzip -n -9 > "dist/imessage-proxy-$VERSION.tar.gz"
           test "$(tar -xOzf "dist/imessage-proxy-$VERSION.tar.gz" \
             "imessage-proxy-$VERSION/REVISION")" = "$GITHUB_SHA"
+      # Built from the tagged tree that was just archived, on the same runner, so
+      # the binary and the source in this release are the same commit by
+      # construction rather than by convention. The recipe lives in the Makefile
+      # as `release-binary` and CI runs the same target on every pull request, so
+      # this path is exercised before a tag exists rather than at tag time.
+      #
+      # It carries no Developer ID signature and is not notarized - this
+      # repository holds no signing identity - only the ad-hoc signature that
+      # Apple silicon requires to execute at all. What that costs an operator is
+      # in docs/install.md.
+      - name: Build the universal server binary
+        env:
+          VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          make release-binary STRICT=1
+          cp build/universal/imessage-proxy-server \
+            "dist/imessage-proxy-server-$VERSION-macos-universal"
+      # One step writes the whole file rather than each artifact appending its
+      # own line, so a re-run cannot leave a SHA256SUMS with an entry twice or a
+      # partial list if an earlier step is skipped.
+      - name: Checksum the release artifacts
+        env:
+          VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
           cd dist
-          shasum -a 256 "imessage-proxy-$VERSION.tar.gz" > SHA256SUMS
-      - name: Attest source archive
+          shasum -a 256 \
+            "imessage-proxy-$VERSION.tar.gz" \
+            "imessage-proxy-server-$VERSION-macos-universal" > SHA256SUMS
+          shasum -a 256 --check SHA256SUMS
+      - name: Attest the release artifacts
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: dist/imessage-proxy-${{ steps.metadata.outputs.version }}.tar.gz
+          subject-path: |
+            dist/imessage-proxy-${{ steps.metadata.outputs.version }}.tar.gz
+            dist/imessage-proxy-server-${{ steps.metadata.outputs.version }}-macos-universal
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -162,16 +191,23 @@ jobs:
           verify_remote_tag
           archive="dist/imessage-proxy-${{ steps.metadata.outputs.version }}.tar.gz"
           archive_name="${archive##*/}"
+          binary="dist/imessage-proxy-server-${{ steps.metadata.outputs.version }}-macos-universal"
+          binary_name="${binary##*/}"
           if release_is_draft="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null)"; then
             if [[ "$release_is_draft" != true ]]; then
               temporary="$(mktemp -d)"
               trap 'rm -rf -- "$temporary"' EXIT
+              # Every asset is compared, not just the archive. An asset left out
+              # of this list would let a published release that is missing it, or
+              # carries a stale copy of it, report itself as already matching.
               gh release download "$GITHUB_REF_NAME" \
                 --dir "$temporary" \
                 --pattern SHA256SUMS \
-                --pattern "$archive_name"
+                --pattern "$archive_name" \
+                --pattern "$binary_name"
               cmp -s dist/SHA256SUMS "$temporary/SHA256SUMS"
               cmp -s "$archive" "$temporary/$archive_name"
+              cmp -s "$binary" "$temporary/$binary_name"
               verify_remote_tag
               printf 'Published release assets already match this tag; no mutation required.\n'
               exit 0
@@ -183,6 +219,6 @@ jobs:
               --title "iMessage Proxy $GITHUB_REF_NAME" \
               --verify-tag
           fi
-          gh release upload "$GITHUB_REF_NAME" dist/SHA256SUMS "$archive" --clobber
+          gh release upload "$GITHUB_REF_NAME" dist/SHA256SUMS "$archive" "$binary" --clobber
           verify_remote_tag
           gh release edit "$GITHUB_REF_NAME" --draft=false
