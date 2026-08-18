@@ -19,7 +19,7 @@ Only the latest stable release on the default branch receives security updates.
 Use [GitHub's private vulnerability reporting](https://github.com/mglaeser/imessage-proxy/security/advisories/new). Include, where possible:
 
 - the affected version or commit;
-- the macOS, Caddy, and `imsg` versions;
+- the macOS and `imsg` versions;
 - a concise description of the impact and trust boundary crossed;
 - minimal reproduction steps or a proof of concept;
 - whether message contents, credentials, recipients, or host access may have been exposed;
@@ -46,7 +46,7 @@ These are targets, not guarantees for an unfunded project. Please give maintaine
 Examples of in-scope issues include:
 
 - bypassing API-key authentication, scope, expiry, or revocation;
-- reaching the native server outside its private Unix socket;
+- reaching the API without a valid bearer key, or from an origin the server did not bind;
 - invoking an unsupported dependency command or caller-selected argument;
 - bypassing the outbound target allowlist;
 - leaking message content, recipients, credentials, or secrets into logs;
@@ -72,8 +72,8 @@ If compromise is suspected:
    defense in depth.
 2. Preserve sanitized logs and version information.
 3. Revoke and replace every affected API key from a trusted administrator.
-4. Review the send-target allowlist, audit metadata, Caddy edge, exact external
-   port mappings, and public IPv4 network path.
+4. Review the send-target allowlist, audit metadata, and the address the
+   listener is bound to.
 5. Update to a fixed release before restoring service.
 
 See [Security model](docs/security.md) for preventive controls and [Install and operate](docs/install.md) for rotation and recovery procedures.

@@ -82,6 +82,39 @@ prints the steps and, because the questions were answered on the command line,
 does not pause on them. Until the grant is in place `/api/status` reports
 `messages-unavailable` and sending is unaffected.
 
+## The prebuilt binary
+
+Every release since 1.0.0 attaches `imessage-proxy-server-VERSION-macos-universal`
+alongside the source archive. It is universal — arm64 and x86_64 in one file —
+built on the release runner from the same commit the archive contains, and
+covered by the same `SHA256SUMS` and the same build-provenance attestation.
+
+```bash
+version=1.0.0
+base="https://github.com/mglaeser/imessage-proxy/releases/download/v$version"
+curl -fsSLO --proto '=https' --tlsv1.2 "$base/imessage-proxy-server-$version-macos-universal"
+curl -fsSLO --proto '=https' --tlsv1.2 "$base/SHA256SUMS"
+shasum -a 256 --check --ignore-missing SHA256SUMS
+gh attestation verify "imessage-proxy-server-$version-macos-universal" --repo mglaeser/imessage-proxy
+```
+
+Read this before you use it:
+
+- **It is not signed with a Developer ID and it is not notarized.** This
+  repository holds no signing identity. The binary is ad-hoc signed, which is
+  what Apple silicon requires in order to execute at all, and nothing more.
+  Downloading it with `curl` as above leaves no quarantine attribute; saving it
+  from a browser does, and Gatekeeper will then refuse it until you run
+  `xattr -d com.apple.quarantine <file>`. Prefer `curl`, and verify the checksum
+  either way.
+- **Full Disk Access is granted per binary.** macOS keys the grant to this exact
+  file, so replacing it on upgrade means granting it again — the same as when the
+  installer rebuilds from source.
+- **The installer does not use it.** `scripts/install.sh` still builds from the
+  source archive, because a build on your Mac is what makes the running binary
+  something you can reproduce. The prebuilt binary is for operators who want to
+  skip the toolchain, and it is the same code either way.
+
 ## Install from a checkout
 
 ```bash
