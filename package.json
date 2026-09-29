@@ -15,6 +15,6 @@
   },
   "devDependencies": {
     "@redocly/cli": "2.52.0",
-    "markdownlint-cli2": "0.23.2"
+    "markdownlint-cli2": "0.23.3"
   }
 }
